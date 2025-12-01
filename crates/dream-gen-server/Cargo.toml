@@ -1,0 +1,17 @@
+[package]
+name = "dream-gen-server"
+version = "0.1.0"
+edition = "2021"
+description = "GenServer pattern for DREAM"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+dream-core = { path = "../dream-core" }
+dream-runtime = { path = "../dream-runtime" }
+dream-process = { path = "../dream-process" }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
