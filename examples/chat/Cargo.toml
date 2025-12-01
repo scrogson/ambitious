@@ -1,0 +1,28 @@
+[package]
+name = "dream-chat"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-user chat application example using DREAM"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "chat-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "chat-client"
+path = "src/bin/chat-client.rs"
+
+[dependencies]
+dream = { path = "../../crates/dream" }
+dream-core = { path = "../../crates/dream-core" }
+dream-runtime = { path = "../../crates/dream-runtime" }
+dream-process = { path = "../../crates/dream-process" }
+dream-gen-server = { path = "../../crates/dream-gen-server" }
+dream-supervisor = { path = "../../crates/dream-supervisor" }
+
+tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
