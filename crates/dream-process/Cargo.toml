@@ -1,0 +1,17 @@
+[package]
+name = "dream-process"
+description = "Process primitives for DREAM - spawn, link, monitor, send/receive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dream-core = { workspace = true }
+dream-runtime = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

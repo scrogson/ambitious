@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 /// Internal state shared between the process and its handle.
 #[derive(Debug)]
-pub(crate) struct ProcessState {
+pub struct ProcessState {
     /// The process identifier.
     pub pid: Pid,
     /// Whether the process is trapping exits.
@@ -63,7 +63,7 @@ pub struct ProcessHandle {
 
 impl ProcessHandle {
     /// Creates a new process handle.
-    pub(crate) fn new(
+    pub fn new(
         pid: Pid,
         sender: MailboxSender,
         state: Arc<RwLock<ProcessState>>,
@@ -167,7 +167,7 @@ impl ProcessHandle {
     }
 
     /// Marks the process as terminated.
-    pub(crate) fn mark_terminated(&self, reason: ExitReason) {
+    pub fn mark_terminated(&self, reason: ExitReason) {
         let mut state = self.state.write().unwrap();
         state.terminated = true;
         state.exit_reason = Some(reason);

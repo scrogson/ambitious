@@ -21,8 +21,8 @@ mod registry;
 
 pub use context::Context;
 pub use error::{RuntimeError, SendError, SpawnError};
-pub use mailbox::Mailbox;
-pub use process_handle::ProcessHandle;
+pub use mailbox::{Mailbox, MailboxSender};
+pub use process_handle::{ProcessHandle, ProcessState};
 pub use registry::ProcessRegistry;
 
 // Re-export core types for convenience

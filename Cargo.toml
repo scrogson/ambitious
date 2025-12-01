@@ -13,6 +13,7 @@ repository = "https://github.com/scrogson/dream"
 # Internal crates
 dream-core = { path = "crates/dream-core" }
 dream-runtime = { path = "crates/dream-runtime" }
+dream-process = { path = "crates/dream-process" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

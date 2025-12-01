@@ -47,7 +47,7 @@ pub struct Context {
 
 impl Context {
     /// Creates a new context for a process.
-    pub(crate) fn new(
+    pub fn new(
         pid: Pid,
         mailbox: Mailbox,
         state: Arc<RwLock<ProcessState>>,
