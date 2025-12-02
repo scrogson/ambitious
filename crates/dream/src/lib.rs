@@ -127,6 +127,11 @@ pub mod registry;
 /// See [`channel`] module for details.
 pub mod channel;
 
+/// Distributed Presence tracking for real-time applications.
+///
+/// See [`presence`] module for details.
+pub mod presence;
+
 /// Distribution module for connecting DREAM nodes.
 ///
 /// See [`distribution`] module for details.

@@ -1,9 +1,11 @@
 //! Room channel implementation using the Channel abstraction.
 //!
-//! This demonstrates how to use DREAM Channels for chat rooms.
+//! This demonstrates how to use DREAM Channels for chat rooms,
+//! including Phoenix-style Presence tracking for real-time user lists.
 
 use async_trait::async_trait;
 use dream::channel::{Channel, HandleResult, JoinError, JoinResult, Socket};
+use dream::presence;
 use serde::{Deserialize, Serialize};
 
 /// Custom state stored in each socket's assigns.
@@ -44,6 +46,15 @@ pub enum RoomOutEvent {
     PresenceState { users: Vec<String> },
 }
 
+/// Metadata tracked in Presence for each user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPresenceMeta {
+    /// User's nickname.
+    pub nick: String,
+    /// User's online status.
+    pub status: String,
+}
+
 /// The room channel handler.
 pub struct RoomChannel;
 
@@ -77,6 +88,15 @@ impl Channel for RoomChannel {
         }
 
         tracing::info!(room = %room_name, nick = %payload.nick, "User joining room");
+
+        // Track presence for this user in the room
+        let presence_key = format!("user:{}", socket.pid);
+        let presence_meta = UserPresenceMeta {
+            nick: payload.nick.clone(),
+            status: "online".to_string(),
+        };
+        presence::track_pid(topic, &presence_key, socket.pid, presence_meta);
+        tracing::debug!(topic = %topic, key = %presence_key, "Tracked presence");
 
         // Set up assigns with user info
         let assigns = RoomAssigns {
@@ -135,6 +155,12 @@ impl Channel for RoomChannel {
             reason = ?reason,
             "User leaving room"
         );
+
+        // Untrack presence for this user
+        let topic = format!("room:{}", socket.assigns.room_name);
+        let presence_key = format!("user:{}", socket.pid);
+        presence::untrack_pid(&topic, &presence_key, socket.pid);
+        tracing::debug!(topic = %topic, key = %presence_key, "Untracked presence");
     }
 }
 

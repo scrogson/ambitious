@@ -368,17 +368,24 @@ impl Session {
     /// Handle list users command.
     async fn handle_list_users(&mut self, room_name: String) {
         let topic = format!("room:{}", room_name);
-        let group = format!("channel:{}", topic);
 
-        // Get members from pg - we can't easily get nicknames without
-        // a centralized room state, so just return the count for now
-        let members = dream::dist::pg::get_members(&group);
-        let count = members.len();
+        // Use Presence to get the list of users with their metadata
+        let presences = dream::presence::list(&topic);
 
-        // For now, just report the count
+        // Extract nicknames from presence metadata
+        let users: Vec<String> = presences
+            .values()
+            .flat_map(|state| {
+                state.metas.iter().filter_map(|meta| {
+                    meta.decode::<crate::channel::UserPresenceMeta>()
+                        .map(|m| m.nick)
+                })
+            })
+            .collect();
+
         self.send_event(ServerEvent::UserList {
             room: room_name,
-            users: vec![format!("{} users online", count)],
+            users,
         })
         .await;
     }
