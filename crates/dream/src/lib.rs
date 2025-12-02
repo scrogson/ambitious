@@ -122,6 +122,11 @@ pub mod distribution;
 /// See [`registry`] module for details.
 pub mod registry;
 
+/// Phoenix-style Channels for real-time communication.
+///
+/// See [`channel`] module for details.
+pub mod channel;
+
 /// Distribution module for connecting DREAM nodes.
 ///
 /// See [`distribution`] module for details.

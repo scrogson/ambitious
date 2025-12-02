@@ -28,6 +28,7 @@
 //!
 //! The protocol uses length-prefixed binary messages (postcard serialization).
 
+mod channel;
 mod protocol;
 mod pubsub;
 mod registry;

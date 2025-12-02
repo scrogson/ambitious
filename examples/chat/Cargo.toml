@@ -21,6 +21,7 @@ dream-process = { path = "../../crates/dream-process" }
 dream-gen-server = { path = "../../crates/dream-gen-server" }
 dream-supervisor = { path = "../../crates/dream-supervisor" }
 
+async-trait = "0.1"
 tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
