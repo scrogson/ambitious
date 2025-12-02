@@ -22,6 +22,7 @@
 //! The protocol uses length-prefixed binary messages (postcard serialization).
 
 mod protocol;
+mod pubsub;
 mod registry;
 mod room;
 mod server;
@@ -42,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     tracing::info!("Starting DREAM Chat Server");
+
+    // Start the PubSub server
+    let pubsub_pid = pubsub::PubSub::start().await.expect("Failed to start pubsub");
+    dream::register(pubsub::PubSub::NAME, pubsub_pid);
+    tracing::info!(pid = ?pubsub_pid, "PubSub started and registered");
 
     // Start the room registry and register it by name
     let registry_pid = registry::Registry::start().await.expect("Failed to start registry");

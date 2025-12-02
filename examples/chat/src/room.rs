@@ -3,6 +3,7 @@
 //! Each room is a GenServer that manages its members and broadcasts messages.
 
 use crate::protocol::{RoomInfo, ServerEvent};
+use crate::pubsub::PubSub;
 use dream::gen_server::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -104,18 +105,21 @@ impl GenServer for Room {
     }
 
     async fn handle_cast(msg: RoomCast, state: &mut RoomState) -> CastResult<RoomState> {
+        let topic = room_topic(&state.name);
+
         match msg {
             RoomCast::Join { pid, nick } => {
                 tracing::info!(room = %state.name, nick = %nick, "User joined");
 
-                // Notify existing members
+                // Notify existing members (broadcast before subscribing new user)
                 let event = ServerEvent::UserJoined {
                     room: state.name.clone(),
                     nick: nick.clone(),
                 };
-                broadcast_to_members(state, &event, Some(pid));
+                PubSub::broadcast(&topic, &UserEvent(event));
 
-                // Add the new member
+                // Now subscribe the new member to room events
+                PubSub::subscribe_pid(&topic, pid);
                 state.members.insert(pid, nick);
 
                 CastResult::NoReply(RoomState {
@@ -127,12 +131,15 @@ impl GenServer for Room {
                 if let Some(nick) = state.members.remove(&pid) {
                     tracing::info!(room = %state.name, nick = %nick, "User left");
 
+                    // Unsubscribe from room events
+                    PubSub::unsubscribe_pid(&topic, pid);
+
                     // Notify remaining members
                     let event = ServerEvent::UserLeft {
                         room: state.name.clone(),
                         nick,
                     };
-                    broadcast_to_members(state, &event, None);
+                    PubSub::broadcast(&topic, &UserEvent(event));
                 }
 
                 CastResult::NoReply(RoomState {
@@ -147,7 +154,7 @@ impl GenServer for Room {
                         from: nick.clone(),
                         text,
                     };
-                    broadcast_to_members(state, &event, None);
+                    PubSub::broadcast(&topic, &UserEvent(event));
                 }
 
                 CastResult::NoReply(RoomState {
@@ -183,13 +190,7 @@ impl GenServer for Room {
     }
 }
 
-/// Broadcast an event to all room members except the excluded PID.
-fn broadcast_to_members(state: &RoomState, event: &ServerEvent, exclude: Option<Pid>) {
-    let handle = dream::handle();
-    let payload = postcard::to_allocvec(&UserEvent(event.clone())).unwrap();
-    for &pid in state.members.keys() {
-        if Some(pid) != exclude {
-            let _ = handle.registry().send_raw(pid, payload.clone());
-        }
-    }
+/// Generate the PubSub topic for a room.
+fn room_topic(room_name: &str) -> String {
+    format!("room:{}", room_name)
 }
