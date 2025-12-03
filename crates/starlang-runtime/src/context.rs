@@ -198,11 +198,10 @@ impl Context {
         };
 
         // Remove from target's monitored_by
-        if let Some(target_pid) = target {
-            if let Some(target_handle) = self.registry.get(target_pid) {
+        if let Some(target_pid) = target
+            && let Some(target_handle) = self.registry.get(target_pid) {
                 target_handle.remove_monitored_by(reference);
             }
-        }
     }
 
     /// Sends an exit signal to another process.

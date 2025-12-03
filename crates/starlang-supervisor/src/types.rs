@@ -11,8 +11,10 @@ use std::time::Duration;
 
 /// Supervision strategy that determines how child failures are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Strategy {
     /// If a child process terminates, only that process is restarted.
+    #[default]
     OneForOne,
     /// If a child process terminates, all other child processes are
     /// terminated and then all child processes are restarted.
@@ -22,16 +24,13 @@ pub enum Strategy {
     RestForOne,
 }
 
-impl Default for Strategy {
-    fn default() -> Self {
-        Strategy::OneForOne
-    }
-}
 
 /// Determines when a child should be restarted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RestartType {
     /// The child is always restarted, regardless of exit reason.
+    #[default]
     Permanent,
     /// The child is restarted only if it terminates abnormally.
     Transient,
@@ -39,11 +38,6 @@ pub enum RestartType {
     Temporary,
 }
 
-impl Default for RestartType {
-    fn default() -> Self {
-        RestartType::Permanent
-    }
-}
 
 /// Determines how a child should be terminated during shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,18 +58,15 @@ impl Default for ShutdownType {
 
 /// The type of a child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ChildType {
     /// A worker process (leaf node in supervision tree).
+    #[default]
     Worker,
     /// A supervisor process (internal node in supervision tree).
     Supervisor,
 }
 
-impl Default for ChildType {
-    fn default() -> Self {
-        ChildType::Worker
-    }
-}
 
 /// Error returned when starting a child fails.
 #[derive(Debug, Clone)]

@@ -222,8 +222,8 @@ mod tests {
     fn test_unit_type() {
         let unit: () = ();
         let bytes = unit.encode();
-        let decoded = <()>::decode(&bytes).unwrap();
-        assert_eq!(unit, decoded);
+        <()>::decode(&bytes).unwrap();
+        assert_eq!(unit, ());
     }
 
     #[test]

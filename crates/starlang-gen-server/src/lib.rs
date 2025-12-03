@@ -248,11 +248,8 @@ mod tests {
         let result_clone = result.clone();
 
         let _client_pid = handle.spawn(move || async move {
-            match call::<Counter>(server_pid, CounterCall::Get, Duration::from_secs(5)).await {
-                Ok(value) => {
-                    result_clone.store(value, Ordering::SeqCst);
-                }
-                Err(_) => {}
+            if let Ok(value) = call::<Counter>(server_pid, CounterCall::Get, Duration::from_secs(5)).await {
+                result_clone.store(value, Ordering::SeqCst);
             }
         });
 

@@ -165,7 +165,7 @@ impl AppController {
                 start_fn(&self.handle, &app_config)
             };
 
-            let start_result = result.map_err(|e| StartError::StartFailed(e))?;
+            let start_result = result.map_err(StartError::StartFailed)?;
 
             // Record as running
             let mut running = self.running.write().unwrap();

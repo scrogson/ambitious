@@ -32,11 +32,13 @@ use std::fmt;
 /// assert!(!reason.is_normal());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ExitReason {
     /// Process completed successfully.
     ///
     /// This is the standard exit reason when a process finishes its work
     /// without errors.
+    #[default]
     Normal,
 
     /// Process was asked to shut down.
@@ -133,11 +135,6 @@ impl ExitReason {
     }
 }
 
-impl Default for ExitReason {
-    fn default() -> Self {
-        ExitReason::Normal
-    }
-}
 
 impl fmt::Display for ExitReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

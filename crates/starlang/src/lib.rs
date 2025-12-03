@@ -279,20 +279,26 @@ mod tests {
                 state: &mut (),
             ) -> CallResult<(), String> {
                 match request {
-                    TestCall::Ping => CallResult::Reply("pong".to_string(), *state),
+                    TestCall::Ping => {
+                        *state;
+                        CallResult::Reply("pong".to_string(), ())
+                    },
                 }
             }
 
             async fn handle_cast(_: (), state: &mut ()) -> CastResult<()> {
-                CastResult::NoReply(*state)
+                *state;
+                CastResult::NoReply(())
             }
 
             async fn handle_info(_: Vec<u8>, state: &mut ()) -> InfoResult<()> {
-                InfoResult::NoReply(*state)
+                *state;
+                InfoResult::NoReply(())
             }
 
             async fn handle_continue(_: ContinueArg, state: &mut ()) -> ContinueResult<()> {
-                ContinueResult::NoReply(*state)
+                *state;
+                ContinueResult::NoReply(())
             }
         }
 

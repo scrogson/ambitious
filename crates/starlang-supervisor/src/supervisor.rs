@@ -179,7 +179,7 @@ impl SupervisorState {
                 }
 
                 // Collect child IDs to restart (from pos onwards)
-                let to_restart: Vec<String> = self.child_order[pos..].iter().cloned().collect();
+                let to_restart: Vec<String> = self.child_order[pos..].to_vec();
                 for child_id in to_restart {
                     if let Err(e) = self.start_child(&child_id).await {
                         return Err(ExitReason::error(format!(
