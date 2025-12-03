@@ -262,6 +262,14 @@ struct Args {
     /// Path to config file
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Nickname to set on connect
+    #[arg(short, long)]
+    nick: Option<String>,
+
+    /// Room to join on connect
+    #[arg(short, long)]
+    room: Option<String>,
 }
 
 /// Which panel is currently focused
@@ -511,6 +519,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+
+    // Auto-set nickname if provided
+    if let Some(ref nick) = args.nick {
+        let frame = frame_message(&ClientCommand::Nick(nick.clone()));
+        writer.write_all(&frame).await?;
+    }
+
+    // Auto-join room if provided (only if nick is also set)
+    if let Some(ref room) = args.room {
+        if args.nick.is_some() {
+            let frame = frame_message(&ClientCommand::Join(room.clone()));
+            writer.write_all(&frame).await?;
+        }
+    }
 
     // Main event loop
     let result = run_app(&mut terminal, &mut app, &mut rx, &mut writer).await;
