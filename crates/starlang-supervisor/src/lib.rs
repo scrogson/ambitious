@@ -164,13 +164,9 @@ mod tests {
                         async move {
                             let pid = h.spawn(|| async move {
                                 // Simple worker that waits for messages
-                                loop {
-                                    match starlang_runtime::recv_timeout(Duration::from_secs(60))
-                                        .await
-                                    {
-                                        Ok(Some(_)) => {}
-                                        _ => break,
-                                    }
+                                while let Ok(Some(_)) =
+                                    starlang_runtime::recv_timeout(Duration::from_secs(60)).await
+                                {
                                 }
                             });
                             Ok(pid)

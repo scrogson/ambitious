@@ -31,8 +31,7 @@ use std::fmt;
 /// let reason = ExitReason::Error("connection lost".to_string());
 /// assert!(!reason.is_normal());
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExitReason {
     /// Process completed successfully.
     ///
@@ -134,7 +133,6 @@ impl ExitReason {
         ExitReason::ShutdownReason(msg.to_string())
     }
 }
-
 
 impl fmt::Display for ExitReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

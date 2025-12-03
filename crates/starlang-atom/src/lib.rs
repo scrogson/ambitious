@@ -91,7 +91,7 @@ impl Atom {
     ///
     /// If the string has been interned before, returns the existing atom.
     /// Otherwise, adds it to the atom table.
-    pub fn from_str(s: &str) -> Self {
+    pub fn new(s: &str) -> Self {
         table().intern(s)
     }
 
@@ -114,19 +114,19 @@ impl Atom {
 
 impl From<&str> for Atom {
     fn from(s: &str) -> Self {
-        Atom::from_str(s)
+        Atom::new(s)
     }
 }
 
 impl From<String> for Atom {
     fn from(s: String) -> Self {
-        Atom::from_str(&s)
+        Atom::new(&s)
     }
 }
 
 impl From<&String> for Atom {
     fn from(s: &String) -> Self {
-        Atom::from_str(s)
+        Atom::new(s)
     }
 }
 
@@ -159,7 +159,7 @@ impl<'de> Deserialize<'de> for Atom {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Atom::from_str(&s))
+        Ok(Atom::new(&s))
     }
 }
 
@@ -175,7 +175,7 @@ impl<'de> Deserialize<'de> for Atom {
 #[macro_export]
 macro_rules! atom {
     ($s:expr) => {
-        $crate::Atom::from_str($s)
+        $crate::Atom::new($s)
     };
 }
 

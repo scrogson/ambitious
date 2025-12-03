@@ -7,6 +7,12 @@ use starlang_process::RuntimeHandle;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+/// Type alias for the application start function.
+type StartFn = Box<dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync>;
+
+/// Type alias for the application stop function.
+type StopFn = Box<dyn Fn(Option<Pid>) + Send + Sync>;
+
 /// The Application trait for implementing OTP-style applications.
 ///
 /// Applications are the top-level organizational unit in a Starlang system.
@@ -57,9 +63,9 @@ struct RegisteredApp {
     /// The application specification.
     spec: AppSpec,
     /// Factory function to start the application.
-    start_fn: Box<dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync>,
+    start_fn: StartFn,
     /// Stop function.
-    stop_fn: Box<dyn Fn(Option<Pid>) + Send + Sync>,
+    stop_fn: StopFn,
 }
 
 /// A running application instance.
@@ -265,14 +271,13 @@ impl AppController {
         let mut visited = HashSet::new();
         let mut path = Vec::new();
 
-        self.visit_deps(name, &registered, &mut result, &mut visited, &mut path)?;
+        Self::visit_deps(name, &registered, &mut result, &mut visited, &mut path)?;
 
         Ok(result)
     }
 
     /// Recursive dependency visitor.
     fn visit_deps(
-        &self,
         name: &str,
         registered: &HashMap<String, RegisteredApp>,
         result: &mut Vec<String>,
@@ -298,7 +303,7 @@ impl AppController {
         // Visit dependencies first
         path.push(name.to_string());
         for dep in &app.spec.dependencies {
-            self.visit_deps(dep, registered, result, visited, path)?;
+            Self::visit_deps(dep, registered, result, visited, path)?;
         }
         path.pop();
 

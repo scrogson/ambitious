@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Supervision strategy that determines how child failures are handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Strategy {
     /// If a child process terminates, only that process is restarted.
     #[default]
@@ -24,10 +23,8 @@ pub enum Strategy {
     RestForOne,
 }
 
-
 /// Determines when a child should be restarted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RestartType {
     /// The child is always restarted, regardless of exit reason.
     #[default]
@@ -37,7 +34,6 @@ pub enum RestartType {
     /// The child is never restarted.
     Temporary,
 }
-
 
 /// Determines how a child should be terminated during shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,8 +53,7 @@ impl Default for ShutdownType {
 }
 
 /// The type of a child process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChildType {
     /// A worker process (leaf node in supervision tree).
     #[default]
@@ -66,7 +61,6 @@ pub enum ChildType {
     /// A supervisor process (internal node in supervision tree).
     Supervisor,
 }
-
 
 /// Error returned when starting a child fails.
 #[derive(Debug, Clone)]

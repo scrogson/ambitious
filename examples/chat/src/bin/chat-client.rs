@@ -805,9 +805,9 @@ async fn process_input(
 ) -> io::Result<()> {
     let input = input.trim();
 
-    if input.starts_with('/') {
+    if let Some(stripped) = input.strip_prefix('/') {
         // Command
-        let parts: Vec<&str> = input[1..].splitn(2, ' ').collect();
+        let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
         let cmd = parts.first().unwrap_or(&"");
 
         match *cmd {

@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-starlang-atom = { path = "../starlang-atom" }
+starlang-atom = { version = "0.1.0", path = "../starlang-atom" }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }

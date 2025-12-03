@@ -102,7 +102,7 @@ impl Pid {
     /// ```
     pub fn remote(node_name: &str, id: u64, creation: u32) -> Self {
         Self {
-            node: Atom::from_str(node_name),
+            node: Atom::new(node_name),
             id,
             creation,
         }

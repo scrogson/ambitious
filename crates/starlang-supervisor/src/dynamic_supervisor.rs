@@ -467,11 +467,9 @@ mod tests {
 
             let spec = ChildSpec::new("worker", || async {
                 let pid = starlang_process::global::spawn(|| async {
-                    loop {
-                        match starlang_runtime::recv_timeout(Duration::from_secs(60)).await {
-                            Ok(Some(_)) => {}
-                            _ => break,
-                        }
+                    while let Ok(Some(_)) =
+                        starlang_runtime::recv_timeout(Duration::from_secs(60)).await
+                    {
                     }
                 });
                 Ok(pid)
@@ -505,11 +503,9 @@ mod tests {
 
             let spec = ChildSpec::new("worker", || async {
                 let pid = starlang_process::global::spawn(|| async {
-                    loop {
-                        match starlang_runtime::recv_timeout(Duration::from_secs(60)).await {
-                            Ok(Some(_)) => {}
-                            _ => break,
-                        }
+                    while let Ok(Some(_)) =
+                        starlang_runtime::recv_timeout(Duration::from_secs(60)).await
+                    {
                     }
                 });
                 Ok(pid)
@@ -552,11 +548,9 @@ mod tests {
             for i in 0..5 {
                 let spec = ChildSpec::new(format!("worker_{}", i), || async {
                     let pid = starlang_process::global::spawn(|| async {
-                        loop {
-                            match starlang_runtime::recv_timeout(Duration::from_secs(60)).await {
-                                Ok(Some(_)) => {}
-                                _ => break,
-                            }
+                        while let Ok(Some(_)) =
+                            starlang_runtime::recv_timeout(Duration::from_secs(60)).await
+                        {
                         }
                     });
                     Ok(pid)

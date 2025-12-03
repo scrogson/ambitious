@@ -1,4 +1,4 @@
-# DREAM - Distributed Rust Erlang Abstract Machine
+# Starlang - Erlang-style Concurrency for Rust
 # Justfile for common development tasks
 
 # Default recipe - show available commands
@@ -23,7 +23,7 @@ test-verbose:
 
 # Run only the distribution tests
 test-dist:
-    cargo test -p dream-chat --test distribution_test
+    cargo test -p starlang-chat --test distribution_test
 
 # Build the chat example
 build-chat:
@@ -108,7 +108,10 @@ fmt-check:
 
 # Run clippy lints
 clippy:
-    cargo clippy --all-targets --all-features
+    cargo clippy --all-targets --all-features -- -D warnings
+
+# Run all CI checks (format, lint, test)
+ci: fmt-check clippy test
 
 # Generate documentation
 docs:
@@ -124,7 +127,7 @@ clean:
 
 # Print quick start instructions
 quickstart:
-    @echo "DREAM Chat - Quick Start Guide"
+    @echo "Starlang Chat - Quick Start Guide"
     @echo "==============================="
     @echo ""
     @echo "1. Start the first server node:"

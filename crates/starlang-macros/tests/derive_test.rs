@@ -1,9 +1,10 @@
-//! Integration tests for dream-macros.
+//! Integration tests for starlang-macros.
 
 use starlang_macros::{starlang_process, GenServerImpl};
 
 #[derive(GenServerImpl)]
 struct TestServer {
+    #[allow(dead_code)]
     counter: i64,
 }
 
@@ -13,6 +14,7 @@ fn test_gen_server_impl_derive() {
 }
 
 #[starlang_process]
+#[allow(dead_code)]
 async fn test_process() {
     // This just needs to compile
 }

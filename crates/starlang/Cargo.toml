@@ -6,13 +6,13 @@ description = "Starlang - Erlang-style concurrency for Rust"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-starlang-core = { path = "../starlang-core" }
-starlang-runtime = { path = "../starlang-runtime" }
-starlang-process = { path = "../starlang-process" }
-starlang-gen-server = { path = "../starlang-gen-server" }
-starlang-supervisor = { path = "../starlang-supervisor" }
-starlang-application = { path = "../starlang-application" }
-starlang-macros = { path = "../starlang-macros" }
+starlang-core = { version = "0.1.0", path = "../starlang-core" }
+starlang-runtime = { version = "0.1.0", path = "../starlang-runtime" }
+starlang-process = { version = "0.1.0", path = "../starlang-process" }
+starlang-gen-server = { version = "0.1.0", path = "../starlang-gen-server" }
+starlang-supervisor = { version = "0.1.0", path = "../starlang-supervisor" }
+starlang-application = { version = "0.1.0", path = "../starlang-application" }
+starlang-macros = { version = "0.1.0", path = "../starlang-macros" }
 
 # Distribution
 quinn = "0.11"

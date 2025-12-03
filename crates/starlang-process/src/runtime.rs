@@ -334,17 +334,14 @@ mod tests {
         let _parent_pid = handle.spawn(|| async move {
             starlang_runtime::with_ctx(|ctx| ctx.set_trap_exit(true));
             // Wait for exit message
-            loop {
-                match starlang_runtime::recv_timeout(Duration::from_millis(500)).await {
-                    Ok(Some(msg)) => {
-                        if let Ok(SystemMessage::Exit { .. }) =
-                            <SystemMessage as starlang_core::Term>::decode(&msg)
-                        {
-                            parent_received_clone.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                    _ => break,
+            while let Ok(Some(msg)) =
+                starlang_runtime::recv_timeout(Duration::from_millis(500)).await
+            {
+                if let Ok(SystemMessage::Exit { .. }) =
+                    <SystemMessage as starlang_core::Term>::decode(&msg)
+                {
+                    parent_received_clone.store(true, Ordering::SeqCst);
+                    break;
                 }
             }
         });
@@ -374,18 +371,15 @@ mod tests {
 
         // Create monitor process
         let monitor_pid = handle.spawn(move || async move {
-            loop {
-                match starlang_runtime::recv_timeout(Duration::from_millis(500)).await {
-                    Ok(Some(msg)) => {
-                        // Check if it's a DOWN message
-                        if let Ok(SystemMessage::Down { .. }) =
-                            <SystemMessage as starlang_core::Term>::decode(&msg)
-                        {
-                            down_clone.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                    _ => break,
+            while let Ok(Some(msg)) =
+                starlang_runtime::recv_timeout(Duration::from_millis(500)).await
+            {
+                // Check if it's a DOWN message
+                if let Ok(SystemMessage::Down { .. }) =
+                    <SystemMessage as starlang_core::Term>::decode(&msg)
+                {
+                    down_clone.store(true, Ordering::SeqCst);
+                    break;
                 }
             }
         });

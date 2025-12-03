@@ -14,9 +14,9 @@ quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 
 [dev-dependencies]
-starlang-core = { path = "../starlang-core" }
-starlang-runtime = { path = "../starlang-runtime" }
-starlang-process = { path = "../starlang-process" }
-starlang-gen-server = { path = "../starlang-gen-server" }
+starlang-core = { version = "0.1.0", path = "../starlang-core" }
+starlang-runtime = { version = "0.1.0", path = "../starlang-runtime" }
+starlang-process = { version = "0.1.0", path = "../starlang-process" }
+starlang-gen-server = { version = "0.1.0", path = "../starlang-gen-server" }
 tokio = { version = "1", features = ["full", "test-util"] }
 serde = { version = "1", features = ["derive"] }

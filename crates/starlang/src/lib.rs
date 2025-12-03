@@ -280,24 +280,24 @@ mod tests {
             ) -> CallResult<(), String> {
                 match request {
                     TestCall::Ping => {
-                        *state;
+                        let _ = state;
                         CallResult::Reply("pong".to_string(), ())
-                    },
+                    }
                 }
             }
 
             async fn handle_cast(_: (), state: &mut ()) -> CastResult<()> {
-                *state;
+                let _ = state;
                 CastResult::NoReply(())
             }
 
             async fn handle_info(_: Vec<u8>, state: &mut ()) -> InfoResult<()> {
-                *state;
+                let _ = state;
                 InfoResult::NoReply(())
             }
 
             async fn handle_continue(_: ContinueArg, state: &mut ()) -> ContinueResult<()> {
-                *state;
+                let _ = state;
                 ContinueResult::NoReply(())
             }
         }

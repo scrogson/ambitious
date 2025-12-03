@@ -27,7 +27,7 @@ static THIS_NODE: OnceLock<NodeIdentity> = OnceLock::new();
 
 /// Get the atom representing "no node" / local node before distribution init.
 fn local_node_atom() -> Atom {
-    *LOCAL_NODE_ATOM.get_or_init(|| Atom::from_str(""))
+    *LOCAL_NODE_ATOM.get_or_init(|| Atom::new(""))
 }
 
 /// A node identifier.
@@ -228,7 +228,7 @@ pub struct NodeIdentity {
 /// // init_node(NodeName::new("node1@localhost"), 0);
 /// ```
 pub fn init_node(name: NodeName, creation: u32) -> Result<(), NodeIdentity> {
-    let name_atom = Atom::from_str(name.as_str());
+    let name_atom = Atom::new(name.as_str());
     THIS_NODE.set(NodeIdentity {
         name,
         name_atom,

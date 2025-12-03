@@ -49,7 +49,7 @@ pub struct DistributionManager {
 impl DistributionManager {
     /// Create a new distribution manager.
     pub fn new(node_name: String, creation: u32) -> Self {
-        let node_name_atom = Atom::from_str(&node_name);
+        let node_name_atom = Atom::new(&node_name);
         Self {
             node_name,
             node_name_atom,
@@ -185,7 +185,7 @@ impl DistributionManager {
                 node_name,
                 creation,
             } => {
-                let node_atom = Atom::from_str(&node_name);
+                let node_atom = Atom::new(&node_name);
                 let info = NodeInfo::new(
                     NodeName::new(&node_name),
                     starlang_core::NodeId::local(), // NodeId is just for display now
@@ -274,7 +274,6 @@ async fn accept_loop(transport: Arc<QuicTransport>, node_name: String, creation:
     loop {
         if let Some(connection) = transport.accept().await {
             let node_name = node_name.clone();
-            let creation = creation;
 
             tokio::spawn(async move {
                 if let Err(e) = handle_incoming_connection(connection, node_name, creation).await {
@@ -303,7 +302,7 @@ async fn handle_incoming_connection(
         _ => return Err(DistError::Handshake("expected Hello message".to_string())),
     };
 
-    let remote_node_atom = Atom::from_str(&remote_name);
+    let remote_node_atom = Atom::new(&remote_name);
 
     // Get the manager
     let manager = DIST_MANAGER.get().ok_or(DistError::NotInitialized)?;
@@ -409,12 +408,7 @@ async fn message_sender_loop(mut rx: mpsc::Receiver<DistMessage>, node_atom: Ato
 
 /// Loop to receive messages from a remote node.
 async fn message_receiver_loop(node_atom: Atom) {
-    loop {
-        let manager = match DIST_MANAGER.get() {
-            Some(m) => m,
-            None => break,
-        };
-
+    while let Some(manager) = DIST_MANAGER.get() {
         let connection = match manager.nodes.get(&node_atom) {
             Some(node) => {
                 // Accept a stream
