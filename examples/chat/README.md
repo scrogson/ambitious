@@ -5,6 +5,8 @@ A fully distributed multi-user chat application demonstrating Starlang's capabil
 - **Processes** for user sessions (one per TCP connection)
 - **GenServers** for rooms and the room registry
 - **DynamicSupervisor** for managing room processes
+- **Channels** - Phoenix-style topic-based real-time communication
+- **Presence** - distributed presence tracking with custom metadata
 - **Distribution** - connect multiple chat servers together
 - **Global Registry** - rooms are registered globally across all nodes
 - **pg (Process Groups)** - distributed process groups for room membership
@@ -179,6 +181,80 @@ When a user sends a message:
 3. Each member's session receives the message
 4. Sessions send the message to their TCP clients
 
+### Channels (Phoenix-style)
+
+Rooms use Phoenix-style Channels for topic-based communication:
+
+```rust
+use starlang::channel::{Channel, Socket, JoinResult, HandleResult};
+
+struct RoomChannel;
+
+impl Channel for RoomChannel {
+    type Assigns = RoomAssigns;       // Custom socket state
+    type JoinPayload = JoinPayload;   // Join request data
+    type InEvent = RoomInEvent;       // Client → Server events
+    type OutEvent = RoomOutEvent;     // Server → Client events
+
+    fn topic_pattern() -> &'static str {
+        "room:*"  // Matches "room:general", "room:lobby", etc.
+    }
+
+    async fn join(topic: &str, payload: JoinPayload, socket: Socket<()>) -> JoinResult<RoomAssigns> {
+        // Authorize join, set up assigns
+        let room_name = topic.strip_prefix("room:").unwrap();
+        JoinResult::Ok(socket.assign(RoomAssigns { nick: payload.nick, room_name }))
+    }
+
+    async fn handle_in(event: &str, payload: InEvent, socket: &mut Socket<Assigns>) -> HandleResult<OutEvent> {
+        match event {
+            "new_msg" => HandleResult::Broadcast {
+                event: "new_msg".to_string(),
+                payload: RoomOutEvent::Message { from: socket.assigns.nick.clone(), text },
+            },
+            _ => HandleResult::NoReply,
+        }
+    }
+}
+```
+
+### Presence (Real-time User Tracking)
+
+Track users across the distributed cluster with custom metadata:
+
+```rust
+use starlang::presence;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct UserMeta {
+    nick: String,
+    status: String,  // "online", "away", "typing"
+}
+
+// Track a user's presence in a room
+presence::track("room:general", "user:123", UserMeta {
+    nick: "alice".into(),
+    status: "online".into(),
+});
+
+// Update presence (e.g., user starts typing)
+presence::update("room:general", "user:123", UserMeta {
+    nick: "alice".into(),
+    status: "typing".into(),
+});
+
+// List all presences in a topic (works across nodes!)
+let presences = presence::list("room:general");
+for (key, metas) in presences {
+    println!("{}: {:?}", key, metas);
+}
+
+// Untrack when user leaves
+presence::untrack("room:general", "user:123");
+```
+
+Presence automatically syncs across all nodes using a CRDT-based approach - no single point of failure!
+
 ## Protocol
 
 The chat protocol uses length-prefixed binary messages serialized with postcard.
@@ -272,3 +348,5 @@ Alice sees Bob's message, even though they're connected to different servers!
 7. **Distribution**: Multiple nodes form a cluster with QUIC transport
 8. **Global Registry**: Named processes accessible from any node
 9. **Process Groups (pg)**: Distributed group membership for pub/sub patterns
+10. **Channels**: Phoenix-style topic routing with join/handle_in/broadcast
+11. **Presence**: CRDT-based distributed presence tracking with custom metadata
