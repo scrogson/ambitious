@@ -54,6 +54,15 @@ mod error;
 mod supervisor;
 mod types;
 
+/// DynamicSupervisor for starting children on demand.
+///
+/// Unlike regular supervisors, a DynamicSupervisor starts with no children
+/// and children are added dynamically via `start_child`. It only supports
+/// the one-for-one strategy.
+///
+/// See [`dynamic_supervisor`] module for details.
+pub mod dynamic_supervisor;
+
 pub use error::{DeleteError, RestartError, StartError, TerminateError};
 pub use supervisor::{
     count_children, delete_child, start, start_link, terminate_child, which_children, Supervisor,

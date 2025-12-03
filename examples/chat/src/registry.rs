@@ -3,9 +3,12 @@
 //! The registry manages all chat rooms, creating them on demand
 //! and providing lookups by name. Rooms are registered globally
 //! so they are accessible across all connected nodes.
+//!
+//! Room processes are started under the room supervisor (DynamicSupervisor)
+//! for fault tolerance.
 
 use crate::protocol::RoomInfo;
-use crate::room::{Room, RoomInit};
+use crate::room_supervisor;
 use dream::dist::global;
 use dream::gen_server::{self, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -168,11 +171,10 @@ impl GenServer for Registry {
                     );
                 }
 
-                // Create new room - async callbacks let us await here!
-                match gen_server::start::<Room>(RoomInit { name: name.clone() }).await
-                {
+                // Create new room under the DynamicSupervisor
+                match room_supervisor::start_room(name.clone()).await {
                     Ok(pid) => {
-                        tracing::info!(room = %name, pid = ?pid, "Room created");
+                        tracing::info!(room = %name, pid = ?pid, "Room created under supervisor");
 
                         // Register globally so other nodes can find it
                         if global::register(&global_name, pid) {
@@ -182,6 +184,8 @@ impl GenServer for Registry {
                             // Check global registry and use that PID instead
                             if let Some(existing_pid) = global::whereis(&global_name) {
                                 tracing::info!(room = %name, "Room exists globally, using existing");
+                                // Terminate the room we just created since we'll use the existing one
+                                let _ = room_supervisor::terminate_room(pid);
                                 state.rooms.insert(name, existing_pid);
                                 return CallResult::reply(
                                     RegistryReply::Room(Some(existing_pid)),

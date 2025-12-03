@@ -3,6 +3,7 @@
 //! A multi-user chat application demonstrating DREAM's capabilities:
 //! - Processes for user sessions
 //! - GenServers for rooms and registry
+//! - DynamicSupervisor for managing room processes
 //! - Message passing between processes
 //! - **Distribution**: Connect multiple chat servers together
 //! - **pg**: Distributed process groups for room membership
@@ -36,6 +37,7 @@ mod protocol;
 mod pubsub;
 mod registry;
 mod room;
+mod room_supervisor;
 mod server;
 mod session;
 
@@ -115,6 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // PubSub is now stateless (uses pg under the hood)
     // No need to start a GenServer
+
+    // Start the room supervisor (DynamicSupervisor for managing room processes)
+    let room_sup_pid = room_supervisor::start().await.expect("Failed to start room supervisor");
+    dream::register(room_supervisor::NAME, room_sup_pid);
+    tracing::info!(pid = ?room_sup_pid, "Room supervisor started and registered");
 
     // Start the room registry and register it by name
     let registry_pid = registry::Registry::start().await.expect("Failed to start registry");
