@@ -334,7 +334,7 @@ mod tests {
                 match dream_runtime::recv_timeout(Duration::from_millis(500)).await {
                     Ok(Some(msg)) => {
                         if let Ok(SystemMessage::Exit { .. }) =
-                            <SystemMessage as dream_core::Message>::decode(&msg)
+                            <SystemMessage as dream_core::Term>::decode(&msg)
                         {
                             parent_received_clone.store(true, Ordering::SeqCst);
                             break;
@@ -375,7 +375,7 @@ mod tests {
                     Ok(Some(msg)) => {
                         // Check if it's a DOWN message
                         if let Ok(SystemMessage::Down { .. }) =
-                            <SystemMessage as dream_core::Message>::decode(&msg)
+                            <SystemMessage as dream_core::Term>::decode(&msg)
                         {
                             down_clone.store(true, Ordering::SeqCst);
                             break;

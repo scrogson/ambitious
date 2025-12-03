@@ -31,4 +31,4 @@ pub use task_local::{
 };
 
 // Re-export core types for convenience
-pub use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+pub use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};

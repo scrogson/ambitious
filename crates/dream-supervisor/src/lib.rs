@@ -74,7 +74,7 @@ pub use types::{
 };
 
 // Re-export commonly used types
-pub use dream_core::{ExitReason, Message, Pid};
+pub use dream_core::{ExitReason, Pid, Term};
 pub use dream_process::RuntimeHandle;
 
 #[cfg(test)]

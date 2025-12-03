@@ -4,6 +4,7 @@
 
 use dream_core::{ExitReason, Pid, Ref};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A handle identifying a pending call that needs a reply.
@@ -184,15 +185,165 @@ pub type InfoResult<S> = CastResult<S>;
 /// Result of the `handle_continue` callback.
 pub type ContinueResult<S> = CastResult<S>;
 
+/// Trait for custom name resolution with Term-based keys.
+///
+/// Implement this trait to use custom registries with `ServerRef::Via`.
+/// This is similar to Elixir's `{:via, module, term}` tuple pattern.
+///
+/// Keys are stored as serialized bytes, allowing any `Term` type to be used
+/// as a registry key (strings, tuples, structs, etc.) - just like Erlang.
+///
+/// # Example
+///
+/// ```ignore
+/// use dream_gen_server::NameResolver;
+/// use dream::registry::Registry;
+///
+/// // Registry implements NameResolver automatically
+/// let room_registry = Registry::new_unique("rooms");
+///
+/// // Use it with ServerRef::via() - key can be any Term!
+/// gen_server::call::<Room>(
+///     ServerRef::via(room_registry, "room:lobby"),  // String key
+///     RoomCall::GetInfo,
+///     timeout
+/// ).await;
+///
+/// // Tuple key like Elixir's {:room, "lobby"}
+/// gen_server::call::<Room>(
+///     ServerRef::via(room_registry, ("room", "lobby")),
+///     RoomCall::GetInfo,
+///     timeout
+/// ).await;
+/// ```
+pub trait NameResolver: Send + Sync {
+    /// Resolves a serialized key to a PID.
+    ///
+    /// The key is the serialized bytes of a Term.
+    /// Returns `Some(pid)` if the key is registered, `None` otherwise.
+    fn whereis_term(&self, key: &[u8]) -> Option<Pid>;
+
+    /// Registers a process under a serialized key.
+    ///
+    /// The key is the serialized bytes of a Term.
+    /// Returns `true` if registration succeeded, `false` if the key was already taken.
+    fn register_term(&self, key: &[u8], pid: Pid) -> bool;
+
+    /// Unregisters a serialized key.
+    fn unregister_term(&self, key: &[u8]);
+}
+
 /// A reference to a GenServer.
 ///
-/// Can be either a PID or a registered name.
-#[derive(Debug, Clone)]
+/// Can be a PID, a registered name, or a custom registry lookup.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dream_gen_server::{ServerRef, gen_server};
+///
+/// // Direct PID
+/// gen_server::call::<MyServer>(pid, request, timeout).await;
+///
+/// // Registered name (uses global process registry)
+/// gen_server::call::<MyServer>("my_server", request, timeout).await;
+///
+/// // Via custom registry with string key
+/// gen_server::call::<MyServer>(
+///     ServerRef::via(my_registry, "my_key"),
+///     request,
+///     timeout
+/// ).await;
+///
+/// // Via custom registry with tuple key (like Elixir's {:via, Registry, {reg, {:room, id}}})
+/// gen_server::call::<MyServer>(
+///     ServerRef::via(my_registry, ("room", room_id)),
+///     request,
+///     timeout
+/// ).await;
+/// ```
+#[derive(Clone)]
 pub enum ServerRef {
     /// A direct process identifier.
     Pid(Pid),
-    /// A registered name.
+    /// A registered name (uses the global process registry).
     Name(String),
+    /// A custom registry lookup (similar to Elixir's `{:via, module, term}`).
+    Via {
+        /// The custom registry implementing `NameResolver`.
+        registry: Arc<dyn NameResolver>,
+        /// The serialized key bytes (any Term can be used as a key).
+        key: Vec<u8>,
+    },
+}
+
+impl std::fmt::Debug for ServerRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerRef::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
+            ServerRef::Name(name) => f.debug_tuple("Name").field(name).finish(),
+            ServerRef::Via { key, .. } => f
+                .debug_struct("Via")
+                .field("key_bytes", &key.len())
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl ServerRef {
+    /// Creates a `ServerRef` that uses a custom registry for name resolution.
+    ///
+    /// This is equivalent to Elixir's `{:via, Registry, {registry, key}}` tuple.
+    /// The key can be any type that implements `Term` (Serialize + DeserializeOwned),
+    /// just like how Erlang registries accept any term as a key.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - A registry implementing `NameResolver`
+    /// * `key` - Any Term to use as the registry key
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let registry = Registry::new_unique("rooms");
+    ///
+    /// // String key
+    /// let server_ref = ServerRef::via(registry.clone(), "room:lobby");
+    ///
+    /// // Tuple key (like Elixir's {:room, "lobby"})
+    /// let server_ref = ServerRef::via(registry.clone(), ("room", "lobby"));
+    ///
+    /// // Struct key
+    /// #[derive(Serialize, Deserialize)]
+    /// struct RoomKey { name: String, shard: u32 }
+    /// let server_ref = ServerRef::via(registry, RoomKey { name: "lobby".into(), shard: 1 });
+    /// ```
+    pub fn via<R, K>(registry: Arc<R>, key: K) -> Self
+    where
+        R: NameResolver + 'static,
+        K: dream_core::Term,
+    {
+        ServerRef::Via {
+            registry,
+            key: key.encode(),
+        }
+    }
+
+    /// Resolves this `ServerRef` to a `Pid`.
+    ///
+    /// For `Pid` variants, returns the PID directly.
+    /// For `Name` variants, looks up in the global process registry.
+    /// For `Via` variants, uses the custom registry's `whereis_term` method.
+    pub fn resolve(&self) -> Option<Pid> {
+        match self {
+            ServerRef::Pid(pid) => Some(*pid),
+            ServerRef::Name(name) => {
+                let handle = dream_process::global::handle();
+                handle.registry().whereis(name)
+            }
+            ServerRef::Via { registry, key } => registry.whereis_term(key),
+        }
+    }
 }
 
 impl std::convert::From<Pid> for ServerRef {

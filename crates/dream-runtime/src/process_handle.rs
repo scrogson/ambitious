@@ -5,7 +5,7 @@
 
 use crate::mailbox::{Envelope, MailboxSender};
 use crate::SendError;
-use dream_core::{ExitReason, Message, Pid, Ref};
+use dream_core::{ExitReason, Pid, Ref, Term};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
@@ -93,7 +93,7 @@ impl ProcessHandle {
     }
 
     /// Sends a typed message to the process.
-    pub fn send<M: Message>(&self, msg: &M) -> Result<(), SendError> {
+    pub fn send<M: Term>(&self, msg: &M) -> Result<(), SendError> {
         self.send_raw(msg.encode())
     }
 

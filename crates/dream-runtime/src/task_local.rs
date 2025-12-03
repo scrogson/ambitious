@@ -128,7 +128,7 @@ pub fn send_raw(pid: Pid, data: Vec<u8>) -> Result<(), SendError> {
 /// # Panics
 ///
 /// Panics if called outside of a DREAM process context.
-pub fn send<M: crate::Message>(pid: Pid, msg: &M) -> Result<(), SendError> {
+pub fn send<M: crate::Term>(pid: Pid, msg: &M) -> Result<(), SendError> {
     let ctx = CONTEXT.with(|c| c.ctx.clone());
     // Use try_lock since we're in a sync context
     match ctx.try_lock() {

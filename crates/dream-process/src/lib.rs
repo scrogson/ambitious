@@ -41,5 +41,5 @@ pub use runtime::{Runtime, RuntimeHandle};
 pub use spawn::{spawn, spawn_link, spawn_monitor, ProcessFn};
 
 // Re-export core types
-pub use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+pub use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};
 pub use dream_runtime::{Context, ProcessRegistry, SendError};

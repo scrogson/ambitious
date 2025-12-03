@@ -6,7 +6,7 @@ use crate::types::{
     CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult, ServerRef,
 };
 use async_trait::async_trait;
-use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use dream_runtime::current_pid;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -74,13 +74,13 @@ pub trait GenServer: Sized + Send + Sync + 'static {
     /// The server's state type.
     type State: Send + 'static;
     /// Argument passed to the `init` callback.
-    type InitArg: Message;
+    type InitArg: Term;
     /// Request type for synchronous calls.
-    type Call: Message;
+    type Call: Term;
     /// Message type for asynchronous casts.
-    type Cast: Message;
+    type Cast: Term;
     /// Reply type for calls.
-    type Reply: Message;
+    type Reply: Term;
 
     /// Initializes the server state.
     ///
@@ -225,7 +225,7 @@ async fn gen_server_loop<G: GenServer>(
         // Try to decode as GenServer protocol message
         match protocol::decode(&msg) {
             Ok(GenServerMessage::Call { from, payload }) => {
-                match <G::Call as Message>::decode(&payload) {
+                match <G::Call as Term>::decode(&payload) {
                     Ok(request) => {
                         let result = G::handle_call(request, from, &mut state).await;
                         match handle_call_result::<G>(result, from, &mut state) {
@@ -248,7 +248,7 @@ async fn gen_server_loop<G: GenServer>(
                 }
             }
             Ok(GenServerMessage::Cast { payload }) => {
-                match <G::Cast as Message>::decode(&payload) {
+                match <G::Cast as Term>::decode(&payload) {
                     Ok(cast_msg) => {
                         let result = G::handle_cast(cast_msg, &mut state).await;
                         match handle_cast_result::<G>(result, &mut state) {
@@ -319,7 +319,7 @@ async fn gen_server_loop<G: GenServer>(
             Err(_) => {
                 // Not a GenServer protocol message - treat as info
                 // First check if it's a system message
-                if let Ok(sys_msg) = <SystemMessage as Message>::decode(&msg) {
+                if let Ok(sys_msg) = <SystemMessage as Term>::decode(&msg) {
                     match sys_msg {
                         SystemMessage::Exit { from: _, reason } => {
                             // Exit signal received
@@ -536,7 +536,7 @@ pub async fn call<G: GenServer>(
                     if ref_ == reference {
                         // Found our reply! Re-send stashed messages before returning
                         resend_stashed(self_pid, stashed_messages);
-                        return <G::Reply as Message>::decode(&payload)
+                        return <G::Reply as Term>::decode(&payload)
                             .map_err(|_| CallError::Exit(ExitReason::error("decode error")));
                     } else {
                         // Reply for a different call - stash it
@@ -585,7 +585,7 @@ pub fn cast<G: GenServer>(server: impl Into<ServerRef>, msg: G::Cast) -> Result<
 /// Sends a reply to a pending call.
 ///
 /// This is used for deferred replies when `handle_call` returns `NoReply`.
-pub fn reply<R: Message>(from: From, reply: R) -> Result<(), CallError> {
+pub fn reply<R: Term>(from: From, reply: R) -> Result<(), CallError> {
     let handle = dream_process::global::handle();
     let reply_data = protocol::encode_reply(from.reference, &reply);
     handle
@@ -622,24 +622,16 @@ pub async fn stop(
 
 /// Resolves a ServerRef to a Pid.
 fn resolve_server(server: impl Into<ServerRef>) -> Result<Pid, CallError> {
-    let handle = dream_process::global::handle();
-    match server.into() {
-        ServerRef::Pid(pid) => Ok(pid),
-        ServerRef::Name(name) => handle
-            .registry()
-            .whereis(&name)
-            .ok_or_else(|| CallError::NotFound(name)),
-    }
+    let server_ref = server.into();
+    server_ref
+        .resolve()
+        .ok_or_else(|| CallError::NotFound(format!("{:?}", server_ref)))
 }
 
 /// Resolves a ServerRef to a Pid for stop operations.
 fn resolve_server_stop(server: impl Into<ServerRef>) -> Result<Pid, StopError> {
-    let handle = dream_process::global::handle();
-    match server.into() {
-        ServerRef::Pid(pid) => Ok(pid),
-        ServerRef::Name(name) => handle
-            .registry()
-            .whereis(&name)
-            .ok_or_else(|| StopError::NotFound(name)),
-    }
+    let server_ref = server.into();
+    server_ref
+        .resolve()
+        .ok_or_else(|| StopError::NotFound(format!("{:?}", server_ref)))
 }

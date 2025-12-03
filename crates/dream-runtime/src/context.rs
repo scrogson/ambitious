@@ -7,7 +7,7 @@ use crate::mailbox::Mailbox;
 use crate::process_handle::{ProcessHandle, ProcessState};
 use crate::registry::ProcessRegistry;
 use crate::SendError;
-use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -96,7 +96,7 @@ impl Context {
     }
 
     /// Sends a typed message to another process.
-    pub fn send<M: Message>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
+    pub fn send<M: Term>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
         self.registry.send(pid, msg)
     }
 

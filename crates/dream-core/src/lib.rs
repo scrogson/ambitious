@@ -8,7 +8,7 @@
 //! - [`Pid`] - Process identifier
 //! - [`Ref`] - Unique reference for monitors and timers
 //! - [`ExitReason`] - Process termination reasons
-//! - [`Message`] - Trait for serializable messages
+//! - [`Term`] - Trait for Erlang-like serializable terms (messages, keys, etc.)
 //! - [`SystemMessage`] - Internal system messages (Exit, Down, Timeout)
 //! - [`NodeId`], [`NodeName`], [`NodeInfo`] - Node identity for distribution
 
@@ -26,7 +26,8 @@ mod system_message;
 pub use dream_atom::{atom, Atom};
 
 pub use exit_reason::ExitReason;
-pub use message::{DecodeError, Message};
+#[allow(deprecated)]
+pub use message::{DecodeError, Message, Term};
 pub use node::{NodeId, NodeInfo, NodeName};
 pub use pid::{current_creation, increment_creation, Pid};
 pub use reference::Ref;

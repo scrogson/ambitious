@@ -97,11 +97,12 @@ pub use async_trait::async_trait;
 pub use error::{CallError, StartError, StopError};
 pub use server::{call, cast, reply, start, start_link, stop, GenServer};
 pub use types::{
-    CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult, ServerRef,
+    CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult,
+    NameResolver, ServerRef,
 };
 
 // Re-export commonly used types
-pub use dream_core::{ExitReason, Message, Pid, Ref};
+pub use dream_core::{ExitReason, Pid, Ref, Term};
 
 /// Prelude module for convenient imports.
 ///

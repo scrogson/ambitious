@@ -1,30 +1,42 @@
-//! Message serialization trait.
+//! Term serialization trait.
 //!
-//! The [`Message`] trait provides a common interface for encoding and decoding
-//! messages sent between processes. It uses `postcard` for compact binary
-//! serialization.
+//! The [`Term`] trait provides a common interface for encoding and decoding
+//! Erlang-like terms. Any type that implements `Serialize + DeserializeOwned`
+//! can be used as a Term, similar to how Erlang treats all values as terms.
+//!
+//! Terms are used throughout DREAM for:
+//! - Messages sent between processes
+//! - Registry keys
+//! - GenServer calls, casts, and replies
+//! - Any data that needs to be serialized
+//!
+//! Uses `postcard` for compact binary serialization.
 
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-/// Error type for message decoding failures.
+/// Error type for term decoding failures.
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// Failed to deserialize the message bytes.
-    #[error("failed to decode message: {0}")]
+    /// Failed to deserialize the term bytes.
+    #[error("failed to decode term: {0}")]
     Deserialize(#[from] postcard::Error),
 }
 
-/// A trait for types that can be sent as messages between processes.
+/// A trait for Erlang-like terms that can be serialized and sent between processes.
 ///
 /// This trait is automatically implemented for any type that implements
 /// `Serialize + DeserializeOwned + Send + 'static`. The serialization uses
 /// `postcard` for compact, efficient binary encoding.
 ///
+/// In Erlang/Elixir, everything is a "term" - atoms, tuples, lists, maps, etc.
+/// In DREAM, any serializable Rust type can be a Term, giving you the same
+/// flexibility with Rust's type safety.
+///
 /// # Examples
 ///
 /// ```
-/// use dream_core::Message;
+/// use dream_core::Term;
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,8 +49,27 @@ pub enum DecodeError {
 /// let decoded = Ping::decode(&bytes).unwrap();
 /// assert_eq!(ping, decoded);
 /// ```
-pub trait Message: Sized + Send + 'static {
-    /// Encodes this message into bytes.
+///
+/// Terms can be any serializable type:
+///
+/// ```
+/// use dream_core::Term;
+///
+/// // Primitives
+/// let n: u64 = 42;
+/// assert_eq!(u64::decode(&n.encode()).unwrap(), 42);
+///
+/// // Strings
+/// let s = "hello".to_string();
+/// assert_eq!(String::decode(&s.encode()).unwrap(), "hello");
+///
+/// // Tuples (like Erlang tuples)
+/// let t = ("room".to_string(), "lobby".to_string(), 123u32);
+/// let decoded: (String, String, u32) = Term::decode(&t.encode()).unwrap();
+/// assert_eq!(t, decoded);
+/// ```
+pub trait Term: Sized + Send + 'static {
+    /// Encodes this term into bytes.
     ///
     /// # Panics
     ///
@@ -46,23 +77,23 @@ pub trait Message: Sized + Send + 'static {
     /// types that properly implement `Serialize`.
     fn encode(&self) -> Vec<u8>;
 
-    /// Decodes a message from bytes.
+    /// Decodes a term from bytes.
     ///
     /// # Errors
     ///
     /// Returns `DecodeError` if the bytes cannot be deserialized into this type.
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError>;
 
-    /// Encodes this message, returning `None` on failure instead of panicking.
+    /// Encodes this term, returning `None` on failure instead of panicking.
     fn try_encode(&self) -> Option<Vec<u8>>;
 }
 
-impl<T> Message for T
+impl<T> Term for T
 where
     T: Serialize + DeserializeOwned + Send + 'static,
 {
     fn encode(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("message serialization failed")
+        postcard::to_allocvec(self).expect("term serialization failed")
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
@@ -74,13 +105,23 @@ where
     }
 }
 
+/// Type alias for backward compatibility.
+///
+/// `Message` is now called `Term` to better reflect its Erlang-like nature.
+/// This alias allows existing code to continue working.
+#[deprecated(since = "0.2.0", note = "Use `Term` instead of `Message`")]
+pub trait Message: Term {}
+
+#[allow(deprecated)]
+impl<T: Term> Message for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestMessage {
+    struct TestTerm {
         id: u32,
         name: String,
     }
@@ -93,44 +134,44 @@ mod tests {
 
     #[test]
     fn test_encode_decode_struct() {
-        let msg = TestMessage {
+        let term = TestTerm {
             id: 42,
             name: "hello".to_string(),
         };
-        let bytes = msg.encode();
-        let decoded = TestMessage::decode(&bytes).unwrap();
-        assert_eq!(msg, decoded);
+        let bytes = term.encode();
+        let decoded = TestTerm::decode(&bytes).unwrap();
+        assert_eq!(term, decoded);
     }
 
     #[test]
     fn test_encode_decode_enum() {
-        let msg = TestEnum::Ping(123);
-        let bytes = msg.encode();
+        let term = TestEnum::Ping(123);
+        let bytes = term.encode();
         let decoded = TestEnum::decode(&bytes).unwrap();
-        assert_eq!(msg, decoded);
+        assert_eq!(term, decoded);
 
-        let msg = TestEnum::Pong {
+        let term = TestEnum::Pong {
             value: "world".to_string(),
         };
-        let bytes = msg.encode();
+        let bytes = term.encode();
         let decoded = TestEnum::decode(&bytes).unwrap();
-        assert_eq!(msg, decoded);
+        assert_eq!(term, decoded);
     }
 
     #[test]
     fn test_decode_error() {
         let bad_bytes = vec![0xFF, 0xFF, 0xFF];
-        let result = TestMessage::decode(&bad_bytes);
+        let result = TestTerm::decode(&bad_bytes);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_try_encode() {
-        let msg = TestMessage {
+        let term = TestTerm {
             id: 1,
             name: "test".to_string(),
         };
-        let bytes = msg.try_encode();
+        let bytes = term.try_encode();
         assert!(bytes.is_some());
     }
 
@@ -170,6 +211,7 @@ mod tests {
 
     #[test]
     fn test_tuple_types() {
+        // Tuples work like Erlang tuples - great for registry keys!
         let tuple: (u32, String, bool) = (42, "test".to_string(), true);
         let bytes = tuple.encode();
         let decoded = <(u32, String, bool)>::decode(&bytes).unwrap();
@@ -182,5 +224,21 @@ mod tests {
         let bytes = unit.encode();
         let decoded = <()>::decode(&bytes).unwrap();
         assert_eq!(unit, decoded);
+    }
+
+    #[test]
+    fn test_tuple_as_registry_key() {
+        // This demonstrates using tuples as registry keys like Elixir
+        // e.g., {:room, "lobby"} or {:user, user_id}
+        let key = ("room".to_string(), "lobby".to_string());
+        let bytes = key.encode();
+        let decoded: (String, String) = Term::decode(&bytes).unwrap();
+        assert_eq!(key, decoded);
+
+        // More complex key
+        let key = ("game".to_string(), 123u64, "player1".to_string());
+        let bytes = key.encode();
+        let decoded: (String, u64, String) = Term::decode(&bytes).unwrap();
+        assert_eq!(key, decoded);
     }
 }

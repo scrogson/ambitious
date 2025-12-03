@@ -154,7 +154,7 @@ pub use dream_runtime::{
 };
 
 // Re-export core types
-pub use dream_core::{ExitReason, Message, NodeId, NodeInfo, NodeName, Pid, Ref};
+pub use dream_core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, Ref, Term};
 
 // Re-export runtime and process types
 pub use dream_process::{Runtime, RuntimeHandle};
@@ -180,7 +180,7 @@ pub use dream_macros::{dream_process, main, self_pid, GenServerImpl};
 /// ```
 pub mod prelude {
     // Core types
-    pub use dream_core::{ExitReason, Message, NodeId, NodeInfo, NodeName, Pid, Ref};
+    pub use dream_core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, Ref, Term};
 
     // Runtime and process
     pub use dream_process::{Runtime, RuntimeHandle};
@@ -189,7 +189,7 @@ pub mod prelude {
     // GenServer essentials
     pub use dream_gen_server::{
         CallResult, CastResult, ContinueArg, ContinueResult, From, GenServer, InfoResult,
-        InitResult, ServerRef,
+        InitResult, NameResolver, ServerRef,
     };
 
     // Supervisor essentials

@@ -34,7 +34,7 @@
 use crate::error::StartError;
 use crate::types::{ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, StartChildError};
 use dashmap::DashMap;
-use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -265,7 +265,7 @@ async fn dynamic_supervisor_loop(state: Arc<SupervisorState>) {
             monitor_ref,
             pid,
             reason,
-        }) = <SystemMessage as Message>::decode(&msg)
+        }) = <SystemMessage as Term>::decode(&msg)
         {
             if state.monitor_to_pid.contains_key(&monitor_ref) {
                 if let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
@@ -278,7 +278,7 @@ async fn dynamic_supervisor_loop(state: Arc<SupervisorState>) {
 
         // Check for exit signals
         if let Ok(SystemMessage::Exit { from: _, reason: _ }) =
-            <SystemMessage as Message>::decode(&msg)
+            <SystemMessage as Term>::decode(&msg)
         {
             state.terminate_all_children();
             return;

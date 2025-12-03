@@ -6,7 +6,7 @@
 use crate::process_handle::ProcessHandle;
 use crate::SendError;
 use dashmap::DashMap;
-use dream_core::{Message, Pid};
+use dream_core::{Pid, Term};
 use std::sync::{Arc, OnceLock};
 
 /// Type alias for the remote send hook function.
@@ -118,7 +118,7 @@ impl ProcessRegistry {
     }
 
     /// Sends a typed message to a process.
-    pub fn send<M: Message>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
+    pub fn send<M: Term>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
         self.send_raw(pid, msg.encode())
     }
 

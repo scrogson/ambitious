@@ -6,7 +6,7 @@ use crate::error::{DeleteError, StartError, TerminateError};
 use crate::types::{
     ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, Strategy, SupervisorFlags,
 };
-use dream_core::{ExitReason, Message, Pid, Ref, SystemMessage};
+use dream_core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use dream_process::RuntimeHandle;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -297,7 +297,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
             monitor_ref: _,
             pid,
             reason,
-        }) = <SystemMessage as Message>::decode(&msg)
+        }) = <SystemMessage as Term>::decode(&msg)
         {
             if let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
                 // Supervisor needs to stop due to restart intensity
@@ -308,7 +308,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
 
         // Check for exit signals
         if let Ok(SystemMessage::Exit { from: _, reason: _ }) =
-            <SystemMessage as Message>::decode(&msg)
+            <SystemMessage as Term>::decode(&msg)
         {
             // If we receive an exit signal, terminate
             state.terminate_all_children().await;

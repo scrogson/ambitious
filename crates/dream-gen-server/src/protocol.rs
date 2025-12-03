@@ -3,7 +3,7 @@
 //! These messages are used internally for call/cast/reply coordination.
 
 use crate::types::From;
-use dream_core::{DecodeError, ExitReason, Message, Ref};
+use dream_core::{DecodeError, ExitReason, Ref, Term};
 use serde::{Deserialize, Serialize};
 
 /// Internal GenServer protocol messages.
@@ -47,7 +47,7 @@ pub enum GenServerMessage {
 // GenServerMessage already implements Message via the blanket impl
 
 /// Encodes a call request.
-pub fn encode_call<M: Message>(from: From, request: &M) -> Vec<u8> {
+pub fn encode_call<M: Term>(from: From, request: &M) -> Vec<u8> {
     let msg = GenServerMessage::Call {
         from,
         payload: request.encode(),
@@ -56,7 +56,7 @@ pub fn encode_call<M: Message>(from: From, request: &M) -> Vec<u8> {
 }
 
 /// Encodes a cast message.
-pub fn encode_cast<M: Message>(msg: &M) -> Vec<u8> {
+pub fn encode_cast<M: Term>(msg: &M) -> Vec<u8> {
     let msg = GenServerMessage::Cast {
         payload: msg.encode(),
     };
@@ -64,7 +64,7 @@ pub fn encode_cast<M: Message>(msg: &M) -> Vec<u8> {
 }
 
 /// Encodes a reply.
-pub fn encode_reply<M: Message>(reference: Ref, reply: &M) -> Vec<u8> {
+pub fn encode_reply<M: Term>(reference: Ref, reply: &M) -> Vec<u8> {
     let msg = GenServerMessage::Reply {
         reference,
         payload: reply.encode(),
@@ -91,5 +91,5 @@ pub fn encode_continue(arg: &[u8]) -> Vec<u8> {
 
 /// Decodes a GenServer protocol message.
 pub fn decode(data: &[u8]) -> Result<GenServerMessage, DecodeError> {
-    <GenServerMessage as Message>::decode(data)
+    <GenServerMessage as Term>::decode(data)
 }
