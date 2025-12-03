@@ -1,0 +1,17 @@
+[package]
+name = "starlang-runtime"
+description = "Runtime infrastructure for Starlang - process registry, scheduler, mailboxes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+starlang-core = { workspace = true }
+tokio = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

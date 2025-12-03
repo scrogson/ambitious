@@ -31,9 +31,9 @@
 //! PubSub::unsubscribe("room:lobby");
 //! ```
 
-use dream::dist::pg;
-use dream::registry::Registry;
-use dream_core::Pid;
+use starlang::dist::pg;
+use starlang::registry::Registry;
+use starlang_core::Pid;
 use serde::Serialize;
 use std::sync::{Arc, OnceLock};
 
@@ -57,7 +57,7 @@ pub struct PubSub;
 impl PubSub {
     /// Subscribe the current process to a topic.
     pub fn subscribe(topic: &str) {
-        Self::subscribe_pid(topic, dream::current_pid());
+        Self::subscribe_pid(topic, starlang::current_pid());
     }
 
     /// Subscribe a specific PID to a topic.
@@ -78,7 +78,7 @@ impl PubSub {
 
     /// Unsubscribe the current process from a topic.
     pub fn unsubscribe(topic: &str) {
-        Self::unsubscribe_pid(topic, dream::current_pid());
+        Self::unsubscribe_pid(topic, starlang::current_pid());
     }
 
     /// Unsubscribe a specific PID from a topic.
@@ -133,7 +133,7 @@ impl PubSub {
         local_registry().dispatch(&topic_key, |entries| {
             for (pid, _) in entries {
                 if Some(*pid) != exclude {
-                    let _ = dream::send_raw(*pid, payload.clone());
+                    let _ = starlang::send_raw(*pid, payload.clone());
                 }
             }
         });
@@ -154,7 +154,7 @@ impl PubSub {
             if Some(pid) == exclude {
                 continue;
             }
-            let _ = dream::send_raw(pid, payload.clone());
+            let _ = starlang::send_raw(pid, payload.clone());
         }
     }
 

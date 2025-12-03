@@ -1,11 +1,11 @@
 //! Room channel implementation using the Channel abstraction.
 //!
-//! This demonstrates how to use DREAM Channels for chat rooms,
+//! This demonstrates how to use Starlang Channels for chat rooms,
 //! including Phoenix-style Presence tracking for real-time user lists.
 
 use async_trait::async_trait;
-use dream::channel::{Channel, HandleResult, JoinError, JoinResult, Socket};
-use dream::presence;
+use starlang::channel::{Channel, HandleResult, JoinError, JoinResult, Socket};
+use starlang::presence;
 use serde::{Deserialize, Serialize};
 
 /// Custom state stored in each socket's assigns.
@@ -96,9 +96,9 @@ impl Channel for RoomChannel {
         // Register the room globally if not already registered
         // This makes the room visible in the room list across all nodes
         let global_name = format!("room:{}", room_name);
-        if dream::dist::global::whereis(&global_name).is_none() {
+        if starlang::dist::global::whereis(&global_name).is_none() {
             // Use the socket PID as a placeholder - the room is just a topic, not a process
-            dream::dist::global::register(&global_name, socket.pid);
+            starlang::dist::global::register(&global_name, socket.pid);
             tracing::info!(room = %room_name, "Room registered globally");
         }
 
@@ -146,7 +146,7 @@ impl Channel for RoomChannel {
             ("update_nick", RoomInEvent::UpdateNick { nick }) => {
                 if nick.is_empty() || nick.len() > 32 {
                     return HandleResult::Reply {
-                        status: dream::channel::ReplyStatus::Error,
+                        status: starlang::channel::ReplyStatus::Error,
                         payload: b"nickname must be 1-32 characters".to_vec(),
                     };
                 }
@@ -161,7 +161,7 @@ impl Channel for RoomChannel {
         }
     }
 
-    async fn terminate(reason: dream::channel::TerminateReason, socket: &Socket<Self::Assigns>) {
+    async fn terminate(reason: starlang::channel::TerminateReason, socket: &Socket<Self::Assigns>) {
         tracing::info!(
             room = %socket.assigns.room_name,
             nick = %socket.assigns.nick,
@@ -180,7 +180,7 @@ impl Channel for RoomChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dream::channel::topic_matches;
+    use starlang::channel::topic_matches;
 
     #[test]
     fn test_room_channel_pattern() {

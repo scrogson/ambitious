@@ -5,7 +5,7 @@
 
 use crate::protocol::{RoomInfo, ServerEvent};
 use crate::pubsub::PubSub;
-use dream::gen_server::prelude::*;
+use starlang::gen_server::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

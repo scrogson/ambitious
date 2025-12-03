@@ -1,6 +1,6 @@
-# DREAM Chat Server
+# Starlang Chat Server
 
-A multi-user chat application demonstrating DREAM's capabilities:
+A multi-user chat application demonstrating Starlang's capabilities:
 
 - **Processes** for user sessions (one per TCP connection)
 - **GenServers** for rooms and the room registry
@@ -129,7 +129,7 @@ $ cargo run --bin chat-client
 Connecting to 127.0.0.1:9999...
 Connected! Type /help for commands.
 
-Welcome to DREAM Chat! Use /nick <name> to set your nickname.
+Welcome to Starlang Chat! Use /nick <name> to set your nickname.
 
 > /nick alice
 [Nickname set to 'alice']
@@ -144,7 +144,7 @@ Welcome to DREAM Chat! Use /nick <name> to set your nickname.
 [Goodbye!]
 ```
 
-## DREAM Concepts Demonstrated
+## Starlang Concepts Demonstrated
 
 1. **Processes**: Each client connection spawns a session process
 2. **GenServer**: Rooms and registry are GenServers with call/cast semantics

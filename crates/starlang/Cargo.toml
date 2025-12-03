@@ -1,0 +1,33 @@
+[package]
+name = "starlang"
+version = "0.1.0"
+edition = "2021"
+description = "Starlang - Erlang-style concurrency for Rust"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+starlang-core = { path = "../starlang-core" }
+starlang-runtime = { path = "../starlang-runtime" }
+starlang-process = { path = "../starlang-process" }
+starlang-gen-server = { path = "../starlang-gen-server" }
+starlang-supervisor = { path = "../starlang-supervisor" }
+starlang-application = { path = "../starlang-application" }
+starlang-macros = { path = "../starlang-macros" }
+
+# Distribution
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+tokio = { version = "1", features = ["sync", "time", "net", "io-util"] }
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+parking_lot = "0.12"
+dashmap = "6"
+async-trait = "0.1"
+hostname = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+serde = { version = "1", features = ["derive"] }

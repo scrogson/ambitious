@@ -28,7 +28,7 @@ async fn start_server(name: &str, port: u16, dist_port: u16, connect: Option<&st
         cmd.arg("--connect").arg(peer);
     }
 
-    cmd.env("RUST_LOG", "info,dream::distribution=debug")
+    cmd.env("RUST_LOG", "info,starlang::distribution=debug")
         .kill_on_drop(true)
         .spawn()
         .unwrap_or_else(|e| panic!("Failed to start server from {:?}: {}", binary, e))

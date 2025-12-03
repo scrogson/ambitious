@@ -1,6 +1,6 @@
-//! DREAM Chat Server
+//! Starlang Chat Server
 //!
-//! A multi-user chat application demonstrating DREAM's capabilities:
+//! A multi-user chat application demonstrating Starlang's capabilities:
 //! - Processes for user sessions
 //! - GenServers for rooms and registry
 //! - DynamicSupervisor for managing room processes
@@ -50,7 +50,7 @@ use server::{run_acceptor, ServerConfig};
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// DREAM Chat Server - A distributed chat application
+/// Starlang Chat Server - A distributed chat application
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -71,14 +71,14 @@ struct Args {
     connect: Option<String>,
 }
 
-#[dream::main]
+#[starlang::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            env::var("RUST_LOG").unwrap_or_else(|_| "info,dream=debug".to_string()),
+            env::var("RUST_LOG").unwrap_or_else(|_| "info,starlang=debug".to_string()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -87,14 +87,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name = %args.name,
         port = args.port,
         dist_port = args.dist_port,
-        "Starting DREAM Chat Server"
+        "Starting Starlang Chat Server"
     );
 
     // Initialize distribution
     let node_name = format!("{}@localhost", args.name);
     let dist_addr = format!("0.0.0.0:{}", args.dist_port);
 
-    dream::dist::Config::new()
+    starlang::dist::Config::new()
         .name(&node_name)
         .listen_addr(&dist_addr)
         .start()
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to another node if specified
     if let Some(ref peer_addr) = args.connect {
-        match dream::dist::connect(peer_addr).await {
+        match starlang::dist::connect(peer_addr).await {
             Ok(node_id) => {
                 tracing::info!(peer = %peer_addr, ?node_id, "Connected to peer node");
             }
@@ -120,12 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start the room supervisor (DynamicSupervisor for managing room processes)
     let room_sup_pid = room_supervisor::start().await.expect("Failed to start room supervisor");
-    dream::register(room_supervisor::NAME, room_sup_pid);
+    starlang::register(room_supervisor::NAME, room_sup_pid);
     tracing::info!(pid = ?room_sup_pid, "Room supervisor started and registered");
 
     // Start the room registry and register it by name
     let registry_pid = registry::Registry::start().await.expect("Failed to start registry");
-    dream::register(registry::Registry::NAME, registry_pid);
+    starlang::register(registry::Registry::NAME, registry_pid);
     tracing::info!(pid = ?registry_pid, "Registry started and registered");
 
     // Configure and run the TCP server

@@ -1,0 +1,17 @@
+[package]
+name = "starlang-core"
+description = "Core types for Starlang - Erlang-style concurrency for Rust"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+starlang-atom = { path = "../starlang-atom" }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

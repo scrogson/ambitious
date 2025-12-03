@@ -8,8 +8,8 @@
 use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
 use crate::protocol::{frame_message, parse_frame, ClientCommand, ServerEvent};
 use crate::registry::Registry;
-use dream::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
-use dream::Pid;
+use starlang::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
+use starlang::Pid;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,7 +44,7 @@ impl Session {
     pub async fn run(mut self) {
         // Send welcome message
         self.send_event(ServerEvent::Welcome {
-            message: "Welcome to DREAM Chat! Use /nick <name> to set your nickname.".to_string(),
+            message: "Welcome to Starlang Chat! Use /nick <name> to set your nickname.".to_string(),
         })
         .await;
 
@@ -61,7 +61,7 @@ impl Session {
             }
 
             // First, drain any pending process messages (non-blocking)
-            while let Some(data) = dream::try_recv() {
+            while let Some(data) = starlang::try_recv() {
                 self.handle_channel_message(&data).await;
             }
 
@@ -73,7 +73,7 @@ impl Session {
                 biased; // Prefer process messages over TCP
 
                 // Check for messages from channels (broadcasts, pushes)
-                msg = dream::recv_timeout(Duration::from_millis(100)) => {
+                msg = starlang::recv_timeout(Duration::from_millis(100)) => {
                     drop(guard); // Release lock before processing
                     if let Ok(Some(data)) = msg {
                         self.handle_channel_message(&data).await;
@@ -322,11 +322,11 @@ impl Session {
             };
             if let Ok(bytes) = postcard::to_allocvec(&msg) {
                 let group = format!("channel:{}", topic);
-                let members = dream::dist::pg::get_members(&group);
-                let my_pid = dream::current_pid();
+                let members = starlang::dist::pg::get_members(&group);
+                let my_pid = starlang::current_pid();
                 for pid in members {
                     if pid != my_pid {
-                        let _ = dream::send_raw(pid, bytes.clone());
+                        let _ = starlang::send_raw(pid, bytes.clone());
                     }
                 }
             }
@@ -346,9 +346,9 @@ impl Session {
             };
             if let Ok(bytes) = postcard::to_allocvec(&msg) {
                 let group = format!("channel:{}", topic);
-                let members = dream::dist::pg::get_members(&group);
+                let members = starlang::dist::pg::get_members(&group);
                 for pid in members {
-                    let _ = dream::send_raw(pid, bytes.clone());
+                    let _ = starlang::send_raw(pid, bytes.clone());
                 }
             }
         }
@@ -360,7 +360,7 @@ impl Session {
         // Small delay to allow pg membership to sync across nodes
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let my_pid = dream::current_pid();
+        let my_pid = starlang::current_pid();
         let event = RoomOutEvent::PresenceSyncRequest {
             from_pid: format!("{:?}", my_pid),
         };
@@ -372,7 +372,7 @@ impl Session {
             };
             if let Ok(bytes) = postcard::to_allocvec(&msg) {
                 let group = format!("channel:{}", topic);
-                let members = dream::dist::pg::get_members(&group);
+                let members = starlang::dist::pg::get_members(&group);
                 tracing::debug!(
                     group = %group,
                     member_count = members.len(),
@@ -382,7 +382,7 @@ impl Session {
                 for pid in members {
                     if pid != my_pid {
                         tracing::debug!(target_pid = ?pid, "Sending presence sync request");
-                        let _ = dream::send_raw(pid, bytes.clone());
+                        let _ = starlang::send_raw(pid, bytes.clone());
                     }
                 }
             }
@@ -401,7 +401,7 @@ impl Session {
     /// Respond to a presence sync request by announcing our nick.
     async fn respond_to_presence_sync(&self, topic: &str, _requester_pid: &str) {
         if let Some(nick) = &self.nick {
-            let my_pid = dream::current_pid();
+            let my_pid = starlang::current_pid();
             let event = RoomOutEvent::PresenceSyncResponse { nick: nick.clone() };
             if let Ok(payload) = postcard::to_allocvec(&event) {
                 let msg = ChannelReply::Push {
@@ -412,7 +412,7 @@ impl Session {
                 if let Ok(bytes) = postcard::to_allocvec(&msg) {
                     // Send to all members except ourselves
                     let group = format!("channel:{}", topic);
-                    let members = dream::dist::pg::get_members(&group);
+                    let members = starlang::dist::pg::get_members(&group);
                     tracing::debug!(
                         topic = %topic,
                         nick = %nick,
@@ -421,7 +421,7 @@ impl Session {
                     );
                     for pid in members {
                         if pid != my_pid {
-                            let _ = dream::send_raw(pid, bytes.clone());
+                            let _ = starlang::send_raw(pid, bytes.clone());
                         }
                     }
                 }
@@ -480,9 +480,9 @@ impl Session {
             };
             if let Ok(bytes) = postcard::to_allocvec(&msg) {
                 let group = format!("channel:{}", topic);
-                let members = dream::dist::pg::get_members(&group);
+                let members = starlang::dist::pg::get_members(&group);
                 for pid in members {
-                    let _ = dream::send_raw(pid, bytes.clone());
+                    let _ = starlang::send_raw(pid, bytes.clone());
                 }
             }
         }
@@ -493,7 +493,7 @@ impl Session {
         let topic = format!("room:{}", room_name);
 
         // Use Presence to get the list of users with their metadata
-        let presences = dream::presence::list(&topic);
+        let presences = starlang::presence::list(&topic);
 
         // Extract nicknames from presence metadata
         let users: Vec<String> = presences
@@ -537,15 +537,15 @@ impl Session {
 
         // Terminate all channels
         self.channels
-            .terminate(dream::channel::TerminateReason::Closed)
+            .terminate(starlang::channel::TerminateReason::Closed)
             .await;
     }
 }
 
 /// Spawn a session process for a new connection.
 pub fn spawn_session(stream: TcpStream) -> Pid {
-    dream::spawn(move || async move {
-        let pid = dream::current_pid();
+    starlang::spawn(move || async move {
+        let pid = starlang::current_pid();
         let session = Session::new(stream, pid);
         session.run().await;
     })

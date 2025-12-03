@@ -1,0 +1,17 @@
+[package]
+name = "starlang-application"
+version = "0.1.0"
+edition = "2021"
+description = "Application lifecycle management for Starlang"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+starlang-core = { path = "../starlang-core" }
+starlang-runtime = { path = "../starlang-runtime" }
+starlang-process = { path = "../starlang-process" }
+starlang-supervisor = { path = "../starlang-supervisor" }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

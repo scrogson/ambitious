@@ -15,7 +15,7 @@
 //!
 //! The client looks for config in:
 //! 1. `--config <path>` argument
-//! 2. `~/.config/dream-chat/config.toml`
+//! 2. `~/.config/starlang-chat/config.toml`
 //! 3. Built-in defaults
 //!
 //! # Keybindings
@@ -234,7 +234,7 @@ impl Config {
 
         // Try default config location
         if let Some(config_dir) = dirs::config_dir() {
-            let default_path = config_dir.join("dream-chat").join("config.toml");
+            let default_path = config_dir.join("starlang-chat").join("config.toml");
             if let Ok(contents) = std::fs::read_to_string(&default_path) {
                 if let Ok(cfg) = toml::from_str(&contents) {
                     return cfg;
@@ -247,7 +247,7 @@ impl Config {
     }
 }
 
-/// DREAM Chat Client
+/// Starlang Chat Client
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {

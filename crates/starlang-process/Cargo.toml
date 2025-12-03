@@ -1,0 +1,17 @@
+[package]
+name = "starlang-process"
+description = "Process primitives for Starlang - spawn, link, monitor, send/receive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+starlang-core = { workspace = true }
+starlang-runtime = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

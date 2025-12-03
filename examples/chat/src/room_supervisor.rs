@@ -4,10 +4,10 @@
 //! Rooms are started on demand and supervised for fault tolerance.
 
 use crate::room::{Room, RoomInit};
-use dream::gen_server;
-use dream::Pid;
-use dream_supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
-use dream_supervisor::{ChildSpec, RestartType, StartChildError};
+use starlang::gen_server;
+use starlang::Pid;
+use starlang_supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
+use starlang_supervisor::{ChildSpec, RestartType, StartChildError};
 use std::sync::OnceLock;
 
 /// Global room supervisor PID.
@@ -19,7 +19,7 @@ pub const NAME: &str = "room_supervisor";
 /// Starts the room supervisor.
 ///
 /// This should be called once during application startup.
-pub async fn start() -> Result<Pid, dream_supervisor::StartError> {
+pub async fn start() -> Result<Pid, starlang_supervisor::StartError> {
     let opts = DynamicSupervisorOpts::new()
         .max_restarts(10)
         .max_seconds(5);
@@ -28,7 +28,7 @@ pub async fn start() -> Result<Pid, dream_supervisor::StartError> {
 
     ROOM_SUPERVISOR
         .set(pid)
-        .map_err(|_| dream_supervisor::StartError::InitFailed("already started".to_string()))?;
+        .map_err(|_| starlang_supervisor::StartError::InitFailed("already started".to_string()))?;
 
     Ok(pid)
 }

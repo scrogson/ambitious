@@ -7,13 +7,13 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sonny Scroggin <sonny@scrogson.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/scrogson/dream"
+repository = "https://github.com/scrogson/starlang"
 
 [workspace.dependencies]
 # Internal crates
-dream-core = { path = "crates/dream-core" }
-dream-runtime = { path = "crates/dream-runtime" }
-dream-process = { path = "crates/dream-process" }
+starlang-core = { path = "crates/starlang-core" }
+starlang-runtime = { path = "crates/starlang-runtime" }
+starlang-process = { path = "crates/starlang-process" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
