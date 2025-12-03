@@ -1,13 +1,16 @@
-//! Chat room implementation using GenServer.
+//! Chat room GenServer implementation.
 //!
-//! Each room is a GenServer that manages its members and broadcasts messages.
-//! Uses PubSub (Registry + pg) for distributed room membership.
+//! Each room is a GenServer that stores message history and is registered globally.
+//! When users join a room, they fetch history directly from the room.
 
-use crate::protocol::{RoomInfo, ServerEvent};
-use crate::pubsub::PubSub;
+use crate::protocol::HistoryMessage;
 use serde::{Deserialize, Serialize};
 use starlang::gen_server::prelude::*;
-use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Maximum number of messages to keep in history.
+const MAX_HISTORY: usize = 50;
 
 /// Room GenServer implementation.
 pub struct Room;
@@ -15,52 +18,43 @@ pub struct Room;
 /// Room state.
 pub struct RoomState {
     /// Room name.
-    pub name: String,
-    /// Members: PID -> nickname.
-    /// This is the authoritative list of nicknames for members.
-    pub members: HashMap<Pid, String>,
+    name: String,
+    /// Message history.
+    history: VecDeque<HistoryMessage>,
 }
 
 /// Initialization argument for Room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomInit {
+    /// Room name.
     pub name: String,
 }
 
 /// Call requests to Room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoomCall {
-    /// Get room info.
-    GetInfo,
-    /// Get list of members.
-    GetMembers,
+    /// Get message history.
+    GetHistory,
 }
 
 /// Call replies from Room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoomReply {
-    /// Room info.
-    Info(RoomInfo),
-    /// List of member nicknames.
-    Members(Vec<String>),
+    /// Message history.
+    History(Vec<HistoryMessage>),
 }
 
 /// Cast messages to Room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoomCast {
-    /// A user joins the room.
-    Join { pid: Pid, nick: String },
-    /// A user leaves the room.
-    Leave { pid: Pid },
-    /// Broadcast a message from a user.
-    Broadcast { from_pid: Pid, text: String },
-    /// Update a user's nickname.
-    UpdateNick { pid: Pid, new_nick: String },
+    /// Store a new message.
+    StoreMessage {
+        /// Who sent the message.
+        from: String,
+        /// Message text.
+        text: String,
+    },
 }
-
-/// Internal message type for sending events to user sessions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserEvent(pub ServerEvent);
 
 #[async_trait]
 impl GenServer for Room {
@@ -74,7 +68,7 @@ impl GenServer for Room {
         tracing::info!(room = %arg.name, "Room created");
         InitResult::Ok(RoomState {
             name: arg.name,
-            members: HashMap::new(),
+            history: VecDeque::new(),
         })
     }
 
@@ -84,103 +78,52 @@ impl GenServer for Room {
         state: &mut RoomState,
     ) -> CallResult<RoomState, RoomReply> {
         match request {
-            RoomCall::GetInfo => {
-                let info = RoomInfo {
-                    name: state.name.clone(),
-                    user_count: state.members.len(),
-                };
-                let new_state = RoomState {
-                    name: state.name.clone(),
-                    members: state.members.clone(),
-                };
-                CallResult::Reply(RoomReply::Info(info), new_state)
-            }
-            RoomCall::GetMembers => {
-                let members: Vec<String> = state.members.values().cloned().collect();
-                let new_state = RoomState {
-                    name: state.name.clone(),
-                    members: state.members.clone(),
-                };
-                CallResult::Reply(RoomReply::Members(members), new_state)
+            RoomCall::GetHistory => {
+                let history: Vec<HistoryMessage> = state.history.iter().cloned().collect();
+                CallResult::reply(
+                    RoomReply::History(history),
+                    RoomState {
+                        name: state.name.clone(),
+                        history: state.history.clone(),
+                    },
+                )
             }
         }
     }
 
     async fn handle_cast(msg: RoomCast, state: &mut RoomState) -> CastResult<RoomState> {
-        let topic = room_topic(&state.name);
-
         match msg {
-            RoomCast::Join { pid, nick } => {
-                tracing::info!(room = %state.name, nick = %nick, ?pid, "User joined");
+            RoomCast::StoreMessage { from, text } => {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
 
-                // Notify existing members (broadcast before adding new user)
-                let event = ServerEvent::UserJoined {
-                    room: state.name.clone(),
-                    nick: nick.clone(),
+                let msg = HistoryMessage {
+                    from,
+                    text,
+                    timestamp,
                 };
-                PubSub::broadcast(&topic, &UserEvent(event));
 
-                // Subscribe to room topic via PubSub
-                PubSub::subscribe_pid(&topic, pid);
-                state.members.insert(pid, nick);
+                state.history.push_back(msg);
 
-                CastResult::NoReply(RoomState {
-                    name: state.name.clone(),
-                    members: state.members.clone(),
-                })
-            }
-            RoomCast::Leave { pid } => {
-                if let Some(nick) = state.members.remove(&pid) {
-                    tracing::info!(room = %state.name, nick = %nick, "User left");
-
-                    // Unsubscribe from room topic
-                    PubSub::unsubscribe_pid(&topic, pid);
-
-                    // Notify remaining members
-                    let event = ServerEvent::UserLeft {
-                        room: state.name.clone(),
-                        nick,
-                    };
-                    PubSub::broadcast(&topic, &UserEvent(event));
+                // Trim if too long
+                while state.history.len() > MAX_HISTORY {
+                    state.history.pop_front();
                 }
 
-                CastResult::NoReply(RoomState {
+                CastResult::noreply(RoomState {
                     name: state.name.clone(),
-                    members: state.members.clone(),
-                })
-            }
-            RoomCast::Broadcast { from_pid, text } => {
-                if let Some(nick) = state.members.get(&from_pid) {
-                    let event = ServerEvent::Message {
-                        room: state.name.clone(),
-                        from: nick.clone(),
-                        text,
-                    };
-                    PubSub::broadcast(&topic, &UserEvent(event));
-                }
-
-                CastResult::NoReply(RoomState {
-                    name: state.name.clone(),
-                    members: state.members.clone(),
-                })
-            }
-            RoomCast::UpdateNick { pid, new_nick } => {
-                if let Some(nick) = state.members.get_mut(&pid) {
-                    *nick = new_nick;
-                }
-
-                CastResult::NoReply(RoomState {
-                    name: state.name.clone(),
-                    members: state.members.clone(),
+                    history: state.history.clone(),
                 })
             }
         }
     }
 
     async fn handle_info(_msg: Vec<u8>, state: &mut RoomState) -> InfoResult<RoomState> {
-        InfoResult::NoReply(RoomState {
+        CastResult::noreply(RoomState {
             name: state.name.clone(),
-            members: state.members.clone(),
+            history: state.history.clone(),
         })
     }
 
@@ -188,14 +131,9 @@ impl GenServer for Room {
         _arg: ContinueArg,
         state: &mut RoomState,
     ) -> ContinueResult<RoomState> {
-        ContinueResult::NoReply(RoomState {
+        CastResult::noreply(RoomState {
             name: state.name.clone(),
-            members: state.members.clone(),
+            history: state.history.clone(),
         })
     }
-}
-
-/// Generate the PubSub topic name for a room.
-fn room_topic(room_name: &str) -> String {
-    format!("room:{}", room_name)
 }

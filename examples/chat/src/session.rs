@@ -8,6 +8,8 @@
 use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
 use crate::protocol::{frame_message, parse_frame, ClientCommand, ServerEvent};
 use crate::registry::Registry;
+use crate::room::{Room, RoomCall, RoomCast, RoomReply};
+use crate::room_supervisor;
 use starlang::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
 use starlang::Pid;
 use std::sync::Arc;
@@ -179,10 +181,6 @@ impl Session {
                 }
             }
         }
-        // Also try legacy UserEvent format for backwards compatibility
-        else if let Ok(event) = postcard::from_bytes::<crate::room::UserEvent>(data) {
-            self.send_event(event.0).await;
-        }
     }
 
     /// Handle a client command. Returns false if the client should disconnect.
@@ -267,6 +265,15 @@ impl Session {
             return;
         }
 
+        // Get or create the room GenServer first (this registers it globally)
+        let room_pid = match room_supervisor::get_or_create_room(&room_name).await {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                tracing::warn!(room = %room_name, error = ?e, "Failed to create room");
+                None
+            }
+        };
+
         // Create join payload
         let join_payload = JoinPayload { nick: nick.clone() };
         let payload_bytes = match postcard::to_allocvec(&join_payload) {
@@ -290,6 +297,26 @@ impl Session {
 
         match reply {
             ChannelReply::JoinOk { .. } => {
+                // Fetch history from the room if we have it
+                if let Some(room_pid) = room_pid {
+                    if let Ok(RoomReply::History(history_messages)) =
+                        starlang::gen_server::call::<Room>(
+                            room_pid,
+                            RoomCall::GetHistory,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        if !history_messages.is_empty() {
+                            self.send_event(ServerEvent::History {
+                                room: room_name.clone(),
+                                messages: history_messages,
+                            })
+                            .await;
+                        }
+                    }
+                }
+
                 // Broadcast that we joined to other members
                 self.broadcast_join(&topic, &nick).await;
                 self.send_event(ServerEvent::Joined {
@@ -470,8 +497,22 @@ impl Session {
             None => return,
         };
 
+        // Store message in room history
+        if let Some(room_pid) = room_supervisor::get_room(&room) {
+            let _ = starlang::gen_server::cast::<Room>(
+                room_pid,
+                RoomCast::StoreMessage {
+                    from: nick.clone(),
+                    text: text.clone(),
+                },
+            );
+        }
+
         // Broadcast message to all room members
-        let event = RoomOutEvent::Message { from: nick, text };
+        let event = RoomOutEvent::Message {
+            from: nick,
+            text: text.clone(),
+        };
         if let Ok(payload) = postcard::to_allocvec(&event) {
             let msg = ChannelReply::Push {
                 topic: topic.to_string(),

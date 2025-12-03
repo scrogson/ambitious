@@ -2,8 +2,10 @@
 //!
 //! Uses DynamicSupervisor to manage chat room processes dynamically.
 //! Rooms are started on demand and supervised for fault tolerance.
+//! Each room is registered globally so it's accessible from any node.
 
 use crate::room::{Room, RoomInit};
+use starlang::dist::global;
 use starlang::gen_server;
 use starlang::Pid;
 use starlang_supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
@@ -37,16 +39,51 @@ pub fn pid() -> Option<Pid> {
     ROOM_SUPERVISOR.get().copied()
 }
 
-/// Starts a new room under the supervisor.
+/// Get the global name for a room.
+fn room_global_name(name: &str) -> String {
+    format!("room:{}", name)
+}
+
+/// Get or create a room by name.
 ///
-/// # Arguments
-///
-/// * `name` - The room name
-///
-/// # Returns
-///
-/// The PID of the started room GenServer.
-pub async fn start_room(name: String) -> Result<Pid, StartChildError> {
+/// If the room exists globally (on any node), returns its PID.
+/// Otherwise, creates a new room under this node's supervisor and registers it globally.
+pub async fn get_or_create_room(name: &str) -> Result<Pid, StartChildError> {
+    let global_name = room_global_name(name);
+
+    // Check if room already exists globally
+    if let Some(pid) = global::whereis(&global_name) {
+        return Ok(pid);
+    }
+
+    // Create the room
+    let room_pid = start_room(name.to_string()).await?;
+
+    // Try to register globally
+    if global::register(&global_name, room_pid) {
+        tracing::info!(room = %name, pid = ?room_pid, "Room registered globally");
+        Ok(room_pid)
+    } else {
+        // Another node beat us - use theirs and terminate ours
+        if let Some(existing_pid) = global::whereis(&global_name) {
+            tracing::info!(room = %name, "Room exists globally, using existing");
+            let _ = terminate_room(room_pid);
+            Ok(existing_pid)
+        } else {
+            // Weird state - just return what we created
+            Ok(room_pid)
+        }
+    }
+}
+
+/// Get a room by name if it exists.
+pub fn get_room(name: &str) -> Option<Pid> {
+    let global_name = room_global_name(name);
+    global::whereis(&global_name)
+}
+
+/// Starts a new room under the supervisor (internal use).
+async fn start_room(name: String) -> Result<Pid, StartChildError> {
     let sup_pid = ROOM_SUPERVISOR
         .get()
         .copied()
@@ -73,15 +110,4 @@ pub fn terminate_room(room_pid: Pid) -> Result<(), String> {
         .ok_or_else(|| "room supervisor not started".to_string())?;
 
     dynamic_supervisor::terminate_child(sup_pid, room_pid)
-}
-
-/// Returns the count of active rooms.
-#[allow(dead_code)]
-pub fn count_rooms() -> Result<usize, String> {
-    let sup_pid = ROOM_SUPERVISOR
-        .get()
-        .copied()
-        .ok_or_else(|| "room supervisor not started".to_string())?;
-
-    Ok(dynamic_supervisor::count_children(sup_pid)?.active)
 }

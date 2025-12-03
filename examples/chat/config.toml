@@ -37,7 +37,17 @@ room_normal = "white"
 message_nick = "cyan"
 message_system = "dark_gray"
 message_text = "white"
+message_timestamp = "dark_gray"
 
 # Status bar
 status_connected = "cyan"
 status_disconnected = "red"
+
+[display]
+# Timestamp format (strftime-style). Set to empty string "" to disable timestamps.
+# Examples:
+#   "%H:%M"           -> 14:30
+#   "%H:%M:%S"        -> 14:30:45
+#   "%Y-%m-%d %H:%M"  -> 2025-01-15 14:30
+#   "%I:%M %p"        -> 02:30 PM
+timestamp_format = "%H:%M"

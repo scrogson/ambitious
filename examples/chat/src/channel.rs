@@ -93,15 +93,6 @@ impl Channel for RoomChannel {
 
         tracing::info!(room = %room_name, nick = %payload.nick, "User joining room");
 
-        // Register the room globally if not already registered
-        // This makes the room visible in the room list across all nodes
-        let global_name = format!("room:{}", room_name);
-        if starlang::dist::global::whereis(&global_name).is_none() {
-            // Use the socket PID as a placeholder - the room is just a topic, not a process
-            starlang::dist::global::register(&global_name, socket.pid);
-            tracing::info!(room = %room_name, "Room registered globally");
-        }
-
         // Track presence for this user in the room
         let presence_key = format!("user:{}", socket.pid);
         let presence_meta = UserPresenceMeta {

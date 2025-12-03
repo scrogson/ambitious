@@ -1,14 +1,10 @@
 //! Room registry implementation using GenServer.
 //!
-//! The registry manages all chat rooms, creating them on demand
-//! and providing lookups by name. Rooms are registered globally
-//! so they are accessible across all connected nodes.
-//!
-//! Room processes are started under the room supervisor (DynamicSupervisor)
-//! for fault tolerance.
+//! The registry provides room lookups across the cluster.
+//! Rooms are registered globally when users join via Channels,
+//! making them visible to all nodes.
 
 use crate::protocol::RoomInfo;
-use crate::room_supervisor;
 use serde::{Deserialize, Serialize};
 use starlang::dist::global;
 use starlang::gen_server::{self, prelude::*};
@@ -23,8 +19,6 @@ pub struct Registry;
 pub enum RegistryCall {
     /// Get a room by name.
     GetRoom(String),
-    /// Get or create a room by name.
-    GetOrCreateRoom(String),
     /// List all rooms with info.
     ListRooms,
 }
@@ -64,15 +58,6 @@ impl Registry {
         }
     }
 
-    /// Get or create a room by name.
-    #[allow(dead_code)]
-    pub async fn get_or_create_room(name: &str) -> Option<Pid> {
-        match Self::call(RegistryCall::GetOrCreateRoom(name.to_string())).await? {
-            RegistryReply::Room(pid) => pid,
-            _ => None,
-        }
-    }
-
     /// List all rooms.
     pub async fn list_rooms() -> Vec<RoomInfo> {
         match Self::call(RegistryCall::ListRooms).await {
@@ -97,6 +82,7 @@ impl Registry {
 
 /// Registry state.
 pub struct RegistryState {
+    /// Local cache of room name -> PID mappings.
     rooms: HashMap<String, Pid>,
 }
 
@@ -141,79 +127,6 @@ impl GenServer for Registry {
                         rooms: state.rooms.clone(),
                     },
                 )
-            }
-
-            RegistryCall::GetOrCreateRoom(name) => {
-                let global_name = format!("room:{}", name);
-
-                // Check local cache first
-                if let Some(&pid) = state.rooms.get(&name) {
-                    return CallResult::reply(
-                        RegistryReply::Room(Some(pid)),
-                        RegistryState {
-                            rooms: state.rooms.clone(),
-                        },
-                    );
-                }
-
-                // Check global registry (might exist on another node)
-                let all_global = global::registered();
-                tracing::debug!(global_name = %global_name, all_names = ?all_global, "Checking global registry");
-                if let Some(pid) = global::whereis(&global_name) {
-                    tracing::info!(room = %name, pid = ?pid, "Found room in global registry");
-                    // Cache it locally
-                    state.rooms.insert(name, pid);
-                    return CallResult::reply(
-                        RegistryReply::Room(Some(pid)),
-                        RegistryState {
-                            rooms: state.rooms.clone(),
-                        },
-                    );
-                }
-
-                // Create new room under the DynamicSupervisor
-                match room_supervisor::start_room(name.clone()).await {
-                    Ok(pid) => {
-                        tracing::info!(room = %name, pid = ?pid, "Room created under supervisor");
-
-                        // Register globally so other nodes can find it
-                        if global::register(&global_name, pid) {
-                            tracing::info!(room = %name, "Room registered globally");
-                        } else {
-                            // Another node may have registered it in the meantime
-                            // Check global registry and use that PID instead
-                            if let Some(existing_pid) = global::whereis(&global_name) {
-                                tracing::info!(room = %name, "Room exists globally, using existing");
-                                // Terminate the room we just created since we'll use the existing one
-                                let _ = room_supervisor::terminate_room(pid);
-                                state.rooms.insert(name, existing_pid);
-                                return CallResult::reply(
-                                    RegistryReply::Room(Some(existing_pid)),
-                                    RegistryState {
-                                        rooms: state.rooms.clone(),
-                                    },
-                                );
-                            }
-                        }
-
-                        state.rooms.insert(name, pid);
-                        CallResult::reply(
-                            RegistryReply::Room(Some(pid)),
-                            RegistryState {
-                                rooms: state.rooms.clone(),
-                            },
-                        )
-                    }
-                    Err(e) => {
-                        tracing::error!(room = %name, error = ?e, "Failed to create room");
-                        CallResult::reply(
-                            RegistryReply::Room(None),
-                            RegistryState {
-                                rooms: state.rooms.clone(),
-                            },
-                        )
-                    }
-                }
             }
 
             RegistryCall::ListRooms => {

@@ -24,6 +24,17 @@ pub enum ClientCommand {
     Quit,
 }
 
+/// A historical message for replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    /// Who sent the message.
+    pub from: String,
+    /// The message text.
+    pub text: String,
+    /// Unix timestamp in seconds.
+    pub timestamp: u64,
+}
+
 /// Events sent from server to client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerEvent {
@@ -53,6 +64,11 @@ pub enum ServerEvent {
     RoomList { rooms: Vec<RoomInfo> },
     /// List of users in a room.
     UserList { room: String, users: Vec<String> },
+    /// Message history replay on join.
+    History {
+        room: String,
+        messages: Vec<HistoryMessage>,
+    },
     /// Generic error message.
     Error { message: String },
     /// Server is shutting down.

@@ -31,6 +31,7 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 
+use chrono::{Local, TimeZone};
 use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -63,7 +64,7 @@ use tokio::{
 #[path = "../protocol.rs"]
 mod protocol;
 
-use protocol::{frame_message, parse_frame, ClientCommand, RoomInfo, ServerEvent};
+use protocol::{frame_message, parse_frame, ClientCommand, HistoryMessage, RoomInfo, ServerEvent};
 
 /// Color configuration from TOML
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +138,7 @@ struct ThemeConfig {
     message_nick: ColorValue,
     message_system: ColorValue,
     message_text: ColorValue,
+    message_timestamp: ColorValue,
     status_connected: ColorValue,
     status_disconnected: ColorValue,
 }
@@ -158,6 +160,7 @@ impl Default for ThemeConfig {
             message_nick: ColorValue::Named("cyan".to_string()),
             message_system: ColorValue::Named("dark_gray".to_string()),
             message_text: ColorValue::Named("white".to_string()),
+            message_timestamp: ColorValue::Named("dark_gray".to_string()),
             status_connected: ColorValue::Named("cyan".to_string()),
             status_disconnected: ColorValue::Named("red".to_string()),
         }
@@ -181,6 +184,7 @@ struct Theme {
     message_nick: Color,
     message_system: Color,
     message_text: Color,
+    message_timestamp: Color,
     status_connected: Color,
     status_disconnected: Color,
 }
@@ -202,6 +206,7 @@ impl From<ThemeConfig> for Theme {
             message_nick: cfg.message_nick.to_color(),
             message_system: cfg.message_system.to_color(),
             message_text: cfg.message_text.to_color(),
+            message_timestamp: cfg.message_timestamp.to_color(),
             status_connected: cfg.status_connected.to_color(),
             status_disconnected: cfg.status_disconnected.to_color(),
         }
@@ -214,11 +219,29 @@ impl Default for Theme {
     }
 }
 
+/// Display configuration
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct DisplayConfig {
+    /// Timestamp format (strftime-style). Set to empty string to disable.
+    /// Examples: "%H:%M", "%H:%M:%S", "%Y-%m-%d %H:%M"
+    timestamp_format: String,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            timestamp_format: "%H:%M".to_string(),
+        }
+    }
+}
+
 /// Full config file structure
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct Config {
     theme: ThemeConfig,
+    display: DisplayConfig,
 }
 
 impl Config {
@@ -295,8 +318,8 @@ impl Focus {
 struct ChatMessage {
     from: String,
     text: String,
-    #[allow(dead_code)]
-    timestamp: Instant,
+    /// Unix timestamp in seconds (if available from history)
+    timestamp: Option<u64>,
     is_system: bool,
 }
 
@@ -314,6 +337,8 @@ struct App {
     server_addr: String,
     /// Theme colors
     theme: Theme,
+    /// Timestamp format (strftime-style, empty to disable)
+    timestamp_format: String,
     /// Current nickname
     nick: Option<String>,
     /// Available rooms
@@ -343,10 +368,11 @@ struct App {
 }
 
 impl App {
-    fn new(server_addr: String, theme: Theme) -> Self {
+    fn new(server_addr: String, theme: Theme, timestamp_format: String) -> Self {
         Self {
             server_addr,
             theme,
+            timestamp_format,
             nick: None,
             rooms: vec![],
             room_list_state: ListState::default(),
@@ -372,7 +398,7 @@ impl App {
         state.messages.push(ChatMessage {
             from: "***".to_string(),
             text: text.into(),
-            timestamp: Instant::now(),
+            timestamp: None,
             is_system: true,
         });
         if self.current_room.as_deref() != Some(room) {
@@ -382,10 +408,15 @@ impl App {
 
     fn add_chat_message(&mut self, room: &str, from: &str, text: &str) {
         let state = self.room_states.entry(room.to_string()).or_default();
+        // Use current time for live messages
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         state.messages.push(ChatMessage {
             from: from.to_string(),
             text: text.to_string(),
-            timestamp: Instant::now(),
+            timestamp: Some(now),
             is_system: false,
         });
         if self.current_room.as_deref() != Some(room) {
@@ -393,6 +424,17 @@ impl App {
         }
         // Auto-scroll to bottom
         self.scroll_offset = 0;
+    }
+
+    fn add_history_message(&mut self, room: &str, msg: HistoryMessage) {
+        let state = self.room_states.entry(room.to_string()).or_default();
+        // History arrives in chronological order, so just append
+        state.messages.push(ChatMessage {
+            from: msg.from,
+            text: msg.text,
+            timestamp: Some(msg.timestamp),
+            is_system: false,
+        });
     }
 
     fn select_room(&mut self, room: &str) {
@@ -448,6 +490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let config = Config::load(args.config.as_ref());
     let theme: Theme = config.theme.into();
+    let timestamp_format = config.display.timestamp_format;
 
     // Connect to server
     let stream = TcpStream::connect(&addr).await?;
@@ -461,7 +504,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let mut app = App::new(addr.clone(), theme);
+    let mut app = App::new(addr.clone(), theme, timestamp_format);
     app.connected = true;
     app.set_status(format!("Connected to {}", addr));
 
@@ -611,7 +654,6 @@ async fn handle_server_event(
         ServerEvent::Joined { room } => {
             app.room_states.entry(room.clone()).or_default();
             app.select_room(&room);
-            app.add_system_message(&room, "You joined the room");
             // Request user list
             let frame = frame_message(&ClientCommand::ListUsers(room));
             writer.write_all(&frame).await?;
@@ -635,7 +677,7 @@ async fn handle_server_event(
             app.add_chat_message(&room, &from, &text);
         }
         ServerEvent::UserJoined { room, nick } => {
-            app.add_system_message(&room, format!("{} joined", nick));
+            // Update user list (no system message - user list shows who's here)
             if let Some(state) = app.room_states.get_mut(&room) {
                 if !state.users.contains(&nick) {
                     state.users.push(nick);
@@ -644,7 +686,7 @@ async fn handle_server_event(
             }
         }
         ServerEvent::UserLeft { room, nick } => {
-            app.add_system_message(&room, format!("{} left", nick));
+            // Update user list (no system message - user list shows who's here)
             if let Some(state) = app.room_states.get_mut(&room) {
                 state.users.retain(|u| u != &nick);
             }
@@ -662,6 +704,12 @@ async fn handle_server_event(
             if let Some(state) = app.room_states.get_mut(&room) {
                 state.users = users;
                 state.users.sort();
+            }
+        }
+        ServerEvent::History { room, messages } => {
+            // Add history messages to the room
+            for msg in messages {
+                app.add_history_message(&room, msg);
             }
         }
         ServerEvent::Error { message } => {
@@ -1072,15 +1120,30 @@ fn render_chat(f: &mut Frame, app: &App, area: Rect) {
                         ),
                     ])
                 } else {
-                    Line::from(vec![
-                        Span::styled("<", Style::default().fg(app.theme.border_unfocused)),
-                        Span::styled(
-                            &msg.from,
-                            Style::default().fg(app.theme.message_nick).bold(),
-                        ),
-                        Span::styled("> ", Style::default().fg(app.theme.border_unfocused)),
-                        Span::styled(&msg.text, Style::default().fg(app.theme.message_text)),
-                    ])
+                    let mut spans = Vec::new();
+
+                    // Add timestamp if format is configured and timestamp exists
+                    if !app.timestamp_format.is_empty() {
+                        if let Some(ts) = msg.timestamp {
+                            if let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
+                                let formatted = dt.format(&app.timestamp_format).to_string();
+                                spans.push(Span::styled(
+                                    format!("[{}] ", formatted),
+                                    Style::default().fg(app.theme.message_timestamp),
+                                ));
+                            }
+                        }
+                    }
+
+                    spans.push(Span::styled("<", Style::default().fg(app.theme.border_unfocused)));
+                    spans.push(Span::styled(
+                        &msg.from,
+                        Style::default().fg(app.theme.message_nick).bold(),
+                    ));
+                    spans.push(Span::styled("> ", Style::default().fg(app.theme.border_unfocused)));
+                    spans.push(Span::styled(&msg.text, Style::default().fg(app.theme.message_text)));
+
+                    Line::from(spans)
                 }
             })
             .collect();
