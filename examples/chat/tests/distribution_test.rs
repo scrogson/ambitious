@@ -10,11 +10,11 @@ use tokio::time::timeout;
 
 /// Helper to start a chat server process.
 async fn start_server(name: &str, port: u16, dist_port: u16, connect: Option<&str>) -> Child {
-    // Use the pre-built release binary directly
+    // Use the debug binary (built by cargo test)
     // CARGO_MANIFEST_DIR points to examples/chat, so we go up two levels to workspace root
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let binary = workspace_root.join("target/release/chat-server");
+    let binary = workspace_root.join("target/debug/chat-server");
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--name")

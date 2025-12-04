@@ -41,6 +41,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Build binaries for integration tests
+        run: cargo build -p starlang-chat
       - name: Run tests
         run: cargo test --all
 
