@@ -35,11 +35,11 @@
 //! }
 //! ```
 
+use crate::atom::Atom;
+use crate::core::Pid;
+use crate::core::node::{NodeName, is_distributed, node_name};
 use crate::distribution::protocol::DistMessage;
 use crate::distribution::{self, DistError, NodeMonitorRef};
-use crate::core::node::{is_distributed, node_name, NodeName};
-use crate::core::{Pid};
-use crate::atom::Atom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 

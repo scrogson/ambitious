@@ -2,11 +2,11 @@
 //!
 //! Allows processes to be notified when a remote node goes down.
 
-use super::protocol::{DistError, DistMessage};
 use super::DIST_MANAGER;
+use super::protocol::{DistError, DistMessage};
+use crate::core::{Atom, Pid};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use crate::core::{Atom, Pid};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -45,8 +45,8 @@ mod transport;
 
 pub use discovery::NodeDiscovery;
 pub use manager::{connect, disconnect, node_info, nodes};
-pub use monitor::{demonitor_node, monitor_node, NodeDown, NodeDownReason, NodeMonitorRef};
-pub use node::{init_distribution, Config};
+pub use monitor::{NodeDown, NodeDownReason, NodeMonitorRef, demonitor_node, monitor_node};
+pub use node::{Config, init_distribution};
 pub use protocol::DistError;
 
 use std::sync::OnceLock;

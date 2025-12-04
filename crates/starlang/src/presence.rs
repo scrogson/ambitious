@@ -54,11 +54,11 @@
 //! When presence changes on one node, a delta is broadcast to all other
 //! nodes, which merge it into their local state.
 
+use crate::core::{Atom, Pid};
 use crate::dist::pg;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use crate::core::{Atom, Pid};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

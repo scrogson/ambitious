@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use starlang::channel::{Channel, HandleResult, JoinResult, Socket};
 use starlang::RawTerm;
+use starlang::channel::{Channel, HandleResult, JoinResult, Socket};
 
 use crate::protocol::RoomInfo;
 use crate::registry::Registry;

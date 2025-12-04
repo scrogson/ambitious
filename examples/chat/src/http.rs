@@ -50,12 +50,10 @@ pub async fn serve(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + S
                                     INDEX_HTML
                                 )
                             }
-                            ("GET", "/favicon.ico") => {
-                                "HTTP/1.1 204 No Content\r\n\
+                            ("GET", "/favicon.ico") => "HTTP/1.1 204 No Content\r\n\
                                  Connection: close\r\n\
                                  \r\n"
-                                    .to_string()
-                            }
+                                .to_string(),
                             _ => {
                                 let body = "404 Not Found";
                                 format!(

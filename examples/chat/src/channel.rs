@@ -8,10 +8,10 @@ use crate::room::{Room, RoomCall, RoomReply};
 use crate::room_supervisor;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use starlang::channel::{
-    broadcast_from, push, Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket,
-};
 use starlang::RawTerm;
+use starlang::channel::{
+    Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
+};
 use starlang::presence;
 use std::time::Duration;
 
@@ -262,7 +262,11 @@ impl Channel for RoomChannel {
                         users = ?users,
                         "Pushing presence state to user"
                     );
-                    push(socket, "presence_state", &RoomOutEvent::PresenceState { users });
+                    push(
+                        socket,
+                        "presence_state",
+                        &RoomOutEvent::PresenceState { users },
+                    );
 
                     return HandleResult::NoReply;
                 }
@@ -295,7 +299,11 @@ impl Channel for RoomChannel {
                     match room_event {
                         RoomOutEvent::PresenceSyncRequest { from_pid } => {
                             // Forward to our internal handler
-                            if let Ok(info_msg) = postcard::to_allocvec(&ChannelInfo::PresenceSyncRequest { from_pid }) {
+                            if let Ok(info_msg) =
+                                postcard::to_allocvec(&ChannelInfo::PresenceSyncRequest {
+                                    from_pid,
+                                })
+                            {
                                 let _ = starlang::send_raw(socket.pid, info_msg);
                             }
                         }

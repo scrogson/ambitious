@@ -6,9 +6,9 @@
 
 use crate::protocol::RoomInfo;
 use serde::{Deserialize, Serialize};
+use starlang::RawTerm;
 use starlang::dist::global;
 use starlang::gen_server::{self, prelude::*};
-use starlang::RawTerm;
 use std::collections::HashMap;
 use std::time::Duration;
 

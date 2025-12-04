@@ -16,11 +16,11 @@
 //! No PID rewriting is needed - a PID like `<node2@localhost.5.0>` means the
 //! same thing on any node.
 
-use super::protocol::DistMessage;
 use super::DIST_MANAGER;
+use super::protocol::DistMessage;
+use crate::core::{Atom, Pid};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use crate::core::{Atom, Pid};
 use std::sync::OnceLock;
 
 /// Global registry instance.

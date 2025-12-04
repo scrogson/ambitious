@@ -2,8 +2,8 @@
 //!
 //! These types mirror Elixir's GenServer return values.
 
-use serde::{Deserialize, Serialize};
 use crate::core::{ExitReason, Pid, Ref};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 

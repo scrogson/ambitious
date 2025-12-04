@@ -36,16 +36,16 @@ use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame, Terminal,
 };
 use serde::Deserialize;
 use std::{
@@ -64,7 +64,7 @@ use tokio::{
 #[path = "../protocol.rs"]
 mod protocol;
 
-use protocol::{frame_message, parse_frame, ClientCommand, HistoryMessage, RoomInfo, ServerEvent};
+use protocol::{ClientCommand, HistoryMessage, RoomInfo, ServerEvent, frame_message, parse_frame};
 
 /// Color configuration from TOML
 #[derive(Debug, Clone, Deserialize)]
@@ -1135,13 +1135,22 @@ fn render_chat(f: &mut Frame, app: &App, area: Rect) {
                         }
                     }
 
-                    spans.push(Span::styled("<", Style::default().fg(app.theme.border_unfocused)));
+                    spans.push(Span::styled(
+                        "<",
+                        Style::default().fg(app.theme.border_unfocused),
+                    ));
                     spans.push(Span::styled(
                         &msg.from,
                         Style::default().fg(app.theme.message_nick).bold(),
                     ));
-                    spans.push(Span::styled("> ", Style::default().fg(app.theme.border_unfocused)));
-                    spans.push(Span::styled(&msg.text, Style::default().fg(app.theme.message_text)));
+                    spans.push(Span::styled(
+                        "> ",
+                        Style::default().fg(app.theme.border_unfocused),
+                    ));
+                    spans.push(Span::styled(
+                        &msg.text,
+                        Style::default().fg(app.theme.message_text),
+                    ));
 
                     Line::from(spans)
                 }

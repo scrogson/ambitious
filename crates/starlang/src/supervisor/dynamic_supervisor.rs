@@ -33,9 +33,9 @@
 
 use super::error::StartError;
 use super::types::{ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, StartChildError};
+use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

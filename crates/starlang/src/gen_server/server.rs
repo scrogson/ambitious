@@ -5,9 +5,9 @@ use super::protocol::{self, GenServerMessage};
 use super::types::{
     CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult, ServerRef,
 };
-use async_trait::async_trait;
 use crate::core::{ExitReason, Pid, RawTerm, Ref, SystemMessage, Term};
 use crate::runtime::current_pid;
+use async_trait::async_trait;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -507,8 +507,7 @@ pub async fn call<G: GenServer>(
 
     // Send the call using task-local send
     let call_data = protocol::encode_call(from, &request);
-    crate::runtime::send_raw(server_pid, call_data)
-        .map_err(|_| CallError::NotAlive(server_pid))?;
+    crate::runtime::send_raw(server_pid, call_data).map_err(|_| CallError::NotAlive(server_pid))?;
 
     // Selective receive: loop until we get the matching reply or timeout
     let start = std::time::Instant::now();
@@ -607,8 +606,7 @@ pub async fn stop(
 
     // Send stop message using task-local send
     let stop_data = protocol::encode_stop(reason, Some(from));
-    crate::runtime::send_raw(server_pid, stop_data)
-        .map_err(|_| StopError::NotAlive(server_pid))?;
+    crate::runtime::send_raw(server_pid, stop_data).map_err(|_| StopError::NotAlive(server_pid))?;
 
     // Wait for acknowledgment
     match crate::runtime::recv_timeout(timeout).await {

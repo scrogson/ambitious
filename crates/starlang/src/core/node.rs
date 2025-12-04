@@ -9,8 +9,8 @@
 //! Node identity is stored as an [`Atom`] for efficient comparison and
 //! globally unambiguous PID addressing.
 
-use serde::{Deserialize, Serialize};
 use crate::atom::Atom;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::OnceLock;

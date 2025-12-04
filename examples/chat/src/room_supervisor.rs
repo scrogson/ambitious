@@ -5,9 +5,9 @@
 //! Each room is registered globally so it's accessible from any node.
 
 use crate::room::{Room, RoomInit};
+use starlang::Pid;
 use starlang::dist::global;
 use starlang::gen_server;
-use starlang::Pid;
 use starlang::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
 use starlang::supervisor::{ChildSpec, RestartType, StartChildError, StartError};
 use std::sync::OnceLock;

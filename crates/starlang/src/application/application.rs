@@ -165,9 +165,9 @@ impl AppController {
 
             // Safety: We're calling within the same function scope
             let result = unsafe {
-                let start_fn: &(dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String>
-                      + Send
-                      + Sync) = &*start_fn;
+                let start_fn: &(
+                     dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync
+                 ) = &*start_fn;
                 start_fn(&self.handle, &app_config)
             };
 

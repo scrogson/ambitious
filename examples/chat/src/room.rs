@@ -5,8 +5,8 @@
 
 use crate::protocol::HistoryMessage;
 use serde::{Deserialize, Serialize};
-use starlang::gen_server::prelude::*;
 use starlang::RawTerm;
+use starlang::gen_server::prelude::*;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 

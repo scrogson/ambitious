@@ -5,8 +5,8 @@
 
 use super::error::SendError;
 use super::process_handle::ProcessHandle;
-use dashmap::DashMap;
 use crate::core::{Pid, Term};
+use dashmap::DashMap;
 use std::sync::{Arc, OnceLock};
 
 /// Type alias for the remote send hook function.

@@ -2,7 +2,7 @@
 //!
 //! Handles the low-level QUIC connections using the `quinn` crate.
 
-use super::protocol::{frame_message, parse_frame, DistError, DistMessage};
+use super::protocol::{DistError, DistMessage, frame_message, parse_frame};
 use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
 };

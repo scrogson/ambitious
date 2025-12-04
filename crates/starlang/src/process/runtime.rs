@@ -334,8 +334,7 @@ mod tests {
         let _parent_pid = handle.spawn(|| async move {
             crate::runtime::with_ctx(|ctx| ctx.set_trap_exit(true));
             // Wait for exit message
-            while let Ok(Some(msg)) =
-                crate::runtime::recv_timeout(Duration::from_millis(500)).await
+            while let Ok(Some(msg)) = crate::runtime::recv_timeout(Duration::from_millis(500)).await
             {
                 if let Ok(SystemMessage::Exit { .. }) =
                     <SystemMessage as crate::core::Term>::decode(&msg)
@@ -371,8 +370,7 @@ mod tests {
 
         // Create monitor process
         let monitor_pid = handle.spawn(move || async move {
-            while let Ok(Some(msg)) =
-                crate::runtime::recv_timeout(Duration::from_millis(500)).await
+            while let Ok(Some(msg)) = crate::runtime::recv_timeout(Duration::from_millis(500)).await
             {
                 // Check if it's a DOWN message
                 if let Ok(SystemMessage::Down { .. }) =

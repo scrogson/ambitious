@@ -3,8 +3,8 @@
 //! These messages are used internally for call/cast/reply coordination.
 
 use super::types::From;
-use serde::{Deserialize, Serialize};
 use crate::core::{DecodeError, ExitReason, Ref, Term};
+use serde::{Deserialize, Serialize};
 
 /// Internal GenServer protocol messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]

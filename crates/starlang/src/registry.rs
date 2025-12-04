@@ -51,9 +51,9 @@
 //! When a process terminates, all its registrations are automatically removed.
 //! This is handled by monitoring registered processes.
 
+use crate::core::Pid;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use crate::core::Pid;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -380,9 +380,11 @@ mod tests {
         let pid2 = Pid::new();
 
         // Both registrations succeed
-        assert!(registry
-            .register("topic".to_string(), pid1, "alice")
-            .is_ok());
+        assert!(
+            registry
+                .register("topic".to_string(), pid1, "alice")
+                .is_ok()
+        );
         assert!(registry.register("topic".to_string(), pid2, "bob").is_ok());
 
         // Lookup returns both

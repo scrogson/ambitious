@@ -95,7 +95,7 @@ mod types;
 
 pub use async_trait::async_trait;
 pub use error::{CallError, StartError, StopError};
-pub use server::{call, cast, reply, start, start_link, stop, GenServer};
+pub use server::{GenServer, call, cast, reply, start, start_link, stop};
 pub use types::{
     CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult,
     NameResolver, ServerRef,
@@ -112,9 +112,9 @@ pub use crate::core::{ExitReason, Pid, Ref, Term};
 /// ```
 pub mod prelude {
     pub use super::{
-        async_trait, call, cast, start, start_link, stop, CallError, CallResult, CastResult,
-        ContinueArg, ContinueResult, ExitReason, From, GenServer, InfoResult, InitResult, Pid,
-        StartError, StopError,
+        CallError, CallResult, CastResult, ContinueArg, ContinueResult, ExitReason, From,
+        GenServer, InfoResult, InitResult, Pid, StartError, StopError, async_trait, call, cast,
+        start, start_link, stop,
     };
 }
 
@@ -123,8 +123,8 @@ mod tests {
     use super::*;
     use crate::core::RawTerm;
     use serde::{Deserialize, Serialize};
-    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::Duration;
     use tokio::time::sleep;
 

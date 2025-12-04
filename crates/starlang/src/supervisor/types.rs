@@ -2,8 +2,8 @@
 //!
 //! These types define how supervisors manage their children.
 
-use serde::{Deserialize, Serialize};
 use crate::core::Pid;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

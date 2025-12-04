@@ -52,7 +52,7 @@ mod session;
 use pubsub::PubSub;
 
 use clap::Parser;
-use server::{run_acceptor, ServerConfig};
+use server::{ServerConfig, run_acceptor};
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

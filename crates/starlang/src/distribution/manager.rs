@@ -3,13 +3,13 @@
 //! Manages connections to remote nodes and routes messages.
 //! Nodes are identified by their name (as an Atom) for globally unique addressing.
 
+use super::DIST_MANAGER;
 use super::monitor::NodeMonitorRegistry;
 use super::protocol::{DistError, DistMessage};
 use super::transport::{QuicConnection, QuicTransport};
-use super::DIST_MANAGER;
+use crate::core::{Atom, NodeInfo, NodeName, Pid};
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use crate::core::{Atom, NodeInfo, NodeName, Pid};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;

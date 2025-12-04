@@ -27,11 +27,11 @@
 //! pg::leave("my_group", my_pid);
 //! ```
 
-use super::protocol::DistMessage;
 use super::DIST_MANAGER;
+use super::protocol::DistMessage;
+use crate::core::{Atom, Pid};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use crate::core::{Atom, Pid};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 

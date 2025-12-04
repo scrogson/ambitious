@@ -48,7 +48,7 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, ItemFn};
+use syn::{DeriveInput, ItemFn, parse_macro_input};
 
 /// Derive macro for GenServer implementation helpers.
 ///

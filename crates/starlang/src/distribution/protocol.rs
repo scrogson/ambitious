@@ -2,8 +2,8 @@
 //!
 //! Defines the message types sent between nodes.
 
-use serde::{Deserialize, Serialize};
 use crate::core::{Atom, Pid};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Distribution protocol messages.

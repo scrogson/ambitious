@@ -1,9 +1,9 @@
 //! Core channel types and traits.
 
+use crate::core::{Pid, RawTerm};
 use crate::dist::pg;
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use crate::core::{Pid, RawTerm};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -526,7 +526,11 @@ pub trait ChannelHandler: Send + Sync {
     async fn handle_terminate(&self, reason: TerminateReason, socket: &Socket<Vec<u8>>);
 
     /// Handle an info message (raw term from mailbox).
-    async fn handle_info(&self, msg: RawTerm, socket: &mut Socket<Vec<u8>>) -> HandleResult<Vec<u8>>;
+    async fn handle_info(
+        &self,
+        msg: RawTerm,
+        socket: &mut Socket<Vec<u8>>,
+    ) -> HandleResult<Vec<u8>>;
 
     /// Decode a postcard-encoded payload and re-encode for the given format.
     ///
@@ -646,10 +650,15 @@ where
         match result {
             HandleResult::NoReply => HandleResult::NoReply,
             HandleResult::Reply { status, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Ok(bytes) => HandleResult::ReplyRaw {
+                    status,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
-            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
+            HandleResult::ReplyRaw { status, payload } => {
+                HandleResult::ReplyRaw { status, payload }
+            }
             HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
                 Ok(bytes) => HandleResult::Broadcast {
                     event,
@@ -667,7 +676,10 @@ where
                 }
             }
             HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Ok(bytes) => HandleResult::PushRaw {
+                    event,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
             HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
@@ -718,7 +730,11 @@ where
         }
     }
 
-    async fn handle_info(&self, msg: RawTerm, socket: &mut Socket<Vec<u8>>) -> HandleResult<Vec<u8>> {
+    async fn handle_info(
+        &self,
+        msg: RawTerm,
+        socket: &mut Socket<Vec<u8>>,
+    ) -> HandleResult<Vec<u8>> {
         let assigns: C::Assigns = match postcard::from_bytes(&socket.assigns) {
             Ok(a) => a,
             Err(_) => return HandleResult::NoReply,
@@ -741,10 +757,15 @@ where
         match result {
             HandleResult::NoReply => HandleResult::NoReply,
             HandleResult::Reply { status, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Ok(bytes) => HandleResult::ReplyRaw {
+                    status,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
-            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
+            HandleResult::ReplyRaw { status, payload } => {
+                HandleResult::ReplyRaw { status, payload }
+            }
             HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
                 Ok(bytes) => HandleResult::Broadcast {
                     event,
@@ -762,7 +783,10 @@ where
                 }
             }
             HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Ok(bytes) => HandleResult::PushRaw {
+                    event,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
             HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
@@ -1105,7 +1129,12 @@ impl ChannelServer {
     ///
     /// This finds the appropriate handler for the topic and uses it to convert
     /// the payload from postcard to the requested format.
-    pub fn transcode_payload(&self, topic: &str, payload: &[u8], format: PayloadFormat) -> Option<Vec<u8>> {
+    pub fn transcode_payload(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        format: PayloadFormat,
+    ) -> Option<Vec<u8>> {
         let handler = self.find_handler(topic)?;
         handler.transcode_payload(payload, format)
     }
@@ -1113,7 +1142,11 @@ impl ChannelServer {
     /// Handle an info message for a specific topic.
     ///
     /// This dispatches the raw message to the channel's handle_info callback.
-    pub async fn handle_info(&mut self, topic: &str, msg: RawTerm) -> Option<HandleResult<Vec<u8>>> {
+    pub async fn handle_info(
+        &mut self,
+        topic: &str,
+        msg: RawTerm,
+    ) -> Option<HandleResult<Vec<u8>>> {
         let handler = self.find_handler(topic)?.clone();
         let socket = self.channels.get_mut(topic)?;
         Some(handler.handle_info(msg, socket).await)

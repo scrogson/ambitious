@@ -1,10 +1,10 @@
 //! Node configuration and initialization.
 
-use super::manager::{send_remote, DistributionManager};
-use super::protocol::DistError;
 use super::DIST_MANAGER;
-use crate::core::node::{init_node, NodeName};
+use super::manager::{DistributionManager, send_remote};
+use super::protocol::DistError;
 use crate::core::Pid;
+use crate::core::node::{NodeName, init_node};
 use crate::runtime::SendError;
 use std::net::SocketAddr;
 use std::path::PathBuf;

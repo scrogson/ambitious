@@ -183,7 +183,7 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use starlang_macros::{main, self_pid, starlang_process, GenServerImpl};
+pub use starlang_macros::{GenServerImpl, main, self_pid, starlang_process};
 
 /// Prelude module for convenient imports.
 ///
@@ -214,7 +214,7 @@ pub mod prelude {
     pub use crate::application::{AppConfig, AppController, AppSpec, Application, StartResult};
 
     // Macros
-    pub use starlang_macros::{main, self_pid, starlang_process, GenServerImpl};
+    pub use starlang_macros::{GenServerImpl, main, self_pid, starlang_process};
 
     // Task-local functions for process operations without ctx
     pub use crate::runtime::{
@@ -240,8 +240,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_spawn() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let runtime = Runtime::new();
         let handle = runtime.handle();
@@ -263,8 +263,8 @@ mod tests {
     async fn test_gen_server_integration() {
         use crate::gen_server::async_trait;
         use serde::{Deserialize, Serialize};
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
         struct TestServer;

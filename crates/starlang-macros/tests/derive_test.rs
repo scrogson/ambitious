@@ -1,6 +1,6 @@
 //! Integration tests for starlang-macros.
 
-use starlang_macros::{starlang_process, GenServerImpl};
+use starlang_macros::{GenServerImpl, starlang_process};
 
 #[derive(GenServerImpl)]
 struct TestServer {

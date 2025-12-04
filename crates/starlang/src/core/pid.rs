@@ -14,8 +14,8 @@
 //! after a node restart.
 
 use super::node::node_name_atom;
-use serde::{Deserialize, Serialize};
 use crate::atom::Atom;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

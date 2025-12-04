@@ -38,8 +38,8 @@ use super::{
 use crate::Pid;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -302,10 +302,15 @@ where
             HandleResult::NoReply => HandleResult::NoReply,
             // Typed reply - serialize to JSON for WebSocket client
             HandleResult::Reply { status, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Ok(bytes) => HandleResult::ReplyRaw {
+                    status,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
-            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
+            HandleResult::ReplyRaw { status, payload } => {
+                HandleResult::ReplyRaw { status, payload }
+            }
             // Use postcard for broadcasts so TUI clients (which use postcard) can read them
             HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
                 Ok(bytes) => HandleResult::Broadcast {
@@ -325,7 +330,10 @@ where
             }
             // Typed push - serialize to JSON for WebSocket client
             HandleResult::Push { event, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Ok(bytes) => HandleResult::PushRaw {
+                    event,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
             HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
@@ -375,7 +383,11 @@ where
         }
     }
 
-    async fn handle_info(&self, msg: crate::core::RawTerm, socket: &mut Socket<Vec<u8>>) -> HandleResult<Vec<u8>> {
+    async fn handle_info(
+        &self,
+        msg: crate::core::RawTerm,
+        socket: &mut Socket<Vec<u8>>,
+    ) -> HandleResult<Vec<u8>> {
         let assigns: C::Assigns = match serde_json::from_slice(&socket.assigns) {
             Ok(a) => a,
             Err(_) => return HandleResult::NoReply,
@@ -399,10 +411,15 @@ where
             HandleResult::NoReply => HandleResult::NoReply,
             // Typed reply - serialize to JSON for WebSocket client
             HandleResult::Reply { status, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Ok(bytes) => HandleResult::ReplyRaw {
+                    status,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
-            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
+            HandleResult::ReplyRaw { status, payload } => {
+                HandleResult::ReplyRaw { status, payload }
+            }
             // Use postcard for broadcasts so TUI clients can read them
             HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
                 Ok(bytes) => HandleResult::Broadcast {
@@ -422,7 +439,10 @@ where
             }
             // Typed push - serialize to JSON for WebSocket client
             HandleResult::Push { event, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Ok(bytes) => HandleResult::PushRaw {
+                    event,
+                    payload: bytes,
+                },
                 Err(_) => HandleResult::NoReply,
             },
             HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
@@ -464,8 +484,7 @@ impl WebSocketEndpoint {
         C: Channel,
         C::Assigns: Serialize + DeserializeOwned,
     {
-        self.handlers
-            .push(Arc::new(JsonChannelHandler::<C>::new()));
+        self.handlers.push(Arc::new(JsonChannelHandler::<C>::new()));
         self
     }
 
@@ -771,7 +790,12 @@ async fn handle_leave(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessag
     session.channels.handle_leave(msg.topic.clone()).await;
     session.joined.remove(&msg.topic);
 
-    vec![PhxMessage::ok_reply(None, msg.msg_ref, msg.topic, json!({}))]
+    vec![PhxMessage::ok_reply(
+        None,
+        msg.msg_ref,
+        msg.topic,
+        json!({}),
+    )]
 }
 
 /// Handle custom channel events.
@@ -854,7 +878,7 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
 /// Use this when you want your channel to work with JSON payloads
 /// instead of postcard-serialized bytes.
 pub mod json_payload {
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::{Serialize, de::DeserializeOwned};
     use serde_json::Value;
 
     /// Serialize a payload to JSON bytes.
@@ -926,7 +950,12 @@ mod tests {
 
     #[test]
     fn test_phx_message_error_reply() {
-        let msg = PhxMessage::error_reply(None, Some("ref-1".to_string()), "room:lobby", "not authorized");
+        let msg = PhxMessage::error_reply(
+            None,
+            Some("ref-1".to_string()),
+            "room:lobby",
+            "not authorized",
+        );
 
         assert_eq!(msg.event, "phx_reply");
         assert_eq!(msg.payload["status"], "error");
