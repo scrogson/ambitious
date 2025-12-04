@@ -22,7 +22,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + S
 
             // Read the request
             match socket.read(&mut buf).await {
-                Ok(0) => return,
+                Ok(0) => (),
                 Ok(n) => {
                     let request = String::from_utf8_lossy(&buf[..n]);
 

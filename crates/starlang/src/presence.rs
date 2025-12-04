@@ -260,8 +260,8 @@ impl PresenceTracker {
         let mut removed_metas = Vec::new();
 
         // Remove from state
-        if let Some(mut topic_state) = self.state.get_mut(topic) {
-            if let Some(key_state) = topic_state.get_mut(key) {
+        if let Some(mut topic_state) = self.state.get_mut(topic)
+            && let Some(key_state) = topic_state.get_mut(key) {
                 // Remove entries for this PID
                 removed_metas = key_state.metas.drain(..).filter(|m| m.pid == pid).collect();
                 key_state.metas.retain(|m| m.pid != pid);
@@ -271,7 +271,6 @@ impl PresenceTracker {
                     topic_state.remove(key);
                 }
             }
-        }
 
         // Update reverse lookup
         if let Some(mut presences) = self.pid_to_presence.get_mut(&pid) {
@@ -304,8 +303,8 @@ impl PresenceTracker {
             for (topic, key) in presences {
                 let mut removed_metas = Vec::new();
 
-                if let Some(mut topic_state) = self.state.get_mut(&topic) {
-                    if let Some(key_state) = topic_state.get_mut(&key) {
+                if let Some(mut topic_state) = self.state.get_mut(&topic)
+                    && let Some(key_state) = topic_state.get_mut(&key) {
                         removed_metas = key_state
                             .metas
                             .iter()
@@ -318,7 +317,6 @@ impl PresenceTracker {
                             topic_state.remove(&key);
                         }
                     }
-                }
 
                 if !removed_metas.is_empty() {
                     by_topic
@@ -354,8 +352,8 @@ impl PresenceTracker {
         let new_ref = new_meta.phx_ref.clone();
         let mut old_meta = None;
 
-        if let Some(mut topic_state) = self.state.get_mut(topic) {
-            if let Some(key_state) = topic_state.get_mut(key) {
+        if let Some(mut topic_state) = self.state.get_mut(topic)
+            && let Some(key_state) = topic_state.get_mut(key) {
                 // Find and update the entry for this PID
                 for m in &mut key_state.metas {
                     if m.pid == pid {
@@ -366,7 +364,6 @@ impl PresenceTracker {
                     }
                 }
             }
-        }
 
         // Broadcast delta
         if old_meta.is_some() {

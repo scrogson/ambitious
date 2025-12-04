@@ -204,8 +204,8 @@ impl SupervisorState {
 
     /// Terminates a specific child by ID.
     async fn terminate_child_by_id(&mut self, id: &str) {
-        if let Some(child) = self.children.get_mut(id) {
-            if let Some(pid) = child.pid.take() {
+        if let Some(child) = self.children.get_mut(id)
+            && let Some(pid) = child.pid.take() {
                 self.pid_to_id.remove(&pid);
 
                 // Demonitor first using task-local context
@@ -218,7 +218,6 @@ impl SupervisorState {
 
                 // TODO: Wait for child to actually terminate with timeout
             }
-        }
     }
 
     /// Starts all children in order.
@@ -296,13 +295,11 @@ async fn supervisor_loop(mut state: SupervisorState) {
             pid,
             reason,
         }) = <SystemMessage as Term>::decode(&msg)
-        {
-            if let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
+            && let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
                 // Supervisor needs to stop due to restart intensity
                 state.terminate_all_children().await;
                 return;
             }
-        }
 
         // Check for exit signals
         if let Ok(SystemMessage::Exit { from: _, reason: _ }) =

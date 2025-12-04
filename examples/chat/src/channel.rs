@@ -206,16 +206,15 @@ impl Channel for RoomChannel {
                     );
 
                     // Push history directly (not via another self-message to avoid loop)
-                    if let Some(room_pid) = room_supervisor::get_room(&socket.assigns.room_name) {
-                        if let Ok(RoomReply::History(messages)) =
+                    if let Some(room_pid) = room_supervisor::get_room(&socket.assigns.room_name)
+                        && let Ok(RoomReply::History(messages)) =
                             starlang::gen_server::call::<Room>(
                                 room_pid,
                                 RoomCall::GetHistory,
                                 Duration::from_secs(5),
                             )
                             .await
-                        {
-                            if !messages.is_empty() {
+                            && !messages.is_empty() {
                                 tracing::debug!(
                                     room = %socket.assigns.room_name,
                                     message_count = messages.len(),
@@ -223,8 +222,6 @@ impl Channel for RoomChannel {
                                 );
                                 push(socket, "history", &RoomOutEvent::History { messages });
                             }
-                        }
-                    }
 
                     // Schedule a delayed message to push presence state
                     // This gives time for presence sync responses to arrive from other nodes
@@ -292,8 +289,8 @@ impl Channel for RoomChannel {
         }
 
         // Try to decode as ChannelReply (broadcast from another user via pg)
-        if let Some(reply) = msg.decode::<ChannelReply>() {
-            if let ChannelReply::Push { event, payload, .. } = reply {
+        if let Some(reply) = msg.decode::<ChannelReply>()
+            && let ChannelReply::Push { event, payload, .. } = reply {
                 // Decode the room event from the payload bytes
                 if let Ok(room_event) = postcard::from_bytes::<RoomOutEvent>(&payload) {
                     match room_event {
@@ -314,7 +311,6 @@ impl Channel for RoomChannel {
                     }
                 }
             }
-        }
 
         // Try to decode as PresenceMessage (delta from another node)
         if let Some(presence_msg) = msg.decode::<starlang::presence::PresenceMessage>() {

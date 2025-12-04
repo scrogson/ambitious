@@ -1160,12 +1160,11 @@ impl ChannelServer {
         let topics: Vec<String> = self.channels.keys().cloned().collect();
 
         for topic in topics {
-            if let Some(handler) = self.find_handler(&topic).cloned() {
-                if let Some(socket) = self.channels.get_mut(&topic) {
+            if let Some(handler) = self.find_handler(&topic).cloned()
+                && let Some(socket) = self.channels.get_mut(&topic) {
                     let result = handler.handle_info(msg.clone(), socket).await;
                     results.push((topic, result));
                 }
-            }
         }
 
         results

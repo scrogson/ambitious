@@ -330,24 +330,21 @@ impl Session {
         match reply {
             ChannelReply::JoinOk { .. } => {
                 // Fetch history from the room if we have it
-                if let Some(room_pid) = room_pid {
-                    if let Ok(RoomReply::History(history_messages)) =
+                if let Some(room_pid) = room_pid
+                    && let Ok(RoomReply::History(history_messages)) =
                         starlang::gen_server::call::<Room>(
                             room_pid,
                             RoomCall::GetHistory,
                             Duration::from_secs(5),
                         )
                         .await
-                    {
-                        if !history_messages.is_empty() {
+                        && !history_messages.is_empty() {
                             self.send_event(ServerEvent::History {
                                 room: room_name.clone(),
                                 messages: history_messages,
                             })
                             .await;
                         }
-                    }
-                }
 
                 self.send_event(ServerEvent::Joined {
                     room: room_name.clone(),

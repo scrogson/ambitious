@@ -392,8 +392,8 @@ async fn message_sender_loop(mut rx: mpsc::Receiver<DistMessage>, node_atom: Ato
     }
 
     // Connection closed or error - clean up
-    if let Some(manager) = DIST_MANAGER.get() {
-        if let Some((_, node)) = manager.nodes.remove(&node_atom) {
+    if let Some(manager) = DIST_MANAGER.get()
+        && let Some((_, node)) = manager.nodes.remove(&node_atom) {
             if let Some(addr) = node.info.addr {
                 manager.addr_to_node.remove(&addr);
             }
@@ -403,7 +403,6 @@ async fn message_sender_loop(mut rx: mpsc::Receiver<DistMessage>, node_atom: Ato
             // Clean up pg memberships from this node
             super::pg::pg().remove_node_members(node_atom);
         }
-    }
 }
 
 /// Loop to receive messages from a remote node.
@@ -435,8 +434,8 @@ async fn message_receiver_loop(node_atom: Atom) {
     }
 
     // Clean up
-    if let Some(manager) = DIST_MANAGER.get() {
-        if let Some((_, node)) = manager.nodes.remove(&node_atom) {
+    if let Some(manager) = DIST_MANAGER.get()
+        && let Some((_, node)) = manager.nodes.remove(&node_atom) {
             if let Some(addr) = node.info.addr {
                 manager.addr_to_node.remove(&addr);
             }
@@ -446,7 +445,6 @@ async fn message_receiver_loop(node_atom: Atom) {
             // Clean up pg memberships from this node
             super::pg::pg().remove_node_members(node_atom);
         }
-    }
 }
 
 /// Handle an incoming message from a remote node.
@@ -471,11 +469,10 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
         }
         DistMessage::Ping { seq } => {
             // Respond with pong
-            if let Some(manager) = DIST_MANAGER.get() {
-                if let Some(node) = manager.nodes.get(&from_node) {
+            if let Some(manager) = DIST_MANAGER.get()
+                && let Some(node) = manager.nodes.get(&from_node) {
                     let _ = node.tx.try_send(DistMessage::Pong { seq });
                 }
-            }
         }
         DistMessage::Pong { seq } => {
             tracing::trace!(seq, from_node = %from_node, "Received pong");

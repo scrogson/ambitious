@@ -128,14 +128,13 @@ impl GlobalRegistry {
                     .map(|r| (r.key().clone(), *r.value()))
                     .collect();
 
-                if let Some(manager) = DIST_MANAGER.get() {
-                    if let Some(tx) = manager.get_node_tx(from_node) {
+                if let Some(manager) = DIST_MANAGER.get()
+                    && let Some(tx) = manager.get_node_tx(from_node) {
                         let msg = GlobalRegistryMessage::SyncResponse { entries };
                         if let Ok(payload) = postcard::to_allocvec(&msg) {
                             let _ = tx.try_send(DistMessage::GlobalRegistry { payload });
                         }
                     }
-                }
             }
             GlobalRegistryMessage::SyncResponse { entries } => {
                 tracing::debug!(count = entries.len(), from_node = %from_node, "Received global sync response");
@@ -168,8 +167,8 @@ impl GlobalRegistry {
 
     /// Broadcast a global registry message to all connected nodes.
     fn broadcast_global_message(&self, msg: &GlobalRegistryMessage) {
-        if let Some(manager) = DIST_MANAGER.get() {
-            if let Ok(payload) = postcard::to_allocvec(msg) {
+        if let Some(manager) = DIST_MANAGER.get()
+            && let Ok(payload) = postcard::to_allocvec(msg) {
                 let dist_msg = DistMessage::GlobalRegistry { payload };
                 for node_atom in manager.connected_nodes() {
                     if let Some(tx) = manager.get_node_tx(node_atom) {
@@ -177,13 +176,12 @@ impl GlobalRegistry {
                     }
                 }
             }
-        }
     }
 
     /// Request sync from a newly connected node.
     pub fn request_sync(&self, node_atom: Atom) {
-        if let Some(manager) = DIST_MANAGER.get() {
-            if let Some(tx) = manager.get_node_tx(node_atom) {
+        if let Some(manager) = DIST_MANAGER.get()
+            && let Some(tx) = manager.get_node_tx(node_atom) {
                 // Ask them to send their registry to us
                 let msg = GlobalRegistryMessage::SyncRequest;
                 if let Ok(payload) = postcard::to_allocvec(&msg) {
@@ -204,7 +202,6 @@ impl GlobalRegistry {
                     }
                 }
             }
-        }
     }
 }
 

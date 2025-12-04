@@ -88,15 +88,14 @@ fn parse_color_name(s: &str) -> Color {
     // Handle hex colors
     if s.starts_with('#') || s.chars().all(|c| c.is_ascii_hexdigit()) {
         let hex = s.trim_start_matches('#');
-        if hex.len() == 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
+        if hex.len() == 6
+            && let (Ok(r), Ok(g), Ok(b)) = (
                 u8::from_str_radix(&hex[0..2], 16),
                 u8::from_str_radix(&hex[2..4], 16),
                 u8::from_str_radix(&hex[4..6], 16),
             ) {
                 return Color::Rgb(r, g, b);
             }
-        }
     }
     // Named colors
     match s.as_str() {
@@ -247,22 +246,19 @@ struct Config {
 impl Config {
     fn load(path: Option<&PathBuf>) -> Self {
         // Try explicit path first
-        if let Some(p) = path {
-            if let Ok(contents) = std::fs::read_to_string(p) {
-                if let Ok(cfg) = toml::from_str(&contents) {
+        if let Some(p) = path
+            && let Ok(contents) = std::fs::read_to_string(p)
+                && let Ok(cfg) = toml::from_str(&contents) {
                     return cfg;
                 }
-            }
-        }
 
         // Try default config location
         if let Some(config_dir) = dirs::config_dir() {
             let default_path = config_dir.join("starlang-chat").join("config.toml");
-            if let Ok(contents) = std::fs::read_to_string(&default_path) {
-                if let Ok(cfg) = toml::from_str(&contents) {
+            if let Ok(contents) = std::fs::read_to_string(&default_path)
+                && let Ok(cfg) = toml::from_str(&contents) {
                     return cfg;
                 }
-            }
         }
 
         // Fall back to defaults
@@ -570,12 +566,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Auto-join room if provided (only if nick is also set)
-    if let Some(ref room) = args.room {
-        if args.nick.is_some() {
+    if let Some(ref room) = args.room
+        && args.nick.is_some() {
             let frame = frame_message(&ClientCommand::Join(room.clone()));
             writer.write_all(&frame).await?;
         }
-    }
 
     // Main event loop
     let result = run_app(&mut terminal, &mut app, &mut rx, &mut writer).await;
@@ -617,11 +612,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                 }
                 AppEvent::Tick => {
                     // Clear old status messages
-                    if let Some((_, time)) = &app.status {
-                        if time.elapsed() > Duration::from_secs(5) {
+                    if let Some((_, time)) = &app.status
+                        && time.elapsed() > Duration::from_secs(5) {
                             app.status = None;
                         }
-                    }
                 }
                 AppEvent::Disconnected => {
                     app.connected = false;
@@ -678,12 +672,11 @@ async fn handle_server_event(
         }
         ServerEvent::UserJoined { room, nick } => {
             // Update user list (no system message - user list shows who's here)
-            if let Some(state) = app.room_states.get_mut(&room) {
-                if !state.users.contains(&nick) {
+            if let Some(state) = app.room_states.get_mut(&room)
+                && !state.users.contains(&nick) {
                     state.users.push(nick);
                     state.users.sort();
                 }
-            }
         }
         ServerEvent::UserLeft { room, nick } => {
             // Update user list (no system message - user list shows who's here)
@@ -694,11 +687,10 @@ async fn handle_server_event(
         ServerEvent::RoomList { rooms } => {
             app.rooms = rooms;
             // Preserve selection if possible
-            if let Some(current) = &app.current_room {
-                if let Some(idx) = app.rooms.iter().position(|r| &r.name == current) {
+            if let Some(current) = &app.current_room
+                && let Some(idx) = app.rooms.iter().position(|r| &r.name == current) {
                     app.room_list_state.select(Some(idx));
                 }
-            }
         }
         ServerEvent::UserList { room, users } => {
             if let Some(state) = app.room_states.get_mut(&room) {
@@ -1123,17 +1115,15 @@ fn render_chat(f: &mut Frame, app: &App, area: Rect) {
                     let mut spans = Vec::new();
 
                     // Add timestamp if format is configured and timestamp exists
-                    if !app.timestamp_format.is_empty() {
-                        if let Some(ts) = msg.timestamp {
-                            if let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
+                    if !app.timestamp_format.is_empty()
+                        && let Some(ts) = msg.timestamp
+                            && let Some(dt) = Local.timestamp_opt(ts as i64, 0).single() {
                                 let formatted = dt.format(&app.timestamp_format).to_string();
                                 spans.push(Span::styled(
                                     format!("[{}] ", formatted),
                                     Style::default().fg(app.theme.message_timestamp),
                                 ));
                             }
-                        }
-                    }
 
                     spans.push(Span::styled(
                         "<",
