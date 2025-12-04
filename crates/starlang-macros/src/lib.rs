@@ -192,14 +192,21 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```ignore
-/// use starlang::prelude::*;
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// #[starlang::test]
-/// async fn test_spawn_process() {
-///     let pid = starlang::spawn(|_ctx| async move {
-///         // Process logic
+/// async fn test_spawn_runs() {
+///     let executed = Arc::new(AtomicBool::new(false));
+///     let flag = executed.clone();
+///
+///     starlang::spawn(move || async move {
+///         flag.store(true, Ordering::SeqCst);
 ///     });
-///     assert!(starlang::alive(pid));
+///
+///     // Give the process time to run
+///     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+///     assert!(executed.load(Ordering::SeqCst));
 /// }
 /// ```
 #[proc_macro_attribute]
