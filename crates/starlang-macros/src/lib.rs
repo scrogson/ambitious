@@ -183,3 +183,42 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+/// Test attribute macro that sets up the Starlang runtime for tests.
+///
+/// This macro wraps a test function with tokio's async runtime and
+/// initializes the global Starlang runtime before running the test body.
+///
+/// # Example
+///
+/// ```ignore
+/// use starlang::prelude::*;
+///
+/// #[starlang::test]
+/// async fn test_spawn_process() {
+///     let pid = starlang::spawn(|_ctx| async move {
+///         // Process logic
+///     });
+///     assert!(starlang::alive(pid));
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+
+    let fn_name = &input.sig.ident;
+    let fn_block = &input.block;
+    let fn_vis = &input.vis;
+    let fn_attrs = &input.attrs;
+
+    let expanded = quote! {
+        #[::tokio::test]
+        #(#fn_attrs)*
+        #fn_vis async fn #fn_name() {
+            ::starlang::init();
+            #fn_block
+        }
+    };
+
+    TokenStream::from(expanded)
+}

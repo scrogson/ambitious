@@ -195,7 +195,7 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use starlang_macros::{GenServerImpl, main, self_pid, starlang_process};
+pub use starlang_macros::{GenServerImpl, main, self_pid, starlang_process, test};
 
 /// Prelude module for convenient imports.
 ///
