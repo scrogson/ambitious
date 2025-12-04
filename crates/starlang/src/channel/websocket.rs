@@ -612,13 +612,9 @@ async fn handle_connection(
                             }
                         }
                     } else {
-                        // Check if this is a presence message and apply it to the tracker
-                        if let Ok(presence_msg) = postcard::from_bytes::<crate::presence::PresenceMessage>(&msg_bytes) {
-                            let from_node = crate::core::node::node_name_atom();
-                            crate::presence::tracker().handle_message(presence_msg, from_node);
-                        }
-
                         // Not a ChannelReply - dispatch to handle_info for all joined channels
+                        // Note: Presence messages are now handled by the Presence GenServer
+                        // and will be received via PubSub subscriptions
                         let results = session.channels.handle_info_any(msg_bytes.into()).await;
                         for (topic, result) in results {
                             // Handle any broadcasts from handle_info

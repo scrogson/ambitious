@@ -111,13 +111,8 @@ impl Session {
             data_len = data.len(),
             "handle_channel_message called"
         );
-        // First, check if this is a presence message and apply it to the tracker
-        if let Ok(presence_msg) = postcard::from_bytes::<starlang::presence::PresenceMessage>(data)
-        {
-            let from_node = starlang::core::node::node_name_atom();
-            starlang::presence::tracker().handle_message(presence_msg, from_node);
-            // Don't return - continue processing in case it's also a channel message
-        }
+        // Note: Presence messages are now handled by the Presence GenServer
+        // via PubSub subscriptions, so we don't need to manually handle them here.
 
         // Dispatch to handle_info so RoomChannel can respond to presence sync, etc.
         let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
@@ -450,7 +445,13 @@ impl Session {
         let topic = format!("room:{}", room_name);
 
         // Use Presence to get the list of users with their metadata
-        let presences = starlang::presence::list(&topic);
+        let presences = match starlang::presence::Presence::list("chat_presence", &topic).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get presence list");
+                std::collections::HashMap::new()
+            }
+        };
 
         // Extract nicknames from presence metadata
         let users: Vec<String> = presences

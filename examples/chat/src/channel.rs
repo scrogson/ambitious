@@ -12,7 +12,10 @@ use starlang::RawTerm;
 use starlang::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
 };
-use starlang::presence;
+use starlang::presence::Presence;
+
+/// The name of the chat presence server.
+const PRESENCE_NAME: &str = "chat_presence";
 use std::time::Duration;
 
 /// Custom state stored in each socket's assigns.
@@ -124,7 +127,17 @@ impl Channel for RoomChannel {
             nick: payload.nick.clone(),
             status: "online".to_string(),
         };
-        presence::track_pid(topic, &presence_key, socket.pid, presence_meta);
+        if let Err(e) = Presence::track_pid(
+            PRESENCE_NAME,
+            topic,
+            &presence_key,
+            socket.pid,
+            &presence_meta,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to track presence");
+        }
         tracing::debug!(topic = %topic, key = %presence_key, "Tracked presence");
 
         // Send ourselves an :after_join message to trigger presence sync and history push
@@ -239,7 +252,13 @@ impl Channel for RoomChannel {
                 ChannelInfo::PushPresenceState => {
                     // Get current presence state and push to joining user
                     let topic = format!("room:{}", socket.assigns.room_name);
-                    let presences = starlang::presence::list(&topic);
+                    let presences = match Presence::list(PRESENCE_NAME, &topic).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to get presence list");
+                            std::collections::HashMap::new()
+                        }
+                    };
                     let mut users: Vec<String> = presences
                         .values()
                         .flat_map(|state| {
@@ -312,12 +331,8 @@ impl Channel for RoomChannel {
             }
         }
 
-        // Try to decode as PresenceMessage (delta from another node)
-        if let Some(presence_msg) = msg.decode::<starlang::presence::PresenceMessage>() {
-            // Apply the presence delta to the global tracker
-            let from_node = starlang::core::node::node_name_atom(); // TODO: get actual source node
-            starlang::presence::tracker().handle_message(presence_msg, from_node);
-        }
+        // Note: Presence messages are now handled by the Presence GenServer
+        // via PubSub subscriptions, so we don't need to manually handle them here.
 
         HandleResult::NoReply
     }
@@ -342,7 +357,11 @@ impl Channel for RoomChannel {
         // Untrack presence for this user
         let topic = format!("room:{}", socket.assigns.room_name);
         let presence_key = format!("user:{}", socket.pid);
-        presence::untrack_pid(&topic, &presence_key, socket.pid);
+        if let Err(e) =
+            Presence::untrack_pid(PRESENCE_NAME, &topic, &presence_key, socket.pid).await
+        {
+            tracing::warn!(error = %e, "Failed to untrack presence");
+        }
         tracing::debug!(topic = %topic, key = %presence_key, "Untracked presence");
     }
 }

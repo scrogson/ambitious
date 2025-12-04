@@ -40,16 +40,11 @@ mod channel;
 mod http;
 mod lobby;
 mod protocol;
-mod pubsub;
 mod registry;
 mod room;
 mod room_supervisor;
 mod server;
 mod session;
-
-// PubSub module is available for use but not currently used in main
-#[allow(unused_imports)]
-use pubsub::PubSub;
 
 use clap::Parser;
 use server::{ServerConfig, run_acceptor};
@@ -129,8 +124,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // PubSub is now stateless (uses pg under the hood)
-    // No need to start a GenServer
+    // Start PubSub server for distributed pub/sub messaging
+    use starlang::pubsub::{PubSub, PubSubConfig};
+    PubSub::start_link(PubSubConfig::new("chat_pubsub"))
+        .await
+        .expect("Failed to start PubSub");
+    tracing::info!("PubSub started as 'chat_pubsub'");
+
+    // Start Presence server for tracking user presence
+    use starlang::presence::{Presence, PresenceConfig};
+    Presence::start_link(PresenceConfig::new("chat_presence", "chat_pubsub"))
+        .await
+        .expect("Failed to start Presence");
+    tracing::info!("Presence started as 'chat_presence'");
 
     // Start the room supervisor (DynamicSupervisor for managing room processes)
     let room_sup_pid = room_supervisor::start()

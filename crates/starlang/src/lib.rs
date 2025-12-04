@@ -157,6 +157,9 @@ pub mod channel;
 /// Distributed Presence tracking for real-time applications.
 pub mod presence;
 
+/// Phoenix-style PubSub for distributed publish-subscribe messaging.
+pub mod pubsub;
+
 /// Peer node management for spawning and controlling linked nodes.
 ///
 /// This module is only available when the `peer` feature is enabled.
