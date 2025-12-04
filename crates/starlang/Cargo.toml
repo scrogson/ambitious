@@ -17,7 +17,7 @@ starlang-macros = { version = "0.1.0", path = "../starlang-macros" }
 # Core dependencies (from merged crates)
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "net", "io-util", "rt"] }
 dashmap = "6"
 parking_lot = "0.12"
@@ -29,11 +29,11 @@ tracing = "0.1"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
-rcgen = "0.13"
+rcgen = "0.14"
 hostname = "0.4"
 
 # WebSocket transport for Phoenix Channels (optional)
-tokio-tungstenite = { version = "0.26", optional = true }
+tokio-tungstenite = { version = "0.28", optional = true }
 serde_json = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
 
