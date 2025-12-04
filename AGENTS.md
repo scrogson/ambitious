@@ -1,10 +1,10 @@
-# Starlang - Distributed Rust Erlang Abstract Machine
+# Ambitious - Distributed Rust Erlang Abstract Machine
 
 A native Rust implementation of Erlang/OTP primitives, bringing the power of the BEAM's concurrency model to Rust with full type safety.
 
 ## Project Vision
 
-Starlang aims to provide Erlang-style concurrency primitives in Rust:
+Ambitious aims to provide Erlang-style concurrency primitives in Rust:
 - **Processes**: Lightweight, isolated units of concurrency with mailboxes
 - **Message Passing**: Type-safe send/receive between processes
 - **Links & Monitors**: Bidirectional failure propagation and unidirectional observation
@@ -46,13 +46,13 @@ Starlang aims to provide Erlang-style concurrency primitives in Rust:
 ```
 dream/
 ├── dream/              # Main crate re-exporting all functionality
-├── starlang-core/         # Core types: Pid, Ref, ExitReason, Message trait
-├── starlang-runtime/      # Async runtime, scheduler, process registry
-├── starlang-process/      # Process spawning, mailboxes, links, monitors
-├── starlang-gen-server/   # GenServer trait and implementation
-├── starlang-supervisor/   # Supervisor trait and restart strategies
-├── starlang-application/  # Application lifecycle management
-└── starlang-macros/       # Procedural macros for ergonomic APIs
+├── ambitious-core/         # Core types: Pid, Ref, ExitReason, Message trait
+├── ambitious-runtime/      # Async runtime, scheduler, process registry
+├── ambitious-process/      # Process spawning, mailboxes, links, monitors
+├── ambitious-gen-server/   # GenServer trait and implementation
+├── ambitious-supervisor/   # Supervisor trait and restart strategies
+├── ambitious-application/  # Application lifecycle management
+└── ambitious-macros/       # Procedural macros for ergonomic APIs
 ```
 
 ## Core Types
@@ -325,7 +325,7 @@ Each crate should have:
 ```bash
 cargo build                    # Build all crates
 cargo test                     # Run all tests
-cargo test -p starlang-process    # Test specific crate
+cargo test -p ambitious-process    # Test specific crate
 cargo doc --open               # Generate and view docs
 ```
 

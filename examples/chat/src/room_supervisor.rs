@@ -5,11 +5,11 @@
 //! Each room is registered globally so it's accessible from any node.
 
 use crate::room::{Room, RoomInit};
-use starlang::Pid;
-use starlang::dist::global;
-use starlang::gen_server;
-use starlang::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
-use starlang::supervisor::{ChildSpec, RestartType, StartChildError, StartError};
+use ambitious::Pid;
+use ambitious::dist::global;
+use ambitious::gen_server;
+use ambitious::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
+use ambitious::supervisor::{ChildSpec, RestartType, StartChildError, StartError};
 use std::sync::OnceLock;
 
 /// Global room supervisor PID.

@@ -1,8 +1,8 @@
 [package]
-name = "starlang-chat"
+name = "ambitious-chat"
 version.workspace = true
 edition = "2024"
-description = "Multi-user chat application example using Starlang"
+description = "Multi-user chat application example using Ambitious"
 license.workspace = true
 publish = false
 
@@ -15,7 +15,7 @@ name = "chat-client"
 path = "src/bin/chat-client.rs"
 
 [dependencies]
-starlang = { version = "0.1.0", path = "../../crates/starlang", features = ["websocket", "peer"] }
+ambitious = { version = "0.1.0", path = "../../crates/ambitious", features = ["websocket", "peer"] }
 
 async-trait = "0.1"
 tokio = { version = "1", features = ["full", "net", "io-util", "sync"] }

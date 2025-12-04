@@ -10,8 +10,8 @@ use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
 use crate::room::{Room, RoomCall, RoomCast, RoomReply};
 use crate::room_supervisor;
-use starlang::Pid;
-use starlang::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
+use ambitious::Pid;
+use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -46,7 +46,8 @@ impl Session {
     pub async fn run(mut self) {
         // Send welcome message
         self.send_event(ServerEvent::Welcome {
-            message: "Welcome to Starlang Chat! Use /nick <name> to set your nickname.".to_string(),
+            message: "Welcome to Ambitious Chat! Use /nick <name> to set your nickname."
+                .to_string(),
         })
         .await;
 
@@ -63,7 +64,7 @@ impl Session {
             }
 
             // First, drain any pending process messages (non-blocking)
-            while let Some(data) = starlang::try_recv() {
+            while let Some(data) = ambitious::try_recv() {
                 self.handle_channel_message(&data).await;
             }
 
@@ -75,7 +76,7 @@ impl Session {
                 biased; // Prefer process messages over TCP
 
                 // Check for messages from channels (broadcasts, pushes)
-                msg = starlang::recv_timeout(Duration::from_millis(100)) => {
+                msg = ambitious::recv_timeout(Duration::from_millis(100)) => {
                     drop(guard); // Release lock before processing
                     if let Ok(Some(data)) = msg {
                         self.handle_channel_message(&data).await;
@@ -118,7 +119,7 @@ impl Session {
         let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
         for (topic, result) in info_results {
             // Handle any broadcasts from handle_info
-            if let starlang::channel::HandleResult::Broadcast { event, payload } = result {
+            if let ambitious::channel::HandleResult::Broadcast { event, payload } = result {
                 // Broadcast to pg group
                 let group = format!("channel:{}", topic);
                 let msg = ChannelReply::Push {
@@ -127,11 +128,11 @@ impl Session {
                     payload,
                 };
                 if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                    let members = starlang::dist::pg::get_members(&group);
-                    let my_pid = starlang::current_pid();
+                    let members = ambitious::dist::pg::get_members(&group);
+                    let my_pid = ambitious::current_pid();
                     for member_pid in members {
                         if member_pid != my_pid {
-                            let _ = starlang::send_raw(member_pid, bytes.clone());
+                            let _ = ambitious::send_raw(member_pid, bytes.clone());
                         }
                     }
                 }
@@ -338,7 +339,7 @@ impl Session {
                 // Fetch history from the room if we have it
                 if let Some(room_pid) = room_pid
                     && let Ok(RoomReply::History(history_messages)) =
-                        starlang::gen_server::call::<Room>(
+                        ambitious::gen_server::call::<Room>(
                             room_pid,
                             RoomCall::GetHistory,
                             Duration::from_secs(5),
@@ -410,7 +411,7 @@ impl Session {
 
         // Store message in room history
         if let Some(room_pid) = room_supervisor::get_room(&room) {
-            let _ = starlang::gen_server::cast::<Room>(
+            let _ = ambitious::gen_server::cast::<Room>(
                 room_pid,
                 RoomCast::StoreMessage {
                     from: nick.clone(),
@@ -432,9 +433,9 @@ impl Session {
             };
             if let Ok(bytes) = postcard::to_allocvec(&msg) {
                 let group = format!("channel:{}", topic);
-                let members = starlang::dist::pg::get_members(&group);
+                let members = ambitious::dist::pg::get_members(&group);
                 for pid in members {
-                    let _ = starlang::send_raw(pid, bytes.clone());
+                    let _ = ambitious::send_raw(pid, bytes.clone());
                 }
             }
         }
@@ -445,7 +446,7 @@ impl Session {
         let topic = format!("room:{}", room_name);
 
         // Use Presence to get the list of users with their metadata
-        let presences = match starlang::presence::Presence::list("chat_presence", &topic).await {
+        let presences = match ambitious::presence::Presence::list("chat_presence", &topic).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get presence list");
@@ -485,15 +486,15 @@ impl Session {
     async fn cleanup(&mut self) {
         // Terminate all channels - RoomChannel::terminate() broadcasts UserLeft for each
         self.channels
-            .terminate(starlang::channel::TerminateReason::Closed)
+            .terminate(ambitious::channel::TerminateReason::Closed)
             .await;
     }
 }
 
 /// Spawn a session process for a new connection.
 pub fn spawn_session(stream: TcpStream) -> Pid {
-    starlang::spawn(move || async move {
-        let pid = starlang::current_pid();
+    ambitious::spawn(move || async move {
+        let pid = ambitious::current_pid();
         let session = Session::new(stream, pid);
         session.run().await;
     })

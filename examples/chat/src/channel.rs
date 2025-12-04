@@ -1,19 +1,19 @@
 //! Room channel implementation using the Channel abstraction.
 //!
-//! This demonstrates how to use Starlang Channels for chat rooms,
+//! This demonstrates how to use Ambitious Channels for chat rooms,
 //! including Phoenix-style Presence tracking for real-time user lists.
 
 use crate::protocol::HistoryMessage;
 use crate::room::{Room, RoomCall, RoomReply};
 use crate::room_supervisor;
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use starlang::RawTerm;
-use starlang::channel::{
+use ambitious::RawTerm;
+use ambitious::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
 };
-use starlang::presence::{Presence, PresenceMessage};
-use starlang::pubsub::PubSub;
+use ambitious::presence::{Presence, PresenceMessage};
+use ambitious::pubsub::PubSub;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// The name of the chat presence server.
 const PRESENCE_NAME: &str = "chat_presence";
@@ -152,7 +152,7 @@ impl Channel for RoomChannel {
 
         // Send ourselves an :after_join message to trigger presence sync and history push
         if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::AfterJoin) {
-            let _ = starlang::send_raw(socket.pid, msg);
+            let _ = ambitious::send_raw(socket.pid, msg);
         }
 
         // Set up assigns with user info
@@ -190,7 +190,7 @@ impl Channel for RoomChannel {
             ("update_nick", RoomInEvent::UpdateNick { nick }) => {
                 if nick.is_empty() || nick.len() > 32 {
                     return HandleResult::ReplyRaw {
-                        status: starlang::channel::ReplyStatus::Error,
+                        status: ambitious::channel::ReplyStatus::Error,
                         payload: b"nickname must be 1-32 characters".to_vec(),
                     };
                 }
@@ -231,7 +231,7 @@ impl Channel for RoomChannel {
                     // Push history directly (not via another self-message to avoid loop)
                     if let Some(room_pid) = room_supervisor::get_room(&socket.assigns.room_name)
                         && let Ok(RoomReply::History(messages)) =
-                            starlang::gen_server::call::<Room>(
+                            ambitious::gen_server::call::<Room>(
                                 room_pid,
                                 RoomCall::GetHistory,
                                 Duration::from_secs(5),
@@ -250,10 +250,10 @@ impl Channel for RoomChannel {
                     // Schedule a delayed message to push presence state
                     // This gives time for presence sync responses to arrive from other nodes
                     let pid = socket.pid;
-                    starlang::spawn(move || async move {
+                    ambitious::spawn(move || async move {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::PushPresenceState) {
-                            let _ = starlang::send_raw(pid, msg);
+                            let _ = ambitious::send_raw(pid, msg);
                         }
                     });
 
@@ -330,7 +330,7 @@ impl Channel for RoomChannel {
                         if let Ok(info_msg) =
                             postcard::to_allocvec(&ChannelInfo::PresenceSyncRequest { from_pid })
                         {
-                            let _ = starlang::send_raw(socket.pid, info_msg);
+                            let _ = ambitious::send_raw(socket.pid, info_msg);
                         }
                     }
                     _ => {
@@ -403,7 +403,10 @@ impl Channel for RoomChannel {
         HandleResult::NoReply
     }
 
-    async fn terminate(reason: starlang::channel::TerminateReason, socket: &Socket<Self::Assigns>) {
+    async fn terminate(
+        reason: ambitious::channel::TerminateReason,
+        socket: &Socket<Self::Assigns>,
+    ) {
         tracing::info!(
             room = %socket.assigns.room_name,
             nick = %socket.assigns.nick,
@@ -441,7 +444,7 @@ impl Channel for RoomChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use starlang::channel::topic_matches;
+    use ambitious::channel::topic_matches;
 
     #[test]
     fn test_room_channel_pattern() {

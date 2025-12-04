@@ -1,0 +1,24 @@
+[package]
+name = "ambitious-macros"
+version.workspace = true
+edition = "2024"
+description = "Ergonomic macros for Ambitious"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+[dev-dependencies]
+ambitious = { version = "0.1.0", path = "../ambitious" }
+tokio = { version = "1", features = ["full", "test-util"] }
+serde = { version = "1", features = ["derive"] }

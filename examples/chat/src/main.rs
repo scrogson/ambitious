@@ -1,6 +1,6 @@
-//! Starlang Chat Server
+//! Ambitious Chat Server
 //!
-//! A multi-user chat application demonstrating Starlang's capabilities:
+//! A multi-user chat application demonstrating Ambitious's capabilities:
 //! - Processes for user sessions
 //! - GenServers for rooms and registry
 //! - DynamicSupervisor for managing room processes
@@ -51,7 +51,7 @@ use server::{ServerConfig, run_acceptor};
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Starlang Chat Server - A distributed chat application
+/// Ambitious Chat Server - A distributed chat application
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -80,14 +80,14 @@ struct Args {
     connect: Option<String>,
 }
 
-#[starlang::main]
+#[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            env::var("RUST_LOG").unwrap_or_else(|_| "info,starlang=debug".to_string()),
+            env::var("RUST_LOG").unwrap_or_else(|_| "info,ambitious=debug".to_string()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -96,14 +96,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name = %args.name,
         port = args.port,
         dist_port = args.dist_port,
-        "Starting Starlang Chat Server"
+        "Starting Ambitious Chat Server"
     );
 
     // Initialize distribution
     let node_name = format!("{}@localhost", args.name);
     let dist_addr = format!("0.0.0.0:{}", args.dist_port);
 
-    starlang::dist::Config::new()
+    ambitious::dist::Config::new()
         .name(&node_name)
         .listen_addr(&dist_addr)
         .start()
@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to another node if specified
     if let Some(ref peer_addr) = args.connect {
-        match starlang::dist::connect(peer_addr).await {
+        match ambitious::dist::connect(peer_addr).await {
             Ok(node_id) => {
                 tracing::info!(peer = %peer_addr, ?node_id, "Connected to peer node");
             }
@@ -125,14 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Start PubSub server for distributed pub/sub messaging
-    use starlang::pubsub::{PubSub, PubSubConfig};
+    use ambitious::pubsub::{PubSub, PubSubConfig};
     PubSub::start_link(PubSubConfig::new("chat_pubsub"))
         .await
         .expect("Failed to start PubSub");
     tracing::info!("PubSub started as 'chat_pubsub'");
 
     // Start Presence server for tracking user presence
-    use starlang::presence::{Presence, PresenceConfig};
+    use ambitious::presence::{Presence, PresenceConfig};
     Presence::start_link(PresenceConfig::new("chat_presence", "chat_pubsub"))
         .await
         .expect("Failed to start Presence");
@@ -142,14 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let room_sup_pid = room_supervisor::start()
         .await
         .expect("Failed to start room supervisor");
-    starlang::register(room_supervisor::NAME, room_sup_pid);
+    ambitious::register(room_supervisor::NAME, room_sup_pid);
     tracing::info!(pid = ?room_sup_pid, "Room supervisor started and registered");
 
     // Start the room registry and register it by name
     let registry_pid = registry::Registry::start()
         .await
         .expect("Failed to start registry");
-    starlang::register(registry::Registry::NAME, registry_pid);
+    ambitious::register(registry::Registry::NAME, registry_pid);
     tracing::info!(pid = ?registry_pid, "Registry started and registered");
 
     // Configure and run the TCP server
@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.ws_port).parse().unwrap();
     tracing::info!(addr = %ws_addr, "Starting WebSocket server (Phoenix Channels protocol)");
 
-    let endpoint = starlang::channel::websocket::WebSocketEndpoint::new()
+    let endpoint = ambitious::channel::websocket::WebSocketEndpoint::new()
         .channel::<lobby::LobbyChannel>()
         .channel::<channel::RoomChannel>();
 

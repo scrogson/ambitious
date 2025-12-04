@@ -5,10 +5,10 @@
 //! making them visible to all nodes.
 
 use crate::protocol::RoomInfo;
+use ambitious::RawTerm;
+use ambitious::dist::global;
+use ambitious::gen_server::{self, prelude::*};
 use serde::{Deserialize, Serialize};
-use starlang::RawTerm;
-use starlang::dist::global;
-use starlang::gen_server::{self, prelude::*};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -69,7 +69,7 @@ impl Registry {
 
     /// Internal: make a call to the registry.
     async fn call(request: RegistryCall) -> Option<RegistryReply> {
-        let registry_pid = starlang::whereis(Self::NAME)?;
+        let registry_pid = ambitious::whereis(Self::NAME)?;
 
         match gen_server::call::<Registry>(registry_pid, request, Duration::from_secs(5)).await {
             Ok(reply) => Some(reply),

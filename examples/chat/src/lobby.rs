@@ -3,10 +3,10 @@
 //! The lobby channel provides system-level operations like listing rooms.
 //! Clients join "lobby:main" to access these features.
 
+use ambitious::RawTerm;
+use ambitious::channel::{Channel, HandleResult, JoinResult, Socket};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use starlang::RawTerm;
-use starlang::channel::{Channel, HandleResult, JoinResult, Socket};
 
 use crate::protocol::RoomInfo;
 use crate::registry::Registry;
@@ -77,7 +77,7 @@ impl Channel for LobbyChannel {
 
                 // Return a typed reply with the room list
                 HandleResult::Reply {
-                    status: starlang::channel::ReplyStatus::Ok,
+                    status: ambitious::channel::ReplyStatus::Ok,
                     payload: LobbyOutEvent::RoomList { rooms },
                 }
             }
@@ -96,7 +96,7 @@ impl Channel for LobbyChannel {
     }
 
     async fn terminate(
-        _reason: starlang::channel::TerminateReason,
+        _reason: ambitious::channel::TerminateReason,
         _socket: &Socket<Self::Assigns>,
     ) {
         tracing::debug!("Client leaving lobby");
@@ -106,7 +106,7 @@ impl Channel for LobbyChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use starlang::channel::topic_matches;
+    use ambitious::channel::topic_matches;
 
     #[test]
     fn test_lobby_channel_pattern() {

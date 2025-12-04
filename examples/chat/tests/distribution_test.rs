@@ -1,10 +1,10 @@
 //! Integration tests for distributed chat.
 //!
 //! Tests that rooms work correctly across multiple nodes.
-//! Uses the `starlang::peer` module for managing chat server peers.
+//! Uses the `ambitious::peer` module for managing chat server peers.
 
+use ambitious::peer::{Peer, PeerOptions, SpawnMethod};
 use serde::{Deserialize, Serialize};
-use starlang::peer::{Peer, PeerOptions, SpawnMethod};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -55,7 +55,7 @@ async fn start_chat_peer(config: ChatServerConfig) -> Peer {
         .port("http-port", config.http_port)
         .env(
             "RUST_LOG",
-            "info,starlang::distribution=debug,chat_server::session=debug,chat_server::channel=debug",
+            "info,ambitious::distribution=debug,chat_server::session=debug,chat_server::channel=debug",
         )
         .boot_timeout(Duration::from_secs(10));
 

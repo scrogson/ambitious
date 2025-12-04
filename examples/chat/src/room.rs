@@ -4,9 +4,9 @@
 //! When users join a room, they fetch history directly from the room.
 
 use crate::protocol::HistoryMessage;
+use ambitious::RawTerm;
+use ambitious::gen_server::prelude::*;
 use serde::{Deserialize, Serialize};
-use starlang::RawTerm;
-use starlang::gen_server::prelude::*;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 

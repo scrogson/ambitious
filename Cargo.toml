@@ -7,15 +7,15 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sonny Scroggin <sonny@scrogg.in>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/scrogson/starlang"
-homepage = "https://github.com/scrogson/starlang"
+repository = "https://github.com/scrogson/ambitious"
+homepage = "https://github.com/scrogson/ambitious"
 keywords = ["erlang", "otp", "concurrency", "actor", "distributed"]
 categories = ["concurrency", "asynchronous"]
 
 [workspace.dependencies]
 # Internal crates
-starlang = { version = "0.1.0", path = "crates/starlang" }
-starlang-macros = { version = "0.1.0", path = "crates/starlang-macros" }
+ambitious = { version = "0.1.0", path = "crates/ambitious" }
+ambitious-macros = { version = "0.1.0", path = "crates/ambitious-macros" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

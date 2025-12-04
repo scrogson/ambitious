@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/scrogson/starlang/main/assets/starlang.png" alt="Starlang Logo" width="200">
+  <img src="https://raw.githubusercontent.com/scrogson/ambitious/main/assets/ambitious.png" alt="Ambitious Logo" width="200">
 </p>
 
-# Starlang - Erlang-style Concurrency for Rust
+# Ambitious - Erlang-style Concurrency for Rust
 
 A native Rust implementation of Erlang/OTP primitives, bringing the power of the BEAM's concurrency model to Rust with full type safety.
 
@@ -15,42 +15,42 @@ A native Rust implementation of Erlang/OTP primitives, bringing the power of the
 - **Supervisor**: Fault-tolerant supervision trees with configurable restart strategies
 - **DynamicSupervisor**: Start children on demand with automatic restart
 - **Application**: OTP-style application lifecycle management
-- **Distribution**: Connect Starlang nodes across the network with QUIC transport
+- **Distribution**: Connect Ambitious nodes across the network with QUIC transport
 - **Registry**: Local process registry with pub/sub support and via-tuple routing
 - **Channels**: Phoenix-style channels for real-time communication
 - **Presence**: Distributed presence tracking for real-time applications
 
 ## Quick Start
 
-Add Starlang to your `Cargo.toml`:
+Add Ambitious to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-starlang = "0.1"
+ambitious = "0.1"
 ```
 
 ### Basic Process Spawning
 
 ```rust
-use starlang::prelude::*;
+use ambitious::prelude::*;
 
-#[starlang::main]
+#[ambitious::main]
 async fn main() {
     // Spawn a process
-    let pid = starlang::spawn(|| async {
-        println!("Hello from process {:?}", starlang::current_pid());
+    let pid = ambitious::spawn(|| async {
+        println!("Hello from process {:?}", ambitious::current_pid());
     });
 
     // Send a message
-    starlang::send(pid, &"Hello!").ok();
+    ambitious::send(pid, &"Hello!").ok();
 }
 ```
 
 ### GenServer Example
 
 ```rust
-use starlang::prelude::*;
-use starlang::gen_server::{async_trait, GenServer, InitResult, CallResult, CastResult};
+use ambitious::prelude::*;
+use ambitious::gen_server::{async_trait, GenServer, InitResult, CallResult, CastResult};
 use serde::{Serialize, Deserialize};
 
 struct Counter;
@@ -105,8 +105,8 @@ impl GenServer for Counter {
 ### Supervisor Example
 
 ```rust
-use starlang::prelude::*;
-use starlang::supervisor::{Supervisor, SupervisorInit, SupervisorFlags, ChildSpec, Strategy};
+use ambitious::prelude::*;
+use ambitious::supervisor::{Supervisor, SupervisorInit, SupervisorFlags, ChildSpec, Strategy};
 
 struct MySupervisor;
 
@@ -121,7 +121,7 @@ impl Supervisor for MySupervisor {
             vec![
                 ChildSpec::new("worker", || async {
                     // Start your worker here
-                    Ok(starlang::spawn(|| async { /* worker code */ }))
+                    Ok(ambitious::spawn(|| async { /* worker code */ }))
                 }),
             ],
         )
@@ -132,15 +132,15 @@ impl Supervisor for MySupervisor {
 ### DynamicSupervisor Example
 
 ```rust
-use starlang::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
-use starlang::supervisor::ChildSpec;
+use ambitious::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
+use ambitious::supervisor::ChildSpec;
 
 // Start a dynamic supervisor
 let sup_pid = dynamic_supervisor::start(DynamicSupervisorOpts::new()).await?;
 
 // Start children on demand
 let child_spec = ChildSpec::new("worker", || async {
-    Ok(starlang::spawn(|| async { /* worker code */ }))
+    Ok(ambitious::spawn(|| async { /* worker code */ }))
 });
 let child_pid = dynamic_supervisor::start_child(sup_pid, child_spec).await?;
 
@@ -180,15 +180,15 @@ dynamic_supervisor::terminate_child(sup_pid, child_pid)?;
 ## Crate Structure
 
 ```
-starlang/
-├── starlang/              # Main crate re-exporting all functionality
-├── starlang-core/         # Core types: Pid, Ref, ExitReason, Term trait
-├── starlang-runtime/      # Async runtime, scheduler, process registry
-├── starlang-process/      # Process spawning, mailboxes, links, monitors
-├── starlang-gen-server/   # GenServer trait and implementation
-├── starlang-supervisor/   # Supervisor trait and restart strategies
-├── starlang-application/  # Application lifecycle management
-├── starlang-macros/       # Procedural macros for ergonomic APIs
+ambitious/
+├── ambitious/              # Main crate re-exporting all functionality
+├── ambitious-core/         # Core types: Pid, Ref, ExitReason, Term trait
+├── ambitious-runtime/      # Async runtime, scheduler, process registry
+├── ambitious-process/      # Process spawning, mailboxes, links, monitors
+├── ambitious-gen-server/   # GenServer trait and implementation
+├── ambitious-supervisor/   # Supervisor trait and restart strategies
+├── ambitious-application/  # Application lifecycle management
+├── ambitious-macros/       # Procedural macros for ergonomic APIs
 └── examples/
     └── chat/           # Distributed chat server example
 ```
@@ -200,7 +200,7 @@ starlang/
 The `Term` trait (similar to Erlang's term concept) enables any serializable type to be sent between processes:
 
 ```rust
-use starlang::Term;
+use ambitious::Term;
 
 // Any type implementing Serialize + DeserializeOwned automatically implements Term
 #[derive(Serialize, Deserialize)]
@@ -218,11 +218,11 @@ let decoded: MyMessage = Term::decode(&bytes)?;
 
 ```rust
 // Register a process by name
-starlang::register("my_server".to_string(), pid);
+ambitious::register("my_server".to_string(), pid);
 
 // Look up by name
-if let Some(pid) = starlang::whereis("my_server") {
-    starlang::send(pid, &message)?;
+if let Some(pid) = ambitious::whereis("my_server") {
+    ambitious::send(pid, &message)?;
 }
 ```
 
@@ -231,8 +231,8 @@ if let Some(pid) = starlang::whereis("my_server") {
 Similar to Elixir's `{:via, module, term}` pattern:
 
 ```rust
-use starlang::gen_server::ServerRef;
-use starlang::registry::Registry;
+use ambitious::gen_server::ServerRef;
+use ambitious::registry::Registry;
 
 // Create a custom registry
 let registry: Arc<Registry<Vec<u8>, ()>> = Arc::new(Registry::unique("my_registry"));
@@ -246,10 +246,10 @@ let result = gen_server::call::<MyServer>(server_ref, request, timeout).await?;
 
 ## Distribution
 
-Starlang supports distributed nodes connected via QUIC:
+Ambitious supports distributed nodes connected via QUIC:
 
 ```rust
-use starlang::node;
+use ambitious::node;
 
 // Start distribution
 node::start("node1@localhost", "127.0.0.1:9000").await?;
@@ -258,7 +258,7 @@ node::start("node1@localhost", "127.0.0.1:9000").await?;
 node::connect("node2@localhost", "127.0.0.1:9001").await?;
 
 // Send messages to remote processes
-starlang::send(remote_pid, &message)?;
+ambitious::send(remote_pid, &message)?;
 ```
 
 ## Building and Testing
@@ -271,7 +271,7 @@ cargo build
 cargo test
 
 # Run a specific crate's tests
-cargo test -p starlang-gen-server
+cargo test -p ambitious-gen-server
 
 # Run the chat example
 cargo run --example chat-server
