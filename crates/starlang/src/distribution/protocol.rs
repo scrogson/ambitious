@@ -58,6 +58,64 @@ pub enum DistMessage {
         reason: String,
     },
 
+    // === Process Monitoring ===
+    /// Request to monitor a process on this node.
+    MonitorProcess {
+        /// The process requesting the monitor (will receive DOWN).
+        from: Pid,
+        /// The process to monitor on this node.
+        target: Pid,
+        /// Unique reference for this monitor.
+        reference: u64,
+    },
+
+    /// Cancel a process monitor.
+    DemonitorProcess {
+        /// The process that was monitoring.
+        from: Pid,
+        /// The monitored process.
+        target: Pid,
+        /// The monitor reference.
+        reference: u64,
+    },
+
+    /// Notification that a monitored process has exited.
+    ProcessDown {
+        /// The monitor reference.
+        reference: u64,
+        /// The process that exited.
+        pid: Pid,
+        /// The exit reason.
+        reason: String,
+    },
+
+    // === Process Linking ===
+    /// Request to link two processes.
+    Link {
+        /// Process on the sending node.
+        from: Pid,
+        /// Process on this node to link with.
+        target: Pid,
+    },
+
+    /// Remove a link between processes.
+    Unlink {
+        /// Process on the sending node.
+        from: Pid,
+        /// Process on this node.
+        target: Pid,
+    },
+
+    /// Exit signal from a linked process.
+    Exit {
+        /// The process that exited.
+        from: Pid,
+        /// The linked process that should receive this signal.
+        target: Pid,
+        /// The exit reason.
+        reason: String,
+    },
+
     // === Heartbeat ===
     /// Ping to check if connection is alive.
     Ping {

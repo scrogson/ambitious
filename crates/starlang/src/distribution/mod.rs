@@ -40,6 +40,7 @@ mod manager;
 mod monitor;
 mod node;
 pub mod pg;
+mod process_monitor;
 pub(crate) mod protocol;
 mod transport;
 
@@ -47,6 +48,7 @@ pub use discovery::NodeDiscovery;
 pub use manager::{connect, disconnect, node_info, nodes};
 pub use monitor::{NodeDown, NodeDownReason, NodeMonitorRef, demonitor_node, monitor_node};
 pub use node::{Config, init_distribution};
+pub use process_monitor::{demonitor_process, link_process, monitor_process, unlink_process};
 pub use protocol::DistError;
 
 use std::sync::OnceLock;

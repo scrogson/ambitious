@@ -199,31 +199,48 @@ impl RuntimeHandle {
 
         // Notify linked processes
         for linked_pid in links {
-            if let Some(linked_handle) = registry.get(linked_pid) {
-                linked_handle.remove_link(pid);
+            if linked_pid.is_local() {
+                // Local link
+                if let Some(linked_handle) = registry.get(linked_pid) {
+                    linked_handle.remove_link(pid);
 
-                if reason.is_killed() {
-                    // Killed propagates unconditionally
-                    linked_handle.mark_terminated(ExitReason::Killed);
-                } else if linked_handle.is_trapping_exits() {
-                    // Send as message
-                    let exit_msg = SystemMessage::exit(pid, reason.clone());
-                    let _ = linked_handle.send(&exit_msg);
-                } else if reason.is_abnormal() {
-                    // Propagate abnormal exit
-                    linked_handle.mark_terminated(reason.clone());
+                    if reason.is_killed() {
+                        // Killed propagates unconditionally
+                        linked_handle.mark_terminated(ExitReason::Killed);
+                    } else if linked_handle.is_trapping_exits() {
+                        // Send as message
+                        let exit_msg = SystemMessage::exit(pid, reason.clone());
+                        let _ = linked_handle.send(&exit_msg);
+                    } else if reason.is_abnormal() {
+                        // Propagate abnormal exit
+                        linked_handle.mark_terminated(reason.clone());
+                    }
+                    // Normal exits don't propagate to non-trapping processes
                 }
-                // Normal exits don't propagate to non-trapping processes
             }
+            // Remote links are handled by the distribution layer's process monitor registry
+            // which is notified separately below
         }
 
         // Notify monitoring processes
         for (reference, monitor_pid) in monitored_by {
-            if let Some(monitor_handle) = registry.get(monitor_pid) {
-                monitor_handle.remove_monitor(reference);
-                let down_msg = SystemMessage::down(reference, pid, reason.clone());
-                let _ = monitor_handle.send(&down_msg);
+            if monitor_pid.is_local() {
+                // Local monitor
+                if let Some(monitor_handle) = registry.get(monitor_pid) {
+                    monitor_handle.remove_monitor(reference);
+                    let down_msg = SystemMessage::down(reference, pid, reason.clone());
+                    let _ = monitor_handle.send(&down_msg);
+                }
             }
+            // Remote monitors are handled by the distribution layer
+        }
+
+        // Notify distribution layer about this process exit
+        // This handles remote monitors and links
+        if let Some(manager) = crate::distribution::manager() {
+            manager
+                .process_monitors()
+                .notify_local_process_down(pid, &reason);
         }
 
         // Unregister the process
@@ -278,8 +295,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_basic() {
-        let runtime = Runtime::new();
-        let handle = runtime.handle();
+        crate::init();
+        let handle = crate::handle();
 
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = executed.clone();
@@ -297,8 +314,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_with_context() {
-        let runtime = Runtime::new();
-        let handle = runtime.handle();
+        crate::init();
+        let handle = crate::handle();
 
         let received = Arc::new(AtomicBool::new(false));
         let received_clone = received.clone();
@@ -324,8 +341,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_link() {
-        let runtime = Runtime::new();
-        let handle = runtime.handle();
+        crate::init();
+        let handle = crate::handle();
 
         let parent_received_exit = Arc::new(AtomicBool::new(false));
         let parent_received_clone = parent_received_exit.clone();
@@ -362,8 +379,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_monitor() {
-        let runtime = Runtime::new();
-        let handle = runtime.handle();
+        crate::init();
+        let handle = crate::handle();
 
         let down_received = Arc::new(AtomicBool::new(false));
         let down_clone = down_received.clone();
@@ -398,8 +415,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_name() {
-        let runtime = Runtime::new();
-        let handle = runtime.handle();
+        crate::init();
+        let handle = crate::handle();
 
         let pid = handle.spawn(|| async move {
             loop {

@@ -136,6 +136,31 @@ impl ProcessHandle {
         state.links.iter().copied().collect()
     }
 
+    /// Adds a link to a remote process.
+    ///
+    /// Remote links are stored in the same set as local links,
+    /// but are handled differently when the process exits
+    /// (exit signals are sent over the network).
+    pub fn add_remote_link(&self, remote_pid: Pid) {
+        self.add_link(remote_pid);
+    }
+
+    /// Removes a link to a remote process.
+    pub fn remove_remote_link(&self, remote_pid: Pid) {
+        self.remove_link(remote_pid);
+    }
+
+    /// Returns all remote linked processes.
+    pub fn remote_links(&self) -> Vec<Pid> {
+        let state = self.state.read().unwrap();
+        state
+            .links
+            .iter()
+            .filter(|pid| !pid.is_local())
+            .copied()
+            .collect()
+    }
+
     /// Adds a monitor (we are monitoring `target`).
     pub fn add_monitor(&self, reference: Ref, target: Pid) {
         let mut state = self.state.write().unwrap();

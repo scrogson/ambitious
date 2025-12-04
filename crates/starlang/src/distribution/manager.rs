@@ -5,9 +5,10 @@
 
 use super::DIST_MANAGER;
 use super::monitor::NodeMonitorRegistry;
+use super::process_monitor::ProcessMonitorRegistry;
 use super::protocol::{DistError, DistMessage};
 use super::transport::{QuicConnection, QuicTransport};
-use crate::core::{Atom, NodeInfo, NodeName, Pid};
+use crate::core::{Atom, NodeInfo, NodeName, Pid, Ref};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -44,6 +45,8 @@ pub struct DistributionManager {
     transport: RwLock<Option<Arc<QuicTransport>>>,
     /// Node monitor registry.
     monitors: NodeMonitorRegistry,
+    /// Process monitor/link registry.
+    process_monitors: ProcessMonitorRegistry,
 }
 
 impl DistributionManager {
@@ -58,6 +61,7 @@ impl DistributionManager {
             addr_to_node: DashMap::new(),
             transport: RwLock::new(None),
             monitors: NodeMonitorRegistry::new(),
+            process_monitors: ProcessMonitorRegistry::new(),
         }
     }
 
@@ -206,9 +210,12 @@ impl DistributionManager {
                 self.addr_to_node.remove(&addr);
             }
 
-            // Notify monitors
+            // Notify node monitors
             self.monitors
                 .notify_node_down(node_atom, "disconnect requested".to_string());
+
+            // Clean up process monitors and links for this node
+            self.process_monitors.handle_node_down(node_atom);
 
             // Clean up pg memberships from this node
             super::pg::pg().remove_node_members(node_atom);
@@ -256,6 +263,11 @@ impl DistributionManager {
     /// Get the monitor registry.
     pub fn monitors(&self) -> &NodeMonitorRegistry {
         &self.monitors
+    }
+
+    /// Get the process monitor/link registry.
+    pub fn process_monitors(&self) -> &ProcessMonitorRegistry {
+        &self.process_monitors
     }
 
     /// Get a node's message sender.
@@ -401,6 +413,8 @@ async fn message_sender_loop(mut rx: mpsc::Receiver<DistMessage>, node_atom: Ato
         manager
             .monitors
             .notify_node_down(node_atom, "connection closed".to_string());
+        // Clean up process monitors and links for this node
+        manager.process_monitors.handle_node_down(node_atom);
         // Clean up pg memberships from this node
         super::pg::pg().remove_node_members(node_atom);
     }
@@ -444,6 +458,8 @@ async fn message_receiver_loop(node_atom: Atom) {
         manager
             .monitors
             .notify_node_down(node_atom, "connection closed".to_string());
+        // Clean up process monitors and links for this node
+        manager.process_monitors.handle_node_down(node_atom);
         // Clean up pg memberships from this node
         super::pg::pg().remove_node_members(node_atom);
     }
@@ -511,6 +527,92 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
                 super::pg::pg().handle_message(msg, from_node);
             }
         }
+
+        // === Process Monitoring ===
+        DistMessage::MonitorProcess {
+            from,
+            target,
+            reference,
+        } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                let reference = Ref::from_raw(reference);
+                manager
+                    .process_monitors
+                    .add_incoming_monitor(target, from, reference, from_node);
+
+                // Check if target is alive - if not, send DOWN immediately
+                if let Some(handle) = crate::process::global::try_handle()
+                    && !handle.alive(target)
+                {
+                    // Target already dead - send ProcessDown
+                    if let Some(tx) = manager.get_node_tx(from_node) {
+                        let msg = DistMessage::ProcessDown {
+                            reference: reference.as_raw(),
+                            pid: target,
+                            reason: "noproc".to_string(),
+                        };
+                        let _ = tx.try_send(msg);
+                    }
+                    manager
+                        .process_monitors
+                        .remove_incoming_monitor(target, from, reference);
+                }
+            }
+        }
+        DistMessage::DemonitorProcess {
+            from,
+            target,
+            reference,
+        } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager.process_monitors.remove_incoming_monitor(
+                    target,
+                    from,
+                    Ref::from_raw(reference),
+                );
+            }
+        }
+        DistMessage::ProcessDown {
+            reference,
+            pid,
+            reason,
+        } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager.process_monitors.handle_process_down(
+                    Ref::from_raw(reference),
+                    pid,
+                    &reason,
+                );
+            }
+        }
+
+        // === Process Linking ===
+        DistMessage::Link { from, target } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager
+                    .process_monitors
+                    .handle_incoming_link(from, target, from_node);
+            }
+        }
+        DistMessage::Unlink { from, target } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager
+                    .process_monitors
+                    .handle_incoming_unlink(from, target);
+            }
+        }
+        DistMessage::Exit {
+            from,
+            target,
+            reason,
+        } => {
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager
+                    .process_monitors
+                    .handle_incoming_exit(from, target, &reason);
+            }
+        }
+
         _ => {
             tracing::warn!(?msg, "Unexpected message type");
         }
