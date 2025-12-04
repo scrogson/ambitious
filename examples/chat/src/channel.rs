@@ -3,10 +3,14 @@
 //! This demonstrates how to use Starlang Channels for chat rooms,
 //! including Phoenix-style Presence tracking for real-time user lists.
 
+use crate::protocol::HistoryMessage;
+use crate::room::{Room, RoomCall, RoomReply};
+use crate::room_supervisor;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use starlang::channel::{Channel, HandleResult, JoinError, JoinResult, Socket};
+use starlang::channel::{Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket};
 use starlang::presence;
+use std::time::Duration;
 
 /// Custom state stored in each socket's assigns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +52,8 @@ pub enum RoomOutEvent {
     PresenceSyncRequest { from_pid: String },
     /// Response to presence sync (existing member announces themselves).
     PresenceSyncResponse { nick: String },
+    /// Message history for newly joined users.
+    History { messages: Vec<HistoryMessage> },
 }
 
 /// Metadata tracked in Presence for each user.
@@ -57,6 +63,77 @@ pub struct UserPresenceMeta {
     pub nick: String,
     /// User's online status.
     pub status: String,
+}
+
+/// Internal messages for the channel (handle_info).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ChannelInfo {
+    /// Trigger after-join logic (broadcast user joined).
+    AfterJoin,
+    /// Trigger presence state push (delayed to allow sync).
+    PushPresenceState,
+    /// A presence sync request from another user.
+    PresenceSyncRequest { from_pid: String },
+}
+
+/// Push a message to a specific socket (client).
+///
+/// This mirrors Phoenix's `push/3` - sends a message directly to one client.
+#[allow(dead_code)]
+fn push<T: serde::Serialize>(socket: &Socket<RoomAssigns>, event: &str, payload: &T) {
+    if let Ok(payload_bytes) = postcard::to_allocvec(payload) {
+        let msg = ChannelReply::Push {
+            topic: socket.topic.clone(),
+            event: event.to_string(),
+            payload: payload_bytes,
+        };
+        if let Ok(bytes) = postcard::to_allocvec(&msg) {
+            let _ = starlang::send_raw(socket.pid, bytes);
+        }
+    }
+}
+
+/// Broadcast a message to all members of a topic.
+///
+/// This mirrors Phoenix's `broadcast/3` - sends to all subscribers including sender.
+#[allow(dead_code)]
+fn broadcast<T: serde::Serialize>(topic: &str, event: &str, payload: &T) {
+    if let Ok(payload_bytes) = postcard::to_allocvec(payload) {
+        let msg = ChannelReply::Push {
+            topic: topic.to_string(),
+            event: event.to_string(),
+            payload: payload_bytes,
+        };
+        if let Ok(bytes) = postcard::to_allocvec(&msg) {
+            let group = format!("channel:{}", topic);
+            let members = starlang::dist::pg::get_members(&group);
+            for pid in members {
+                let _ = starlang::send_raw(pid, bytes.clone());
+            }
+        }
+    }
+}
+
+/// Broadcast a message to all members of a topic except the sender.
+///
+/// This mirrors Phoenix's `broadcast_from/3` - sends to all except the sender.
+fn broadcast_from<T: serde::Serialize>(socket: &Socket<RoomAssigns>, event: &str, payload: &T) {
+    if let Ok(payload_bytes) = postcard::to_allocvec(payload) {
+        let msg = ChannelReply::Push {
+            topic: socket.topic.clone(),
+            event: event.to_string(),
+            payload: payload_bytes,
+        };
+        if let Ok(bytes) = postcard::to_allocvec(&msg) {
+            let group = format!("channel:{}", socket.topic);
+            let members = starlang::dist::pg::get_members(&group);
+            for pid in members {
+                if pid != socket.pid {
+                    let _ = starlang::send_raw(pid, bytes.clone());
+                }
+            }
+        }
+    }
 }
 
 /// The room channel handler.
@@ -93,6 +170,11 @@ impl Channel for RoomChannel {
 
         tracing::info!(room = %room_name, nick = %payload.nick, "User joining room");
 
+        // Get or create the room GenServer (this registers it globally)
+        if let Err(e) = room_supervisor::get_or_create_room(&room_name).await {
+            tracing::warn!(room = %room_name, error = ?e, "Failed to create room");
+        }
+
         // Track presence for this user in the room
         let presence_key = format!("user:{}", socket.pid);
         let presence_meta = UserPresenceMeta {
@@ -101,6 +183,11 @@ impl Channel for RoomChannel {
         };
         presence::track_pid(topic, &presence_key, socket.pid, presence_meta);
         tracing::debug!(topic = %topic, key = %presence_key, "Tracked presence");
+
+        // Send ourselves an :after_join message to trigger presence sync and history push
+        if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::AfterJoin) {
+            let _ = starlang::send_raw(socket.pid, msg);
+        }
 
         // Set up assigns with user info
         let assigns = RoomAssigns {
@@ -136,7 +223,7 @@ impl Channel for RoomChannel {
             }
             ("update_nick", RoomInEvent::UpdateNick { nick }) => {
                 if nick.is_empty() || nick.len() > 32 {
-                    return HandleResult::Reply {
+                    return HandleResult::ReplyRaw {
                         status: starlang::channel::ReplyStatus::Error,
                         payload: b"nickname must be 1-32 characters".to_vec(),
                     };
@@ -152,12 +239,157 @@ impl Channel for RoomChannel {
         }
     }
 
+    async fn handle_info(
+        msg: Vec<u8>,
+        socket: &mut Socket<Self::Assigns>,
+    ) -> HandleResult<Self::OutEvent> {
+        // First try to decode as ChannelInfo (internal messages)
+        if let Ok(info) = postcard::from_bytes::<ChannelInfo>(&msg) {
+            match info {
+                ChannelInfo::AfterJoin => {
+                    tracing::debug!(
+                        room = %socket.assigns.room_name,
+                        nick = %socket.assigns.nick,
+                        "After join - broadcasting user joined and pushing history"
+                    );
+
+                    // Broadcast UserJoined to notify others (not ourselves)
+                    broadcast_from(
+                        socket,
+                        "user_joined",
+                        &RoomOutEvent::UserJoined {
+                            nick: socket.assigns.nick.clone(),
+                        },
+                    );
+
+                    // Push history directly (not via another self-message to avoid loop)
+                    if let Some(room_pid) = room_supervisor::get_room(&socket.assigns.room_name) {
+                        if let Ok(RoomReply::History(messages)) =
+                            starlang::gen_server::call::<Room>(
+                                room_pid,
+                                RoomCall::GetHistory,
+                                Duration::from_secs(5),
+                            )
+                            .await
+                        {
+                            if !messages.is_empty() {
+                                tracing::debug!(
+                                    room = %socket.assigns.room_name,
+                                    message_count = messages.len(),
+                                    "Pushing history to user"
+                                );
+                                push(socket, "history", &RoomOutEvent::History { messages });
+                            }
+                        }
+                    }
+
+                    // Schedule a delayed message to push presence state
+                    // This gives time for presence sync responses to arrive from other nodes
+                    let pid = socket.pid;
+                    starlang::spawn(move || async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::PushPresenceState) {
+                            let _ = starlang::send_raw(pid, msg);
+                        }
+                    });
+
+                    return HandleResult::NoReply;
+                }
+                ChannelInfo::PushPresenceState => {
+                    // Get current presence state and push to joining user
+                    let topic = format!("room:{}", socket.assigns.room_name);
+                    let presences = starlang::presence::list(&topic);
+                    let mut users: Vec<String> = presences
+                        .values()
+                        .flat_map(|state| {
+                            state.metas.iter().filter_map(|meta| {
+                                meta.decode::<UserPresenceMeta>().map(|m| m.nick)
+                            })
+                        })
+                        .collect();
+
+                    // Always include self in the user list
+                    if !users.contains(&socket.assigns.nick) {
+                        users.push(socket.assigns.nick.clone());
+                    }
+
+                    tracing::debug!(
+                        room = %socket.assigns.room_name,
+                        user_count = users.len(),
+                        users = ?users,
+                        "Pushing presence state to user"
+                    );
+                    push(socket, "presence_state", &RoomOutEvent::PresenceState { users });
+
+                    return HandleResult::NoReply;
+                }
+                ChannelInfo::PresenceSyncRequest { from_pid: _ } => {
+                    // Someone is asking who's here - respond with our nick
+                    tracing::debug!(
+                        room = %socket.assigns.room_name,
+                        nick = %socket.assigns.nick,
+                        "Responding to presence sync request"
+                    );
+
+                    broadcast_from(
+                        socket,
+                        "presence_sync_response",
+                        &RoomOutEvent::PresenceSyncResponse {
+                            nick: socket.assigns.nick.clone(),
+                        },
+                    );
+
+                    return HandleResult::NoReply;
+                }
+            }
+        }
+
+        // Try to decode as ChannelReply (broadcast from another user via pg)
+        if let Ok(reply) = postcard::from_bytes::<ChannelReply>(&msg) {
+            if let ChannelReply::Push { event, payload, .. } = reply {
+                // Decode the room event
+                if let Ok(room_event) = postcard::from_bytes::<RoomOutEvent>(&payload) {
+                    match room_event {
+                        RoomOutEvent::PresenceSyncRequest { from_pid } => {
+                            // Forward to our internal handler
+                            if let Ok(info_msg) = postcard::to_allocvec(&ChannelInfo::PresenceSyncRequest { from_pid }) {
+                                let _ = starlang::send_raw(socket.pid, info_msg);
+                            }
+                        }
+                        _ => {
+                            // Other broadcasts are handled by the transport layer
+                            tracing::trace!(event = %event, "Received broadcast in handle_info");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try to decode as PresenceMessage (delta from another node)
+        if let Ok(presence_msg) = postcard::from_bytes::<starlang::presence::PresenceMessage>(&msg) {
+            // Apply the presence delta to the global tracker
+            let from_node = starlang_core::node::node_name_atom(); // TODO: get actual source node
+            starlang::presence::tracker().handle_message(presence_msg, from_node);
+        }
+
+        HandleResult::NoReply
+    }
+
     async fn terminate(reason: starlang::channel::TerminateReason, socket: &Socket<Self::Assigns>) {
         tracing::info!(
             room = %socket.assigns.room_name,
             nick = %socket.assigns.nick,
             reason = ?reason,
             "User leaving room"
+        );
+
+        // Broadcast that we're leaving
+        broadcast_from(
+            socket,
+            "user_left",
+            &RoomOutEvent::UserLeft {
+                nick: socket.assigns.nick.clone(),
+            },
         );
 
         // Untrack presence for this user

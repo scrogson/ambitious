@@ -106,12 +106,44 @@ impl Session {
 
     /// Handle incoming channel messages (broadcasts from other users).
     async fn handle_channel_message(&mut self, data: &[u8]) {
-        // Try to decode as ChannelReply (push from channel)
+        // First, check if this is a presence message and apply it to the tracker
+        if let Ok(presence_msg) = postcard::from_bytes::<starlang::presence::PresenceMessage>(data)
+        {
+            let from_node = starlang_core::node::node_name_atom();
+            starlang::presence::tracker().handle_message(presence_msg, from_node);
+            // Don't return - continue processing in case it's also a channel message
+        }
+
+        // Dispatch to handle_info so RoomChannel can respond to presence sync, etc.
+        let info_results = self.channels.handle_info_any(data.to_vec()).await;
+        for (topic, result) in info_results {
+            // Handle any broadcasts from handle_info
+            if let starlang::channel::HandleResult::Broadcast { event, payload } = result {
+                // Broadcast to pg group
+                let group = format!("channel:{}", topic);
+                let msg = ChannelReply::Push {
+                    topic: topic.clone(),
+                    event,
+                    payload,
+                };
+                if let Ok(bytes) = postcard::to_allocvec(&msg) {
+                    let members = starlang::dist::pg::get_members(&group);
+                    let my_pid = starlang::current_pid();
+                    for member_pid in members {
+                        if member_pid != my_pid {
+                            let _ = starlang::send_raw(member_pid, bytes.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now handle the message for client notification
         if let Ok(reply) = postcard::from_bytes::<ChannelReply>(data) {
             match reply {
                 ChannelReply::Push {
                     topic,
-                    event,
+                    event: _,
                     payload,
                 } => {
                     // Decode the room event
@@ -147,15 +179,8 @@ impl Session {
                                 })
                                 .await;
                             }
-                            RoomOutEvent::PresenceSyncRequest { from_pid } => {
-                                // Someone new joined and wants to know who's here
-                                // Respond with our nick
-                                tracing::debug!(
-                                    from_pid = %from_pid,
-                                    my_nick = ?self.nick,
-                                    "Received presence sync request, will respond"
-                                );
-                                self.respond_to_presence_sync(&topic, &from_pid).await;
+                            RoomOutEvent::PresenceSyncRequest { .. } => {
+                                // Handled by RoomChannel::handle_info above
                             }
                             RoomOutEvent::PresenceSyncResponse { nick } => {
                                 // An existing member announced themselves
@@ -171,9 +196,16 @@ impl Session {
                                 })
                                 .await;
                             }
+                            RoomOutEvent::History { messages } => {
+                                // History is already sent directly by session.rs on join
+                                // This is just for consistency - forward if received via channel
+                                self.send_event(ServerEvent::History {
+                                    room: room_name.to_string(),
+                                    messages,
+                                })
+                                .await;
+                            }
                         }
-                    } else {
-                        tracing::warn!(event = %event, "Failed to decode room event");
                     }
                 }
                 _ => {
@@ -317,16 +349,15 @@ impl Session {
                     }
                 }
 
-                // Broadcast that we joined to other members
-                self.broadcast_join(&topic, &nick).await;
                 self.send_event(ServerEvent::Joined {
                     room: room_name.clone(),
                 })
                 .await;
 
-                // Request current user list from all members via presence sync
-                // This gathers nicks from all nodes
-                self.request_presence_sync(&topic, &room_name).await;
+                // RoomChannel::join() sends :after_join which will:
+                // - Broadcast UserJoined to other members
+                // - Schedule PushPresenceState to send full user list after sync
+                // These are handled when the mailbox messages arrive in handle_channel_message
             }
             ChannelReply::JoinError { reason, .. } => {
                 self.send_event(ServerEvent::JoinError {
@@ -336,126 +367,6 @@ impl Session {
                 .await;
             }
             _ => {}
-        }
-    }
-
-    /// Broadcast a join event to the room.
-    async fn broadcast_join(&self, topic: &str, nick: &str) {
-        let event = RoomOutEvent::UserJoined {
-            nick: nick.to_string(),
-        };
-        if let Ok(payload) = postcard::to_allocvec(&event) {
-            let msg = ChannelReply::Push {
-                topic: topic.to_string(),
-                event: "user_joined".to_string(),
-                payload,
-            };
-            if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                let group = format!("channel:{}", topic);
-                let members = starlang::dist::pg::get_members(&group);
-                let my_pid = starlang::current_pid();
-                for pid in members {
-                    if pid != my_pid {
-                        let _ = starlang::send_raw(pid, bytes.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    /// Broadcast a leave event to the room.
-    async fn broadcast_leave(&self, topic: &str, nick: &str) {
-        let event = RoomOutEvent::UserLeft {
-            nick: nick.to_string(),
-        };
-        if let Ok(payload) = postcard::to_allocvec(&event) {
-            let msg = ChannelReply::Push {
-                topic: topic.to_string(),
-                event: "user_left".to_string(),
-                payload,
-            };
-            if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                let group = format!("channel:{}", topic);
-                let members = starlang::dist::pg::get_members(&group);
-                for pid in members {
-                    let _ = starlang::send_raw(pid, bytes.clone());
-                }
-            }
-        }
-    }
-
-    /// Request presence sync from all members in the room.
-    /// This tells existing members to announce themselves to the new joiner.
-    async fn request_presence_sync(&mut self, topic: &str, room_name: &str) {
-        // Small delay to allow pg membership to sync across nodes
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let my_pid = starlang::current_pid();
-        let event = RoomOutEvent::PresenceSyncRequest {
-            from_pid: format!("{:?}", my_pid),
-        };
-        if let Ok(payload) = postcard::to_allocvec(&event) {
-            let msg = ChannelReply::Push {
-                topic: topic.to_string(),
-                event: "presence_sync_request".to_string(),
-                payload,
-            };
-            if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                let group = format!("channel:{}", topic);
-                let members = starlang::dist::pg::get_members(&group);
-                tracing::debug!(
-                    group = %group,
-                    member_count = members.len(),
-                    members = ?members,
-                    "Requesting presence sync from pg members"
-                );
-                for pid in members {
-                    if pid != my_pid {
-                        tracing::debug!(target_pid = ?pid, "Sending presence sync request");
-                        let _ = starlang::send_raw(pid, bytes.clone());
-                    }
-                }
-            }
-        }
-
-        // Also add ourselves to the user list we'll send to client
-        if let Some(nick) = &self.nick {
-            self.send_event(ServerEvent::UserList {
-                room: room_name.to_string(),
-                users: vec![nick.clone()],
-            })
-            .await;
-        }
-    }
-
-    /// Respond to a presence sync request by announcing our nick.
-    async fn respond_to_presence_sync(&self, topic: &str, _requester_pid: &str) {
-        if let Some(nick) = &self.nick {
-            let my_pid = starlang::current_pid();
-            let event = RoomOutEvent::PresenceSyncResponse { nick: nick.clone() };
-            if let Ok(payload) = postcard::to_allocvec(&event) {
-                let msg = ChannelReply::Push {
-                    topic: topic.to_string(),
-                    event: "presence_sync_response".to_string(),
-                    payload,
-                };
-                if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                    // Send to all members except ourselves
-                    let group = format!("channel:{}", topic);
-                    let members = starlang::dist::pg::get_members(&group);
-                    tracing::debug!(
-                        topic = %topic,
-                        nick = %nick,
-                        member_count = members.len(),
-                        "Responding to presence sync"
-                    );
-                    for pid in members {
-                        if pid != my_pid {
-                            let _ = starlang::send_raw(pid, bytes.clone());
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -471,11 +382,7 @@ impl Session {
             return;
         }
 
-        // Broadcast leave before actually leaving
-        if let Some(nick) = &self.nick {
-            self.broadcast_leave(&topic, nick).await;
-        }
-
+        // RoomChannel::terminate() broadcasts UserLeft for us
         self.channels.handle_leave(topic).await;
         self.send_event(ServerEvent::Left { room: room_name }).await;
     }
@@ -566,22 +473,7 @@ impl Session {
 
     /// Cleanup when disconnecting.
     async fn cleanup(&mut self) {
-        // Get joined topics before terminating
-        let topics: Vec<String> = self
-            .channels
-            .joined_topics()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // Broadcast leave for each room
-        if let Some(nick) = &self.nick {
-            for topic in &topics {
-                self.broadcast_leave(topic, nick).await;
-            }
-        }
-
-        // Terminate all channels
+        // Terminate all channels - RoomChannel::terminate() broadcasts UserLeft for each
         self.channels
             .terminate(starlang::channel::TerminateReason::Closed)
             .await;

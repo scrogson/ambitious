@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Starlang Chat</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid #333;
+        }
+
+        header h1 {
+            color: #00d4ff;
+            font-size: 1.8rem;
+            margin-bottom: 5px;
+        }
+
+        header p {
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            margin-top: 10px;
+        }
+
+        .status.connected {
+            background: #0a3d0a;
+            color: #4ade80;
+        }
+
+        .status.disconnected {
+            background: #3d0a0a;
+            color: #f87171;
+        }
+
+        .status.connecting {
+            background: #3d3d0a;
+            color: #facc15;
+        }
+
+        .join-form {
+            padding: 20px;
+            background: #16213e;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .join-form h2 {
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .form-row:last-child {
+            margin-bottom: 0;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #0f0f23;
+            color: #eee;
+            font-size: 1rem;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button.primary {
+            background: #00d4ff;
+            color: #000;
+        }
+
+        button.primary:hover {
+            background: #00b8e6;
+        }
+
+        button.secondary {
+            background: #333;
+            color: #eee;
+        }
+
+        button.secondary:hover {
+            background: #444;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .chat-container {
+            flex: 1;
+            display: none;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .chat-container.active {
+            display: flex;
+        }
+
+        .chat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #16213e;
+            border-radius: 8px 8px 0 0;
+        }
+
+        .chat-header h2 {
+            font-size: 1.1rem;
+        }
+
+        .chat-header span {
+            color: #00d4ff;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            background: #0f0f23;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .message {
+            padding: 10px 15px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+
+        .message.incoming {
+            background: #1e3a5f;
+            align-self: flex-start;
+        }
+
+        .message.outgoing {
+            background: #0d4f4f;
+            align-self: flex-end;
+        }
+
+        .message.system {
+            background: #2d2d44;
+            align-self: center;
+            font-style: italic;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .message .author {
+            font-weight: bold;
+            color: #00d4ff;
+            margin-bottom: 4px;
+            font-size: 0.85rem;
+        }
+
+        .message .text {
+            word-wrap: break-word;
+        }
+
+        .message .time {
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .message-form {
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            background: #16213e;
+            border-radius: 0 0 8px 8px;
+        }
+
+        .message-form input {
+            flex: 1;
+        }
+
+        .chat-body {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+        }
+
+        .chat-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .user-list {
+            width: 150px;
+            background: #16213e;
+            border-left: 1px solid #333;
+            padding: 10px;
+            overflow-y: auto;
+        }
+
+        .user-list h3 {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+
+        .user-list ul {
+            list-style: none;
+        }
+
+        .user-list li {
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            margin-bottom: 4px;
+        }
+
+        .user-list li.me {
+            background: #0d4f4f;
+            color: #00d4ff;
+        }
+
+        .user-list li:not(.me) {
+            color: #aaa;
+        }
+
+        .user-list li:not(.me):hover {
+            background: #1e3a5f;
+        }
+
+        .error {
+            background: #3d0a0a;
+            color: #f87171;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .room-list-section {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+        }
+
+        .room-list-section h3 {
+            font-size: 1rem;
+            color: #888;
+            margin-bottom: 10px;
+        }
+
+        .room-list {
+            list-style: none;
+            margin-bottom: 10px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .room-list li {
+            padding: 8px 12px;
+            background: #0f0f23;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+
+        .room-list li:hover {
+            background: #1e3a5f;
+        }
+
+        .room-list li .room-name {
+            color: #00d4ff;
+        }
+
+        .room-list li .user-count {
+            color: #888;
+            font-size: 0.85rem;
+        }
+
+        .room-list-empty {
+            color: #666;
+            font-style: italic;
+            padding: 10px 0;
+        }
+    </style>
+    <!-- Official Phoenix JS client -->
+    <script src="https://unpkg.com/phoenix@1.8.2/priv/static/phoenix.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Starlang Chat</h1>
+            <p>Phoenix Channels over WebSocket</p>
+            <div id="status" class="status disconnected">Disconnected</div>
+        </header>
+
+        <div class="error" id="error"></div>
+
+        <div class="join-form" id="joinForm">
+            <h2>Join a Room</h2>
+            <div class="form-row">
+                <input type="text" id="nickname" placeholder="Your nickname" value="">
+                <input type="text" id="room" placeholder="Room name" value="lobby">
+            </div>
+            <div class="form-row">
+                <input type="text" id="serverUrl" placeholder="WebSocket URL" value="ws://localhost:4000">
+                <button class="secondary" onclick="connectToLobby()">Browse Rooms</button>
+                <button class="primary" id="joinBtn" onclick="joinRoom()">Join</button>
+            </div>
+            <div class="room-list-section" id="roomListSection" style="display: none;">
+                <h3>Available Rooms</h3>
+                <ul id="roomList" class="room-list"></ul>
+                <button class="secondary" onclick="refreshRoomList()">Refresh</button>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chatContainer">
+            <div class="chat-header">
+                <h2>Room: <span id="roomName"></span></h2>
+                <button class="secondary" onclick="leaveRoom()">Leave</button>
+            </div>
+            <div class="chat-body">
+                <div class="chat-main">
+                    <div class="messages" id="messages"></div>
+                    <form class="message-form" onsubmit="sendMessage(event)">
+                        <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off">
+                        <button type="submit" class="primary">Send</button>
+                    </form>
+                </div>
+                <div class="user-list">
+                    <h3>Users</h3>
+                    <ul id="userList"></ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Use official Phoenix JS client from unpkg
+        const { Socket } = window.Phoenix;
+
+        // App State
+        let socket = null;
+        let channel = null;
+        let lobbyChannel = null;  // Lobby channel for system operations
+        let currentNick = '';
+        let currentRoom = '';
+        let userSet = new Set();  // Track users in the room
+
+        // DOM Elements
+        const statusEl = document.getElementById('status');
+        const errorEl = document.getElementById('error');
+        const joinFormEl = document.getElementById('joinForm');
+        const chatContainerEl = document.getElementById('chatContainer');
+        const messagesEl = document.getElementById('messages');
+        const roomNameEl = document.getElementById('roomName');
+        const messageInputEl = document.getElementById('messageInput');
+        const joinBtnEl = document.getElementById('joinBtn');
+        const userListEl = document.getElementById('userList');
+        const roomListEl = document.getElementById('roomList');
+        const roomListSectionEl = document.getElementById('roomListSection');
+
+        function setStatus(status, text) {
+            statusEl.className = 'status ' + status;
+            statusEl.textContent = text;
+        }
+
+        function showError(message) {
+            errorEl.textContent = message;
+            errorEl.classList.add('show');
+            setTimeout(() => errorEl.classList.remove('show'), 5000);
+        }
+
+        function addMessage(type, author, text, time = new Date()) {
+            const messageEl = document.createElement('div');
+            messageEl.className = 'message ' + type;
+
+            if (type === 'system') {
+                messageEl.innerHTML = `<div class="text">${text}</div>`;
+            } else {
+                const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                messageEl.innerHTML = `
+                    <div class="author">${author}</div>
+                    <div class="text">${escapeHtml(text)}</div>
+                    <div class="time">${timeStr}</div>
+                `;
+            }
+
+            messagesEl.appendChild(messageEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function renderUserList() {
+            userListEl.innerHTML = '';
+
+            // Add ourselves first
+            const meEl = document.createElement('li');
+            meEl.className = 'me';
+            meEl.textContent = currentNick + ' (you)';
+            userListEl.appendChild(meEl);
+
+            // Add other users sorted alphabetically
+            const sortedUsers = Array.from(userSet).sort();
+            for (const nick of sortedUsers) {
+                const userEl = document.createElement('li');
+                userEl.textContent = nick;
+                userListEl.appendChild(userEl);
+            }
+        }
+
+        function addUserToList(nick) {
+            if (nick && nick !== currentNick && !userSet.has(nick)) {
+                userSet.add(nick);
+                renderUserList();
+            }
+        }
+
+        function removeUserFromList(nick) {
+            if (userSet.has(nick)) {
+                userSet.delete(nick);
+                renderUserList();
+            }
+        }
+
+        function clearUserList() {
+            userSet.clear();
+            userListEl.innerHTML = '';
+        }
+
+        function renderRoomList(rooms) {
+            roomListEl.innerHTML = '';
+
+            if (rooms.length === 0) {
+                const emptyEl = document.createElement('li');
+                emptyEl.className = 'room-list-empty';
+                emptyEl.textContent = 'No rooms available. Create one by joining!';
+                roomListEl.appendChild(emptyEl);
+                return;
+            }
+
+            for (const room of rooms) {
+                const roomEl = document.createElement('li');
+                roomEl.innerHTML = `
+                    <span class="room-name">${escapeHtml(room.name)}</span>
+                    <span class="user-count">${room.user_count || 0} users</span>
+                `;
+                roomEl.onclick = () => {
+                    document.getElementById('room').value = room.name;
+                };
+                roomListEl.appendChild(roomEl);
+            }
+        }
+
+        async function connectToLobby() {
+            const serverUrl = document.getElementById('serverUrl').value.trim();
+
+            try {
+                // Connect to WebSocket if not already connected
+                if (!socket) {
+                    socket = new Socket(serverUrl, {});
+                    socket.onClose(() => {
+                        setStatus('disconnected', 'Disconnected');
+                        roomListSectionEl.style.display = 'none';
+                        lobbyChannel = null;
+                    });
+                    socket.connect();
+                }
+
+                // Join the lobby channel
+                if (!lobbyChannel) {
+                    lobbyChannel = socket.channel('lobby:main', {});
+                    await new Promise((resolve, reject) => {
+                        lobbyChannel.join()
+                            .receive('ok', (resp) => {
+                                setStatus('connected', 'Connected');
+                                roomListSectionEl.style.display = 'block';
+                                resolve(resp);
+                            })
+                            .receive('error', (resp) => reject(new Error(resp.reason || 'Join failed')));
+                    });
+                }
+
+                // Fetch room list
+                await refreshRoomList();
+            } catch (error) {
+                console.error('Lobby connection error:', error);
+            }
+        }
+
+        async function refreshRoomList() {
+            if (!lobbyChannel) {
+                await connectToLobby();
+                return;
+            }
+
+            try {
+                const response = await new Promise((resolve, reject) => {
+                    lobbyChannel.push('list_rooms', { ListRooms: null })
+                        .receive('ok', (resp) => resolve(resp))
+                        .receive('error', (resp) => reject(new Error(resp.reason || 'Failed')));
+                });
+                console.log('Room list response:', response);
+                // Response is LobbyOutEvent::RoomList { rooms: [...] }
+                const data = response.RoomList || response;
+                if (data.rooms) {
+                    renderRoomList(data.rooms);
+                }
+            } catch (error) {
+                console.error('Failed to fetch room list:', error);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function joinRoom() {
+            const nickname = document.getElementById('nickname').value.trim();
+            const room = document.getElementById('room').value.trim();
+            const serverUrl = document.getElementById('serverUrl').value.trim();
+
+            if (!nickname) {
+                showError('Please enter a nickname');
+                return;
+            }
+
+            if (!room) {
+                showError('Please enter a room name');
+                return;
+            }
+
+            joinBtnEl.disabled = true;
+            setStatus('connecting', 'Connecting...');
+
+            try {
+                // Connect to WebSocket if not already connected
+                if (!socket) {
+                    socket = new Socket(serverUrl, {});
+
+                    socket.onClose(() => {
+                        setStatus('disconnected', 'Disconnected');
+                        showJoinForm();
+                        lobbyChannel = null;
+                    });
+
+                    socket.onError(() => {
+                        showError('Connection error');
+                    });
+
+                    socket.connect();
+                }
+                setStatus('connected', 'Connected');
+
+                // Leave lobby channel if we were in it (we're now joining a room)
+                if (lobbyChannel) {
+                    lobbyChannel.leave();
+                    lobbyChannel = null;
+                }
+
+                // Join the room channel
+                channel = socket.channel(`room:${room}`, { nick: nickname });
+
+                channel.on('new_msg', (payload) => {
+                    // Payload is RoomOutEvent::Message enum: {"Message": {"from": ..., "text": ...}}
+                    const msg = payload.Message || payload;
+                    const type = msg.from === currentNick ? 'outgoing' : 'incoming';
+                    const time = msg.timestamp ? new Date(msg.timestamp * 1000) : new Date();
+                    addMessage(type, msg.from, msg.text, time);
+                });
+
+                channel.on('user_joined', (payload) => {
+                    // Payload is RoomOutEvent::UserJoined enum: {"UserJoined": {"nick": ...}}
+                    const data = payload.UserJoined || payload;
+                    if (data.nick && data.nick !== currentNick) {
+                        addUserToList(data.nick);
+                        addMessage('system', '', `${data.nick} joined the room`);
+                    }
+                });
+
+                channel.on('user_left', (payload) => {
+                    // Payload is RoomOutEvent::UserLeft enum: {"UserLeft": {"nick": ...}}
+                    const data = payload.UserLeft || payload;
+                    if (data.nick) {
+                        removeUserFromList(data.nick);
+                        addMessage('system', '', `${data.nick} left the room`);
+                    }
+                });
+
+                channel.on('presence_state', (payload) => {
+                    // Payload is RoomOutEvent::PresenceState { users: [...] }
+                    const data = payload.PresenceState || payload;
+                    if (data.users && data.users.length > 0) {
+                        // Add all users to the list
+                        for (const nick of data.users) {
+                            addUserToList(nick);
+                        }
+                        addMessage('system', '', `Users in room: ${data.users.join(', ')}`);
+                    }
+                });
+
+                channel.on('presence_sync_response', (payload) => {
+                    // Someone responded to our presence sync request
+                    const data = payload.PresenceSyncResponse || payload;
+                    if (data.nick && data.nick !== currentNick) {
+                        addUserToList(data.nick);
+                    }
+                });
+
+                channel.on('presence_sync_request', (payload) => {
+                    // Someone is asking who's here - the channel handler responds for us
+                    // We just log it for debugging
+                    console.log('Presence sync request received:', payload);
+                });
+
+                channel.on('history', (payload) => {
+                    // Payload is RoomOutEvent::History { messages: [...] }
+                    const data = payload.History || payload;
+                    if (data.messages && data.messages.length > 0) {
+                        addMessage('system', '', `--- Message History (${data.messages.length} messages) ---`);
+                        for (const msg of data.messages) {
+                            const type = msg.from === currentNick ? 'outgoing' : 'incoming';
+                            const time = msg.timestamp ? new Date(msg.timestamp * 1000) : new Date();
+                            addMessage(type, msg.from, msg.text, time);
+                        }
+                        addMessage('system', '', '--- End of History ---');
+                    }
+                });
+
+                await new Promise((resolve, reject) => {
+                    channel.join()
+                        .receive('ok', (resp) => resolve(resp))
+                        .receive('error', (resp) => reject(new Error(resp.reason || 'Join failed')));
+                });
+
+                currentNick = nickname;
+                currentRoom = room;
+                roomNameEl.textContent = room;
+
+                // Initialize user list with ourselves
+                clearUserList();
+                renderUserList();
+
+                // Show chat UI
+                joinFormEl.style.display = 'none';
+                chatContainerEl.classList.add('active');
+                messageInputEl.focus();
+
+                addMessage('system', '', `Welcome to #${room}!`);
+
+            } catch (error) {
+                console.error('Join error:', error);
+                showError(error.message || 'Failed to join room');
+                setStatus('disconnected', 'Disconnected');
+                if (socket) {
+                    socket.disconnect();
+                    socket = null;
+                }
+            } finally {
+                joinBtnEl.disabled = false;
+            }
+        }
+
+        function leaveRoom() {
+            if (channel) {
+                channel.leave();
+                channel = null;
+            }
+
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+
+            showJoinForm();
+        }
+
+        function showJoinForm() {
+            chatContainerEl.classList.remove('active');
+            joinFormEl.style.display = 'block';
+            messagesEl.innerHTML = '';
+            clearUserList();
+            currentNick = '';
+            currentRoom = '';
+        }
+
+        function sendMessage(event) {
+            event.preventDefault();
+
+            const text = messageInputEl.value.trim();
+            if (!text || !channel) return;
+
+            messageInputEl.value = '';
+
+            // Send as RoomInEvent::NewMsg enum variant
+            channel.push('new_msg', { NewMsg: { text } })
+                .receive('error', (resp) => {
+                    console.error('Send error:', resp);
+                    showError('Failed to send message');
+                });
+        }
+
+        // Handle Enter key in message input
+        messageInputEl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                sendMessage(e);
+            }
+        });
+
+        // Generate random nickname
+        document.getElementById('nickname').value = 'user' + Math.floor(Math.random() * 10000);
+    </script>
+</body>
+</html>

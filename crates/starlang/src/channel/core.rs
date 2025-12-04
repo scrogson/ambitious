@@ -1,63 +1,4 @@
-//! Phoenix-style Channels for real-time communication.
-//!
-//! Channels provide a high-level abstraction for building real-time features
-//! with topic-based routing, join authorization, and message handling.
-//!
-//! # Architecture
-//!
-//! - **Socket**: Represents a client connection, holds assigns (custom state)
-//! - **Channel**: A topic handler that processes joins, messages, and broadcasts
-//! - **Topic**: String identifier for routing (supports patterns like `"room:*"`)
-//!
-//! # Example
-//!
-//! ```ignore
-//! use starlang::channel::{Channel, Socket, JoinResult, HandleResult};
-//! use async_trait::async_trait;
-//! use serde::{Deserialize, Serialize};
-//!
-//! struct RoomChannel;
-//!
-//! #[async_trait]
-//! impl Channel for RoomChannel {
-//!     type Assigns = RoomAssigns;
-//!     type JoinPayload = JoinRoom;
-//!     type InEvent = RoomEvent;
-//!     type OutEvent = RoomBroadcast;
-//!
-//!     fn topic_pattern() -> &'static str {
-//!         "room:*"
-//!     }
-//!
-//!     async fn join(
-//!         topic: &str,
-//!         payload: Self::JoinPayload,
-//!         socket: Socket<Self::Assigns>,
-//!     ) -> JoinResult<Self::Assigns> {
-//!         // Authorize and set up assigns
-//!         let room_id = topic.strip_prefix("room:").unwrap();
-//!         let assigns = RoomAssigns { room_id: room_id.to_string() };
-//!         JoinResult::Ok(socket.assign(assigns))
-//!     }
-//!
-//!     async fn handle_in(
-//!         event: &str,
-//!         payload: Self::InEvent,
-//!         socket: &mut Socket<Self::Assigns>,
-//!     ) -> HandleResult<Self::OutEvent> {
-//!         match event {
-//!             "new_msg" => {
-//!                 // Broadcast to all subscribers
-//!                 HandleResult::Broadcast {
-//!                     event: "new_msg".to_string(),
-//!                     payload: RoomBroadcast::Message { text: payload.text },
-//!                 }
-//!             }
-//!             _ => HandleResult::NoReply,
-//!         }
-//!     }
-//! }
-//! ```
+//! Core channel types and traits.
 
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
@@ -159,11 +100,18 @@ impl JoinError {
 pub enum HandleResult<O = ()> {
     /// No reply needed.
     NoReply,
-    /// Send a reply to the client.
+    /// Send a typed reply to the client (serialized by transport).
     Reply {
         /// Status of the reply (ok, error).
         status: ReplyStatus,
-        /// Serialized response payload.
+        /// Response payload (will be serialized by transport).
+        payload: O,
+    },
+    /// Send a raw reply to the client (already serialized).
+    ReplyRaw {
+        /// Status of the reply (ok, error).
+        status: ReplyStatus,
+        /// Pre-serialized response payload.
         payload: Vec<u8>,
     },
     /// Broadcast to all subscribers on the topic.
@@ -184,7 +132,14 @@ pub enum HandleResult<O = ()> {
     Push {
         /// Event name.
         event: String,
-        /// Serialized payload.
+        /// Push payload (will be serialized by transport).
+        payload: O,
+    },
+    /// Push a raw message to just this client (already serialized).
+    PushRaw {
+        /// Event name.
+        event: String,
+        /// Pre-serialized payload.
         payload: Vec<u8>,
     },
     /// Stop the channel.
@@ -411,6 +366,16 @@ pub trait ChannelHandler: Send + Sync {
 
     /// Handle termination.
     async fn handle_terminate(&self, reason: TerminateReason, socket: &Socket<Vec<u8>>);
+
+    /// Handle an info message (raw bytes from mailbox).
+    async fn handle_info(&self, msg: Vec<u8>, socket: &mut Socket<Vec<u8>>) -> HandleResult<Vec<u8>>;
+
+    /// Convert a postcard-encoded broadcast payload to JSON bytes.
+    ///
+    /// This is used by WebSocket transports to convert broadcast payloads
+    /// from the internal postcard format to JSON for transmission to clients.
+    /// Returns None if the payload cannot be converted.
+    fn broadcast_to_json(&self, payload: &[u8]) -> Option<Vec<u8>>;
 }
 
 /// Wrapper to make a typed Channel into a type-erased ChannelHandler.
@@ -514,7 +479,11 @@ where
 
         match result {
             HandleResult::NoReply => HandleResult::NoReply,
-            HandleResult::Reply { status, payload } => HandleResult::Reply { status, payload },
+            HandleResult::Reply { status, payload } => match postcard::to_allocvec(&payload) {
+                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Err(_) => HandleResult::NoReply,
+            },
+            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
             HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
                 Ok(bytes) => HandleResult::Broadcast {
                     event,
@@ -531,7 +500,11 @@ where
                     Err(_) => HandleResult::NoReply,
                 }
             }
-            HandleResult::Push { event, payload } => HandleResult::Push { event, payload },
+            HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
+                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Err(_) => HandleResult::NoReply,
+            },
+            HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
             HandleResult::Stop { reason } => HandleResult::Stop { reason },
         }
     }
@@ -565,6 +538,64 @@ where
                 assigns,
             };
             C::terminate(reason, &typed_socket).await;
+        }
+    }
+
+    fn broadcast_to_json(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        // Decode from postcard, re-encode as JSON
+        let out_event: C::OutEvent = postcard::from_bytes(payload).ok()?;
+        serde_json::to_vec(&out_event).ok()
+    }
+
+    async fn handle_info(&self, msg: Vec<u8>, socket: &mut Socket<Vec<u8>>) -> HandleResult<Vec<u8>> {
+        let assigns: C::Assigns = match postcard::from_bytes(&socket.assigns) {
+            Ok(a) => a,
+            Err(_) => return HandleResult::NoReply,
+        };
+
+        let mut typed_socket = Socket {
+            pid: socket.pid,
+            topic: socket.topic.clone(),
+            join_ref: socket.join_ref.clone(),
+            assigns,
+        };
+
+        let result = C::handle_info(msg, &mut typed_socket).await;
+
+        // Update assigns back
+        if let Ok(new_assigns) = postcard::to_allocvec(&typed_socket.assigns) {
+            socket.assigns = new_assigns;
+        }
+
+        match result {
+            HandleResult::NoReply => HandleResult::NoReply,
+            HandleResult::Reply { status, payload } => match postcard::to_allocvec(&payload) {
+                Ok(bytes) => HandleResult::ReplyRaw { status, payload: bytes },
+                Err(_) => HandleResult::NoReply,
+            },
+            HandleResult::ReplyRaw { status, payload } => HandleResult::ReplyRaw { status, payload },
+            HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
+                Ok(bytes) => HandleResult::Broadcast {
+                    event,
+                    payload: bytes,
+                },
+                Err(_) => HandleResult::NoReply,
+            },
+            HandleResult::BroadcastFrom { event, payload } => {
+                match postcard::to_allocvec(&payload) {
+                    Ok(bytes) => HandleResult::BroadcastFrom {
+                        event,
+                        payload: bytes,
+                    },
+                    Err(_) => HandleResult::NoReply,
+                }
+            }
+            HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
+                Ok(bytes) => HandleResult::PushRaw { event, payload: bytes },
+                Err(_) => HandleResult::NoReply,
+            },
+            HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
+            HandleResult::Stop { reason } => HandleResult::Stop { reason },
         }
     }
 }
@@ -689,6 +720,11 @@ impl ChannelServer {
             .push(Arc::new(TypedChannelHandler::<C>::new()));
     }
 
+    /// Add a pre-built dynamic channel handler.
+    pub fn add_dyn_handler(&mut self, handler: DynChannelHandler) {
+        self.handlers.push(handler);
+    }
+
     /// Find a handler for a topic.
     fn find_handler(&self, topic: &str) -> Option<&DynChannelHandler> {
         self.handlers.iter().find(|h| h.matches(topic))
@@ -772,6 +808,14 @@ impl ChannelServer {
                 },
                 payload,
             }),
+            HandleResult::ReplyRaw { status, payload } => Some(ChannelReply::Reply {
+                msg_ref,
+                status: match status {
+                    ReplyStatus::Ok => "ok".to_string(),
+                    ReplyStatus::Error => "error".to_string(),
+                },
+                payload,
+            }),
             HandleResult::Broadcast {
                 event: broadcast_event,
                 payload: broadcast_payload,
@@ -789,6 +833,14 @@ impl ChannelServer {
                 None
             }
             HandleResult::Push {
+                event: push_event,
+                payload: push_payload,
+            } => Some(ChannelReply::Push {
+                topic,
+                event: push_event,
+                payload: push_payload,
+            }),
+            HandleResult::PushRaw {
                 event: push_event,
                 payload: push_payload,
             } => Some(ChannelReply::Push {
@@ -879,6 +931,43 @@ impl ChannelServer {
     /// Check if joined to a topic.
     pub fn is_joined(&self, topic: &str) -> bool {
         self.channels.contains_key(topic)
+    }
+
+    /// Convert a postcard-encoded broadcast payload to JSON for WebSocket clients.
+    ///
+    /// This finds the appropriate handler for the topic and uses it to convert
+    /// the payload from postcard to JSON format.
+    pub fn broadcast_to_json(&self, topic: &str, payload: &[u8]) -> Option<Vec<u8>> {
+        let handler = self.find_handler(topic)?;
+        handler.broadcast_to_json(payload)
+    }
+
+    /// Handle an info message for a specific topic.
+    ///
+    /// This dispatches the raw message to the channel's handle_info callback.
+    pub async fn handle_info(&mut self, topic: &str, msg: Vec<u8>) -> Option<HandleResult<Vec<u8>>> {
+        let handler = self.find_handler(topic)?.clone();
+        let socket = self.channels.get_mut(topic)?;
+        Some(handler.handle_info(msg, socket).await)
+    }
+
+    /// Handle an info message, trying all joined channels.
+    ///
+    /// This is used when we receive a message but don't know which channel it's for.
+    pub async fn handle_info_any(&mut self, msg: Vec<u8>) -> Vec<(String, HandleResult<Vec<u8>>)> {
+        let mut results = Vec::new();
+        let topics: Vec<String> = self.channels.keys().cloned().collect();
+
+        for topic in topics {
+            if let Some(handler) = self.find_handler(&topic).cloned() {
+                if let Some(socket) = self.channels.get_mut(&topic) {
+                    let result = handler.handle_info(msg.clone(), socket).await;
+                    results.push((topic, result));
+                }
+            }
+        }
+
+        results
     }
 }
 

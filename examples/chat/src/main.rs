@@ -7,6 +7,7 @@
 //! - Message passing between processes
 //! - **Distribution**: Connect multiple chat servers together
 //! - **pg**: Distributed process groups for room membership
+//! - **WebSocket**: Phoenix Channels V2 protocol for web clients
 //!
 //! # Usage
 //!
@@ -20,19 +21,24 @@
 //! cargo run --bin chat-server -- --name node2 --port 9998 --dist-port 9001 --connect 127.0.0.1:9000
 //! ```
 //!
-//! Connect with the provided client:
+//! Connect with the provided TUI client:
 //! ```bash
 //! cargo run --bin chat-client -- --port 9999
 //! ```
 //!
+//! Or open the web interface at http://localhost:8080
+//!
 //! # Protocol
 //!
-//! The protocol uses length-prefixed binary messages (postcard serialization).
+//! - TCP: Length-prefixed binary messages (postcard serialization)
+//! - WebSocket: Phoenix Channels V2 JSON protocol
 
 #![deny(warnings)]
 #![deny(missing_docs)]
 
 mod channel;
+mod http;
+mod lobby;
 mod protocol;
 mod pubsub;
 mod registry;
@@ -58,9 +64,17 @@ struct Args {
     #[arg(short, long, default_value = "node1")]
     name: String,
 
-    /// Port for client connections
+    /// Port for client connections (TCP binary protocol)
     #[arg(short, long, default_value = "9999")]
     port: u16,
+
+    /// Port for WebSocket connections (Phoenix Channels protocol)
+    #[arg(short, long, default_value = "4000")]
+    ws_port: u16,
+
+    /// Port for HTTP server (serves web client)
+    #[arg(long, default_value = "8080")]
+    http_port: u16,
 
     /// Port for distribution (node-to-node connections)
     #[arg(short, long, default_value = "9000")]
@@ -139,7 +153,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tracing::info!(addr = %config.addr, "Starting TCP acceptor for clients");
 
-    // Run the acceptor (this blocks)
+    // Start WebSocket server for Phoenix Channels clients
+    let ws_addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.ws_port).parse().unwrap();
+    tracing::info!(addr = %ws_addr, "Starting WebSocket server (Phoenix Channels protocol)");
+
+    let endpoint = starlang::channel::websocket::WebSocketEndpoint::new()
+        .channel::<lobby::LobbyChannel>()
+        .channel::<channel::RoomChannel>();
+
+    tokio::spawn(async move {
+        if let Err(e) = endpoint.listen(ws_addr).await {
+            tracing::error!(error = %e, "WebSocket server error");
+        }
+    });
+
+    // Start HTTP server for web client
+    let http_addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.http_port).parse().unwrap();
+    tracing::info!(addr = %http_addr, "Starting HTTP server (web client at http://{})", http_addr);
+
+    tokio::spawn(async move {
+        if let Err(e) = http::serve(http_addr).await {
+            tracing::error!(error = %e, "HTTP server error");
+        }
+    });
+
+    // Run the TCP acceptor (this blocks)
     run_acceptor(config).await?;
 
     Ok(())

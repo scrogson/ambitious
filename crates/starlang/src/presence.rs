@@ -223,6 +223,10 @@ impl PresenceTracker {
         let presence_meta = PresenceMeta::new(pid, meta);
         let phx_ref = presence_meta.phx_ref.clone();
 
+        // Join the presence pg group for this topic so we receive deltas from other nodes
+        let presence_group = format!("presence:{}", topic);
+        pg::join(&presence_group, pid);
+
         // Add to state
         let mut topic_state = self.state.entry(topic.to_string()).or_default();
         let key_state = topic_state.entry(key.to_string()).or_default();
@@ -488,6 +492,8 @@ impl PresenceTracker {
 
     /// Apply a delta to local state.
     fn apply_delta(&self, topic: &str, diff: PresenceDiff) {
+        let has_joins = !diff.joins.is_empty();
+
         let mut topic_state = self.state.entry(topic.to_string()).or_default();
 
         // Process leaves first
@@ -519,6 +525,38 @@ impl PresenceTracker {
                     .any(|m| m.phx_ref == join_meta.phx_ref);
                 if !exists {
                     local_state.metas.push(join_meta);
+                }
+            }
+        }
+
+        // Drop the mutable borrow before calling broadcast
+        drop(topic_state);
+
+        // If we received a join, send our current state back so new joiners get the full picture
+        if has_joins {
+            let our_state = self.list(topic);
+            if !our_state.is_empty() {
+                self.broadcast_state(topic, our_state);
+            }
+        }
+    }
+
+    /// Broadcast our full state for a topic to other nodes.
+    fn broadcast_state(&self, topic: &str, state: HashMap<String, PresenceState>) {
+        let msg = PresenceMessage::SyncResponse {
+            topic: topic.to_string(),
+            state,
+        };
+
+        if let Ok(payload) = postcard::to_allocvec(&msg) {
+            let group = format!("presence:{}", topic);
+            let members = pg::get_members(&group);
+            let my_node = starlang_core::node::node_name_atom();
+
+            for pid in members {
+                // Don't send to ourselves (different node)
+                if pid.node() != my_node {
+                    let _ = crate::send_raw(pid, payload.clone());
                 }
             }
         }

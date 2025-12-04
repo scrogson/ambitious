@@ -15,7 +15,7 @@ name = "chat-client"
 path = "src/bin/chat-client.rs"
 
 [dependencies]
-starlang = { version = "0.1.0", path = "../../crates/starlang" }
+starlang = { version = "0.1.0", path = "../../crates/starlang", features = ["websocket"] }
 starlang-core = { version = "0.1.0", path = "../../crates/starlang-core" }
 starlang-runtime = { version = "0.1.0", path = "../../crates/starlang-runtime" }
 starlang-process = { version = "0.1.0", path = "../../crates/starlang-process" }
