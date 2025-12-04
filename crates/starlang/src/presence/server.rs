@@ -2,6 +2,7 @@
 
 use super::types::{PresenceDiff, PresenceMessage, PresenceMeta, PresenceRef, PresenceState};
 use crate::core::{Pid, RawTerm};
+use crate::dist::pg;
 use crate::gen_server::{
     CallResult, CastResult, ContinueArg, ContinueResult, From, GenServer, InfoResult, InitResult,
     async_trait,
@@ -92,6 +93,8 @@ pub struct PresenceServerState {
     name: String,
     /// The PubSub server name.
     pubsub: String,
+    /// The pg group for presence servers.
+    pg_group: String,
     /// Presence state per topic: topic -> (key -> state).
     state: Arc<DashMap<String, HashMap<String, PresenceState>>>,
     /// Reverse lookup: PID -> set of (topic, key) pairs.
@@ -105,6 +108,7 @@ impl Default for PresenceServerState {
         Self {
             name: String::new(),
             pubsub: String::new(),
+            pg_group: String::new(),
             state: Arc::new(DashMap::new()),
             pid_to_presence: Arc::new(DashMap::new()),
             self_pid: None,
@@ -124,9 +128,11 @@ impl GenServer for Presence {
     type Reply = PresenceReply;
 
     async fn init(config: PresenceConfig) -> InitResult<PresenceServerState> {
+        let pg_group = format!("presence:{}", config.name);
         let state = PresenceServerState {
             name: config.name,
             pubsub: config.pubsub,
+            pg_group,
             state: Arc::new(DashMap::new()),
             pid_to_presence: Arc::new(DashMap::new()),
             self_pid: None,
@@ -165,6 +171,13 @@ impl GenServer for Presence {
                     let mut topic_state = state.state.entry(topic.clone()).or_default();
                     let key_state = topic_state.entry(key.clone()).or_default();
                     key_state.metas.push(presence_meta.clone());
+                    tracing::debug!(
+                        topic = %topic,
+                        key = %key,
+                        pid = ?pid,
+                        total_keys = topic_state.len(),
+                        "Presence::track - added to state"
+                    );
                 }
 
                 // Track reverse lookup
@@ -337,6 +350,12 @@ impl GenServer for Presence {
                     .get(&topic)
                     .map(|s| s.clone())
                     .unwrap_or_default();
+                tracing::debug!(
+                    topic = %topic,
+                    presence_count = presences.len(),
+                    keys = ?presences.keys().collect::<Vec<_>>(),
+                    "Presence::list called"
+                );
                 CallResult::Reply(PresenceReply::List(presences), std::mem::take(state))
             }
 
@@ -370,16 +389,36 @@ impl GenServer for Presence {
         msg: RawTerm,
         state: &mut PresenceServerState,
     ) -> InfoResult<PresenceServerState> {
-        // Handle presence messages from PubSub
+        // Handle presence messages from other Presence servers
         if let Ok(presence_msg) = postcard::from_bytes::<PresenceMessage>(msg.as_ref()) {
             match presence_msg {
                 PresenceMessage::Delta { topic, diff } => {
+                    tracing::debug!(
+                        topic = %topic,
+                        joins = diff.joins.len(),
+                        leaves = diff.leaves.len(),
+                        "Presence received delta from remote node, applying"
+                    );
                     apply_delta(&state.state, &topic, diff);
+
+                    // Log state after applying delta
+                    if let Some(topic_state) = state.state.get(&topic) {
+                        tracing::debug!(
+                            topic = %topic,
+                            keys = ?topic_state.keys().collect::<Vec<_>>(),
+                            "Presence state after applying delta"
+                        );
+                    }
                 }
                 PresenceMessage::StateSync {
                     topic,
                     state: remote_state,
                 } => {
+                    tracing::debug!(
+                        topic = %topic,
+                        remote_keys = remote_state.len(),
+                        "Presence received state sync from remote node, merging"
+                    );
                     merge_state(&state.state, &topic, remote_state);
                 }
             }
@@ -397,9 +436,13 @@ impl GenServer for Presence {
         // Register ourselves by name
         let _ = crate::register(&state.name, self_pid);
 
+        // Join the pg group so other Presence servers can find us
+        pg::join(&state.pg_group, self_pid);
+
         tracing::debug!(
             name = %state.name,
             pubsub = %state.pubsub,
+            pg_group = %state.pg_group,
             pid = ?self_pid,
             "Presence started"
         );
@@ -408,7 +451,7 @@ impl GenServer for Presence {
     }
 }
 
-/// Broadcast a delta to other nodes via PubSub.
+/// Broadcast a delta to other nodes via PubSub and to other Presence servers via pg.
 async fn broadcast_delta(pubsub: &str, topic: &str, diff: PresenceDiff) {
     if diff.is_empty() {
         return;
@@ -416,12 +459,33 @@ async fn broadcast_delta(pubsub: &str, topic: &str, diff: PresenceDiff) {
 
     let msg = PresenceMessage::Delta {
         topic: topic.to_string(),
-        diff,
+        diff: diff.clone(),
     };
 
-    // Broadcast to all subscribers of the presence topic
+    // Broadcast to all subscribers of the presence topic (channels)
     let presence_topic = format!("presence:{}", topic);
     let _ = PubSub::broadcast(pubsub, &presence_topic, &msg).await;
+
+    // Also send to other Presence servers in the pg group so they can merge state
+    // The pg group name is "presence:{pubsub_name}"
+    let pg_group = format!("presence:{}", pubsub);
+    let members = pg::get_members(&pg_group);
+    let self_pid = crate::current_pid();
+    let my_node = crate::core::node::node_name_atom();
+
+    if let Ok(msg_bytes) = postcard::to_allocvec(&msg) {
+        for pid in members {
+            // Skip ourselves and only send to remote nodes
+            if pid != self_pid && pid.node() != my_node {
+                tracing::trace!(
+                    target_pid = ?pid,
+                    topic = %topic,
+                    "Forwarding presence delta to remote Presence server"
+                );
+                let _ = crate::send_raw(pid, msg_bytes.clone());
+            }
+        }
+    }
 }
 
 /// Apply a delta to local state.

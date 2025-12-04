@@ -12,10 +12,13 @@ use starlang::RawTerm;
 use starlang::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
 };
-use starlang::presence::Presence;
+use starlang::presence::{Presence, PresenceMessage};
+use starlang::pubsub::PubSub;
 
 /// The name of the chat presence server.
 const PRESENCE_NAME: &str = "chat_presence";
+/// The name of the chat pubsub server.
+const PUBSUB_NAME: &str = "chat_pubsub";
 use std::time::Duration;
 
 /// Custom state stored in each socket's assigns.
@@ -139,6 +142,13 @@ impl Channel for RoomChannel {
             tracing::warn!(error = %e, "Failed to track presence");
         }
         tracing::debug!(topic = %topic, key = %presence_key, "Tracked presence");
+
+        // Subscribe to presence updates for this room
+        let presence_topic = format!("presence:{}", topic);
+        if let Err(e) = PubSub::subscribe_pid(PUBSUB_NAME, &presence_topic, socket.pid).await {
+            tracing::warn!(error = %e, "Failed to subscribe to presence updates");
+        }
+        tracing::debug!(topic = %presence_topic, "Subscribed to presence updates");
 
         // Send ourselves an :after_join message to trigger presence sync and history push
         if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::AfterJoin) {
@@ -331,8 +341,64 @@ impl Channel for RoomChannel {
             }
         }
 
-        // Note: Presence messages are now handled by the Presence GenServer
-        // via PubSub subscriptions, so we don't need to manually handle them here.
+        // Handle presence delta messages from PubSub
+        if let Some(presence_msg) = msg.decode::<PresenceMessage>() {
+            match presence_msg {
+                PresenceMessage::Delta { topic: _, diff } => {
+                    // Process joins - notify client of new users
+                    for (key, state) in &diff.joins {
+                        for meta in &state.metas {
+                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
+                                // Don't notify about ourselves
+                                if meta.pid != socket.pid {
+                                    tracing::debug!(
+                                        room = %socket.assigns.room_name,
+                                        nick = %user_meta.nick,
+                                        key = %key,
+                                        "Presence join received, notifying client"
+                                    );
+                                    push(
+                                        socket,
+                                        "user_joined",
+                                        &RoomOutEvent::UserJoined {
+                                            nick: user_meta.nick,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Process leaves - notify client of users leaving
+                    for (key, state) in &diff.leaves {
+                        for meta in &state.metas {
+                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
+                                // Don't notify about ourselves
+                                if meta.pid != socket.pid {
+                                    tracing::debug!(
+                                        room = %socket.assigns.room_name,
+                                        nick = %user_meta.nick,
+                                        key = %key,
+                                        "Presence leave received, notifying client"
+                                    );
+                                    push(
+                                        socket,
+                                        "user_left",
+                                        &RoomOutEvent::UserLeft {
+                                            nick: user_meta.nick,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    return HandleResult::NoReply;
+                }
+                PresenceMessage::StateSync { .. } => {
+                    // Full state sync - we handle this via PushPresenceState
+                }
+            }
+        }
 
         HandleResult::NoReply
     }
@@ -363,6 +429,12 @@ impl Channel for RoomChannel {
             tracing::warn!(error = %e, "Failed to untrack presence");
         }
         tracing::debug!(topic = %topic, key = %presence_key, "Untracked presence");
+
+        // Unsubscribe from presence updates
+        let presence_topic = format!("presence:{}", topic);
+        if let Err(e) = PubSub::unsubscribe_pid(PUBSUB_NAME, &presence_topic, socket.pid).await {
+            tracing::warn!(error = %e, "Failed to unsubscribe from presence updates");
+        }
     }
 }
 

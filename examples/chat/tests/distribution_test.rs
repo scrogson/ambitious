@@ -270,15 +270,31 @@ async fn test_single_node_chat() {
     )
     .await;
 
-    // Bob should receive the message
-    let resp = timeout(Duration::from_secs(2), read_message(&mut bob)).await;
-    assert!(resp.is_ok(), "Bob should receive alice's message");
-    let resp = decode_event(&resp.unwrap());
-    assert!(
-        matches!(resp, ServerEvent::Message { ref from, ref text, .. } if from == "alice" && text == "hello from alice"),
-        "Expected Message, got {:?}",
-        resp
-    );
+    // Bob should receive the message (may receive UserJoined/UserList first due to presence sync)
+    let mut message_received = false;
+    for _ in 0..5 {
+        let resp = timeout(Duration::from_secs(2), read_message(&mut bob)).await;
+        if resp.is_err() {
+            break;
+        }
+        let event = decode_event(&resp.unwrap());
+        match event {
+            ServerEvent::Message {
+                ref from, ref text, ..
+            } if from == "alice" && text == "hello from alice" => {
+                message_received = true;
+                break;
+            }
+            ServerEvent::UserJoined { .. } | ServerEvent::UserList { .. } => {
+                // Skip presence-related events
+                continue;
+            }
+            other => {
+                panic!("Expected Message or presence event, got {:?}", other);
+            }
+        }
+    }
+    assert!(message_received, "Bob should have received alice's message");
 
     // Server is automatically cleaned up when _server goes out of scope (start_link)
 }
