@@ -8,10 +8,10 @@
 use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
 use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
-use crate::room::{Room, RoomCall, RoomCast, RoomReply};
+use crate::room::{Room, RoomCast};
 use crate::room_supervisor;
-use ambitious::Pid;
 use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
+use ambitious::{Pid, RawTerm, Term};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -105,49 +105,25 @@ impl Session {
         }
     }
 
-    /// Handle incoming channel messages (broadcasts from other users).
+    /// Handle incoming process messages.
+    ///
+    /// Messages fall into two categories:
+    /// 1. ChannelReply::Push - broadcasts from pg groups, forwarded to the client
+    /// 2. Everything else - internal messages dispatched to channel handle_info
     async fn handle_channel_message(&mut self, data: &[u8]) {
-        tracing::debug!(
-            nick = ?self.nick,
-            data_len = data.len(),
-            "handle_channel_message called"
-        );
-        // Note: Presence messages are now handled by the Presence GenServer
-        // via PubSub subscriptions, so we don't need to manually handle them here.
+        let raw = RawTerm::from(data.to_vec());
 
-        // Dispatch to handle_info so RoomChannel can respond to presence sync, etc.
-        let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
-        for (topic, result) in info_results {
-            // Handle any broadcasts from handle_info
-            if let ambitious::channel::HandleResult::Broadcast { event, payload } = result {
-                // Broadcast to pg group
-                let group = format!("channel:{}", topic);
-                let msg = ChannelReply::Push {
-                    topic: topic.clone(),
-                    event,
-                    payload,
-                };
-                if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                    let members = ambitious::dist::pg::get_members(&group);
-                    let my_pid = ambitious::current_pid();
-                    for member_pid in members {
-                        if member_pid != my_pid {
-                            let _ = ambitious::send_raw(member_pid, bytes.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Now handle the message for client notification
-        if let Ok(ChannelReply::Push {
+        // First, check if this is a ChannelReply::Push (broadcast from pg group)
+        // These are forwarded directly to the client WITHOUT going through handle_info
+        if let Some(ChannelReply::Push {
             topic,
             event: _,
             payload,
-        }) = postcard::from_bytes::<ChannelReply>(data)
+        }) = raw.decode::<ChannelReply>()
         {
-            // Decode the room event
-            if let Ok(room_event) = postcard::from_bytes::<RoomOutEvent>(&payload) {
+            // Decode the room event and forward to client
+            let payload_raw = RawTerm::from(payload);
+            if let Some(room_event) = payload_raw.decode::<RoomOutEvent>() {
                 let room_name = topic.strip_prefix("room:").unwrap_or(&topic);
                 match room_event {
                     RoomOutEvent::UserJoined { nick } => {
@@ -155,7 +131,7 @@ impl Session {
                             room = %room_name,
                             joined_nick = %nick,
                             my_nick = ?self.nick,
-                            "Received UserJoined, sending to client"
+                            "Received UserJoined broadcast, sending to client"
                         );
                         self.send_event(ServerEvent::UserJoined {
                             room: room_name.to_string(),
@@ -183,7 +159,7 @@ impl Session {
                             room = %room_name,
                             users = ?users,
                             nick = ?self.nick,
-                            "Received PresenceState, sending UserList to client"
+                            "Received PresenceState broadcast, sending UserList to client"
                         );
                         self.send_event(ServerEvent::UserList {
                             room: room_name.to_string(),
@@ -192,11 +168,11 @@ impl Session {
                         .await;
                     }
                     RoomOutEvent::PresenceSyncRequest { .. } => {
-                        // Handled by RoomChannel::handle_info above
+                        // These should go through handle_info, not be broadcast
+                        // But if we receive one, ignore it here
                     }
                     RoomOutEvent::PresenceSyncResponse { nick } => {
                         // An existing member announced themselves
-                        // Send this as a UserJoined so client adds them to list
                         tracing::debug!(
                             room = %room_name,
                             nick = %nick,
@@ -209,14 +185,63 @@ impl Session {
                         .await;
                     }
                     RoomOutEvent::History { messages } => {
-                        // History is already sent directly by session.rs on join
-                        // This is just for consistency - forward if received via channel
+                        // History pushed to this client specifically
+                        tracing::debug!(
+                            nick = ?self.nick,
+                            room = %room_name,
+                            message_count = messages.len(),
+                            "Received history push, forwarding to client"
+                        );
                         self.send_event(ServerEvent::History {
                             room: room_name.to_string(),
                             messages,
                         })
                         .await;
                     }
+                }
+            }
+            return; // Message handled as broadcast, don't dispatch to handle_info
+        }
+
+        // Not a ChannelReply::Push - dispatch to channel handle_info for internal messages
+        // (e.g., ChannelInfo::AfterJoin, PresenceMessage::Delta, etc.)
+        let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
+        for (topic, result) in info_results {
+            match result {
+                ambitious::channel::HandleResult::Broadcast { event, payload } => {
+                    // Channel wants to broadcast to all members
+                    let group = format!("channel:{}", topic);
+                    let msg = ChannelReply::Push {
+                        topic: topic.clone(),
+                        event,
+                        payload,
+                    };
+                    let members = ambitious::dist::pg::get_members(&group);
+                    let my_pid = ambitious::current_pid();
+                    for member_pid in members {
+                        if member_pid != my_pid {
+                            let _ = ambitious::send(member_pid, &msg);
+                        }
+                    }
+                }
+                ambitious::channel::HandleResult::BroadcastFrom { event, payload } => {
+                    // Channel wants to broadcast to all members except self
+                    let group = format!("channel:{}", topic);
+                    let msg = ChannelReply::Push {
+                        topic: topic.clone(),
+                        event,
+                        payload,
+                    };
+                    let members = ambitious::dist::pg::get_members(&group);
+                    let my_pid = ambitious::current_pid();
+                    for member_pid in members {
+                        if member_pid != my_pid {
+                            let _ = ambitious::send(member_pid, &msg);
+                        }
+                    }
+                }
+                _ => {
+                    // Other results (NoReply, Push, etc.) handled by channel internally
                 }
             }
         }
@@ -305,27 +330,14 @@ impl Session {
         }
 
         // Get or create the room GenServer first (this registers it globally)
-        let room_pid = match room_supervisor::get_or_create_room(&room_name).await {
-            Ok(pid) => Some(pid),
-            Err(e) => {
-                tracing::warn!(room = %room_name, error = ?e, "Failed to create room");
-                None
-            }
-        };
+        // The room is created here so it exists before the channel join
+        if let Err(e) = room_supervisor::get_or_create_room(&room_name).await {
+            tracing::warn!(room = %room_name, error = ?e, "Failed to create room");
+        }
 
         // Create join payload
         let join_payload = JoinPayload { nick: nick.clone() };
-        let payload_bytes = match postcard::to_allocvec(&join_payload) {
-            Ok(b) => b,
-            Err(_) => {
-                self.send_event(ServerEvent::JoinError {
-                    room: room_name,
-                    reason: "Internal error".to_string(),
-                })
-                .await;
-                return;
-            }
-        };
+        let payload_bytes = join_payload.encode();
 
         // Join via channel server
         let msg_ref = format!("join-{}", room_name);
@@ -336,23 +348,8 @@ impl Session {
 
         match reply {
             ChannelReply::JoinOk { .. } => {
-                // Fetch history from the room if we have it
-                if let Some(room_pid) = room_pid
-                    && let Ok(RoomReply::History(history_messages)) =
-                        ambitious::gen_server::call::<Room>(
-                            room_pid,
-                            RoomCall::GetHistory,
-                            Duration::from_secs(5),
-                        )
-                        .await
-                    && !history_messages.is_empty()
-                {
-                    self.send_event(ServerEvent::History {
-                        room: room_name.clone(),
-                        messages: history_messages,
-                    })
-                    .await;
-                }
+                // Note: History is sent via the channel's AfterJoin handler
+                // to ensure it only goes to the joining user (not duplicated here)
 
                 self.send_event(ServerEvent::Joined {
                     room: room_name.clone(),
@@ -361,6 +358,7 @@ impl Session {
 
                 // RoomChannel::join() sends :after_join which will:
                 // - Broadcast UserJoined to other members
+                // - Push history to the joining user
                 // - Schedule PushPresenceState to send full user list after sync
                 // These are handled when the mailbox messages arrive in handle_channel_message
             }
@@ -425,19 +423,15 @@ impl Session {
             from: nick,
             text: text.clone(),
         };
-        if let Ok(payload) = postcard::to_allocvec(&event) {
-            let msg = ChannelReply::Push {
-                topic: topic.to_string(),
-                event: "new_msg".to_string(),
-                payload,
-            };
-            if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                let group = format!("channel:{}", topic);
-                let members = ambitious::dist::pg::get_members(&group);
-                for pid in members {
-                    let _ = ambitious::send_raw(pid, bytes.clone());
-                }
-            }
+        let msg = ChannelReply::Push {
+            topic: topic.to_string(),
+            event: "new_msg".to_string(),
+            payload: event.encode(),
+        };
+        let group = format!("channel:{}", topic);
+        let members = ambitious::dist::pg::get_members(&group);
+        for pid in members {
+            let _ = ambitious::send(pid, &msg);
         }
     }
 

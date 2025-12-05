@@ -13,8 +13,16 @@ use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// How often to send heartbeat pings to connected nodes.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long to wait for a pong before considering a node dead.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Information about a connected node.
 struct ConnectedNode {
@@ -24,6 +32,41 @@ struct ConnectedNode {
     connection: QuicConnection,
     /// Sender for outgoing messages.
     tx: mpsc::Sender<DistMessage>,
+    /// Last time we received a pong (or any message) from this node.
+    /// Stored as milliseconds since UNIX epoch for atomic access.
+    last_seen_ms: AtomicU64,
+}
+
+impl ConnectedNode {
+    /// Create a new connected node with current timestamp.
+    fn new(info: NodeInfo, connection: QuicConnection, tx: mpsc::Sender<DistMessage>) -> Self {
+        Self {
+            info,
+            connection,
+            tx,
+            last_seen_ms: AtomicU64::new(current_time_ms()),
+        }
+    }
+
+    /// Update the last seen timestamp to now.
+    fn touch(&self) {
+        self.last_seen_ms.store(current_time_ms(), Ordering::Relaxed);
+    }
+
+    /// Check if this node has timed out (no response within HEARTBEAT_TIMEOUT).
+    fn is_timed_out(&self) -> bool {
+        let last_seen = self.last_seen_ms.load(Ordering::Relaxed);
+        let now = current_time_ms();
+        now.saturating_sub(last_seen) > HEARTBEAT_TIMEOUT.as_millis() as u64
+    }
+}
+
+/// Get current time in milliseconds since UNIX epoch.
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// The distribution manager.
@@ -97,6 +140,11 @@ impl DistributionManager {
             accept_loop(transport, node_name, creation).await;
         });
 
+        // Spawn heartbeat loop to detect dead nodes quickly
+        tokio::spawn(async move {
+            heartbeat_loop().await;
+        });
+
         Ok(())
     }
 
@@ -143,11 +191,7 @@ impl DistributionManager {
         // Store connection
         self.nodes.insert(
             remote_node_atom,
-            ConnectedNode {
-                info: node_info,
-                connection,
-                tx,
-            },
+            ConnectedNode::new(node_info, connection, tx),
         );
         self.addr_to_node.insert(addr, remote_node_atom);
 
@@ -415,11 +459,7 @@ async fn handle_incoming_connection(
 
     manager.nodes.insert(
         remote_node_atom,
-        ConnectedNode {
-            info,
-            connection,
-            tx,
-        },
+        ConnectedNode::new(info, connection, tx),
     );
     manager.addr_to_node.insert(addr, remote_node_atom);
 
@@ -526,6 +566,7 @@ async fn message_sender_loop(
 /// accidentally clean up a replacement connection.
 async fn message_receiver_loop(node_atom: Atom, connection_addr: SocketAddr) {
     while let Some(manager) = DIST_MANAGER.get() {
+        // Clone the connection so we don't hold the DashMap lock while awaiting
         let connection = match manager.nodes.get(&node_atom) {
             Some(node) => {
                 // Check if this is still our connection (not a replacement)
@@ -538,17 +579,17 @@ async fn message_receiver_loop(node_atom: Atom, connection_addr: SocketAddr) {
                     );
                     return;
                 }
-                // Accept a stream
-                match node.connection.accept_stream().await {
-                    Ok((_, recv)) => recv,
-                    Err(_) => break,
-                }
+                // Clone the connection before dropping the lock
+                node.connection.clone()
             }
             None => break,
         };
 
-        // We need to drop the borrow before calling recv_message
-        let mut recv = connection;
+        // Now we can await without holding the DashMap lock
+        let mut recv = match connection.accept_stream().await {
+            Ok((_, recv)) => recv,
+            Err(_) => break,
+        };
         match QuicConnection::recv_message(&mut recv).await {
             Ok(msg) => {
                 handle_incoming_message(node_atom, msg).await;
@@ -613,14 +654,21 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
             }
         }
         DistMessage::Ping { seq } => {
-            // Respond with pong
+            // Respond with pong and update last seen
             if let Some(manager) = DIST_MANAGER.get()
                 && let Some(node) = manager.nodes.get(&from_node)
             {
+                node.touch();
                 let _ = node.tx.try_send(DistMessage::Pong { seq });
             }
         }
         DistMessage::Pong { seq } => {
+            // Update last seen timestamp - this is the critical heartbeat response
+            if let Some(manager) = DIST_MANAGER.get()
+                && let Some(node) = manager.nodes.get(&from_node)
+            {
+                node.touch();
+            }
             tracing::trace!(seq, from_node = %from_node, "Received pong");
         }
         DistMessage::MonitorNode { requesting_pid } => {
@@ -790,4 +838,82 @@ pub fn node_info(node: Atom) -> Option<NodeInfo> {
 pub(crate) fn send_remote(pid: Pid, payload: Vec<u8>) -> Result<(), DistError> {
     let manager = DIST_MANAGER.get().ok_or(DistError::NotInitialized)?;
     manager.send_to_remote(pid, payload)
+}
+
+/// Heartbeat loop - periodically sends pings to all connected nodes and
+/// detects dead nodes based on timeout.
+///
+/// This provides fast detection of node failures when the remote node crashes
+/// without sending a graceful disconnect message.
+async fn heartbeat_loop() {
+    use std::sync::atomic::AtomicU64;
+    static PING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    loop {
+        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+
+        let Some(manager) = DIST_MANAGER.get() else {
+            continue;
+        };
+
+        // Collect nodes to check (avoid holding lock during iteration)
+        let nodes_to_check: Vec<(Atom, bool)> = manager
+            .nodes
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().is_timed_out()))
+            .collect();
+
+        for (node_atom, is_timed_out) in nodes_to_check {
+            if is_timed_out {
+                // Node has timed out - disconnect it
+                tracing::warn!(
+                    node = %node_atom,
+                    timeout_secs = HEARTBEAT_TIMEOUT.as_secs(),
+                    "Node heartbeat timeout, disconnecting"
+                );
+
+                // Remove the node and trigger cleanup
+                if let Some((_, node)) = manager.nodes.remove(&node_atom) {
+                    tracing::info!(
+                        node = %node_atom,
+                        "Heartbeat: removed node, triggering cleanup"
+                    );
+                    node.connection.close("heartbeat timeout");
+                    if let Some(addr) = node.info.addr {
+                        manager.addr_to_node.remove(&addr);
+                    }
+
+                    // Notify node monitors
+                    tracing::debug!(
+                        node = %node_atom,
+                        "Heartbeat: notifying node monitors"
+                    );
+                    manager
+                        .monitors
+                        .notify_node_down(node_atom, "heartbeat timeout".to_string());
+
+                    // Clean up process monitors and links for this node
+                    manager.process_monitors.handle_node_down(node_atom);
+
+                    // Clean up pg memberships from this node
+                    super::pg::pg().remove_node_members(node_atom);
+                    tracing::info!(
+                        node = %node_atom,
+                        "Heartbeat: cleanup complete"
+                    );
+                } else {
+                    tracing::warn!(
+                        node = %node_atom,
+                        "Heartbeat: node already removed by another path"
+                    );
+                }
+            } else {
+                // Node is alive - send ping
+                if let Some(node) = manager.nodes.get(&node_atom) {
+                    let seq = PING_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let _ = node.tx.try_send(DistMessage::Ping { seq });
+                }
+            }
+        }
+    }
 }

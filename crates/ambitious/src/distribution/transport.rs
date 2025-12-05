@@ -128,6 +128,7 @@ impl QuicTransport {
 }
 
 /// A QUIC connection to a remote node.
+#[derive(Clone)]
 pub struct QuicConnection {
     connection: Connection,
 }
@@ -232,8 +233,10 @@ fn generate_self_signed(
 
     // Configure transport
     let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(10)));
-    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    // Send keep-alive probes every 5 seconds to detect connection loss quickly
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // If no data/ack received for 15 seconds, consider connection dead
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
     server_config.transport_config(Arc::new(transport));
 
     Ok((server_config, vec![cert_der]))
@@ -261,8 +264,10 @@ fn load_certs(
         .map_err(|e| DistError::Tls(e.to_string()))?;
 
     let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(10)));
-    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    // Send keep-alive probes every 5 seconds to detect connection loss quickly
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // If no data/ack received for 15 seconds, consider connection dead
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
     server_config.transport_config(Arc::new(transport));
 
     Ok((server_config, certs))
@@ -283,8 +288,10 @@ fn configure_client() -> Result<ClientConfig, DistError> {
     ));
 
     let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(10)));
-    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    // Send keep-alive probes every 5 seconds to detect connection loss quickly
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // If no data/ack received for 15 seconds, consider connection dead
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
     client_config.transport_config(Arc::new(transport));
 
     Ok(client_config)

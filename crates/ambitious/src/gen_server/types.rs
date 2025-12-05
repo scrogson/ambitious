@@ -2,7 +2,7 @@
 //!
 //! These types mirror Elixir's GenServer return values.
 
-use crate::core::{ExitReason, Pid, Ref};
+use crate::core::{DecodeError, ExitReason, Pid, Ref, Term};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,13 +32,18 @@ pub struct ContinueArg(pub Vec<u8>);
 
 impl ContinueArg {
     /// Creates a new continue argument from serializable data.
-    pub fn new<T: Serialize>(data: &T) -> Self {
-        Self(postcard::to_allocvec(data).unwrap_or_default())
+    pub fn new<T: Term>(data: &T) -> Self {
+        Self(data.try_encode().unwrap_or_default())
     }
 
     /// Decodes the continue argument into the expected type.
-    pub fn decode<T: for<'de> Deserialize<'de>>(&self) -> Result<T, postcard::Error> {
-        postcard::from_bytes(&self.0)
+    pub fn decode<T: Term>(&self) -> Result<T, DecodeError> {
+        T::decode(&self.0)
+    }
+
+    /// Attempts to decode the continue argument, returning None on failure.
+    pub fn try_decode<T: Term>(&self) -> Option<T> {
+        T::decode(&self.0).ok()
     }
 }
 
@@ -71,7 +76,7 @@ impl<S> InitResult<S> {
     }
 
     /// Creates an init result that triggers handle_continue.
-    pub fn ok_continue<T: Serialize>(state: S, arg: &T) -> Self {
+    pub fn ok_continue<T: Term>(state: S, arg: &T) -> Self {
         InitResult::OkContinue(state, ContinueArg::new(arg))
     }
 
@@ -119,7 +124,7 @@ impl<S, R> CallResult<S, R> {
     }
 
     /// Creates a reply result that triggers handle_continue.
-    pub fn reply_continue<T: Serialize>(reply: R, state: S, arg: &T) -> Self {
+    pub fn reply_continue<T: Term>(reply: R, state: S, arg: &T) -> Self {
         CallResult::ReplyContinue(reply, state, ContinueArg::new(arg))
     }
 
@@ -169,7 +174,7 @@ impl<S> CastResult<S> {
     }
 
     /// Creates a no-reply result that triggers handle_continue.
-    pub fn noreply_continue<T: Serialize>(state: S, arg: &T) -> Self {
+    pub fn noreply_continue<T: Term>(state: S, arg: &T) -> Self {
         CastResult::NoReplyContinue(state, ContinueArg::new(arg))
     }
 

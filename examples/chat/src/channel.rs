@@ -6,12 +6,12 @@
 use crate::protocol::HistoryMessage;
 use crate::room::{Room, RoomCall, RoomReply};
 use crate::room_supervisor;
-use ambitious::RawTerm;
 use ambitious::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
 };
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
+use ambitious::RawTerm;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -75,9 +75,37 @@ pub struct UserPresenceMeta {
 }
 
 /// Internal messages for the channel (handle_info).
+///
+/// These are sent to the channel's own process (via send_raw to socket.pid)
+/// and handled in handle_info. They are NOT broadcast messages.
+///
+/// IMPORTANT: Uses a magic marker to prevent accidental deserialization of other
+/// message types (like PresenceMessage::Delta) as ChannelInfo. Without this,
+/// postcard's compact encoding can cause false positive matches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChannelInfoMessage {
+    /// Magic marker - must be CHANNEL_INFO_MAGIC for valid messages
+    magic: u64,
+    /// The actual message
+    info: ChannelInfo,
+}
+
+/// Magic number to identify valid ChannelInfo messages
+const CHANNEL_INFO_MAGIC: u64 = 0xC4A7_14F0_DEAD_BEEF;
+
+impl ChannelInfoMessage {
+    fn new(info: ChannelInfo) -> Self {
+        Self { magic: CHANNEL_INFO_MAGIC, info }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.magic == CHANNEL_INFO_MAGIC
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ChannelInfo {
-    /// Trigger after-join logic (broadcast user joined).
+    /// Trigger after-join logic (broadcast user joined, push history).
     AfterJoin,
     /// Trigger presence state push (delayed to allow sync).
     PushPresenceState,
@@ -151,9 +179,7 @@ impl Channel for RoomChannel {
         tracing::debug!(topic = %presence_topic, "Subscribed to presence updates");
 
         // Send ourselves an :after_join message to trigger presence sync and history push
-        if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::AfterJoin) {
-            let _ = ambitious::send_raw(socket.pid, msg);
-        }
+        let _ = ambitious::send(socket.pid, &ChannelInfoMessage::new(ChannelInfo::AfterJoin));
 
         // Set up assigns with user info
         let assigns = RoomAssigns {
@@ -209,14 +235,17 @@ impl Channel for RoomChannel {
         msg: RawTerm,
         socket: &mut Socket<Self::Assigns>,
     ) -> HandleResult<Self::OutEvent> {
-        // First try to decode as ChannelInfo (internal messages)
-        if let Some(info) = msg.decode::<ChannelInfo>() {
-            match info {
+        // First try to decode as ChannelInfoMessage (internal messages with magic marker)
+        if let Some(wrapped) = msg.decode::<ChannelInfoMessage>()
+            && wrapped.is_valid()
+        {
+            match wrapped.info {
                 ChannelInfo::AfterJoin => {
-                    tracing::debug!(
+                    tracing::info!(
                         room = %socket.assigns.room_name,
                         nick = %socket.assigns.nick,
-                        "After join - broadcasting user joined and pushing history"
+                        socket_pid = ?socket.pid,
+                        "AfterJoin triggered - this socket will receive history"
                     );
 
                     // Broadcast UserJoined to notify others (not ourselves)
@@ -239,10 +268,12 @@ impl Channel for RoomChannel {
                             .await
                         && !messages.is_empty()
                     {
-                        tracing::debug!(
+                        tracing::info!(
                             room = %socket.assigns.room_name,
+                            nick = %socket.assigns.nick,
+                            socket_pid = ?socket.pid,
                             message_count = messages.len(),
-                            "Pushing history to user"
+                            "PUSHING HISTORY to socket"
                         );
                         push(socket, "history", &RoomOutEvent::History { messages });
                     }
@@ -252,9 +283,7 @@ impl Channel for RoomChannel {
                     let pid = socket.pid;
                     ambitious::spawn(move || async move {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        if let Ok(msg) = postcard::to_allocvec(&ChannelInfo::PushPresenceState) {
-                            let _ = ambitious::send_raw(pid, msg);
-                        }
+                        let _ = ambitious::send(pid, &ChannelInfoMessage::new(ChannelInfo::PushPresenceState));
                     });
 
                     return HandleResult::NoReply;
@@ -323,15 +352,12 @@ impl Channel for RoomChannel {
             && let ChannelReply::Push { event, payload, .. } = reply
         {
             // Decode the room event from the payload bytes
-            if let Ok(room_event) = postcard::from_bytes::<RoomOutEvent>(&payload) {
+            let payload_raw = RawTerm::from(payload);
+            if let Some(room_event) = payload_raw.decode::<RoomOutEvent>() {
                 match room_event {
                     RoomOutEvent::PresenceSyncRequest { from_pid } => {
                         // Forward to our internal handler
-                        if let Ok(info_msg) =
-                            postcard::to_allocvec(&ChannelInfo::PresenceSyncRequest { from_pid })
-                        {
-                            let _ = ambitious::send_raw(socket.pid, info_msg);
-                        }
+                        let _ = ambitious::send(socket.pid, &ChannelInfoMessage::new(ChannelInfo::PresenceSyncRequest { from_pid }));
                     }
                     _ => {
                         // Other broadcasts are handled by the transport layer
@@ -346,17 +372,11 @@ impl Channel for RoomChannel {
             match presence_msg {
                 PresenceMessage::Delta { topic: _, diff } => {
                     // Process joins - notify client of new users
-                    for (key, state) in &diff.joins {
+                    for (_key, state) in &diff.joins {
                         for meta in &state.metas {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves
                                 if meta.pid != socket.pid {
-                                    tracing::debug!(
-                                        room = %socket.assigns.room_name,
-                                        nick = %user_meta.nick,
-                                        key = %key,
-                                        "Presence join received, notifying client"
-                                    );
                                     push(
                                         socket,
                                         "user_joined",
@@ -370,17 +390,11 @@ impl Channel for RoomChannel {
                     }
 
                     // Process leaves - notify client of users leaving
-                    for (key, state) in &diff.leaves {
+                    for (_key, state) in &diff.leaves {
                         for meta in &state.metas {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves
                                 if meta.pid != socket.pid {
-                                    tracing::debug!(
-                                        room = %socket.assigns.room_name,
-                                        nick = %user_meta.nick,
-                                        key = %key,
-                                        "Presence leave received, notifying client"
-                                    );
                                     push(
                                         socket,
                                         "user_left",
@@ -396,6 +410,9 @@ impl Channel for RoomChannel {
                 }
                 PresenceMessage::StateSync { .. } => {
                     // Full state sync - we handle this via PushPresenceState
+                }
+                PresenceMessage::SyncRequest { .. } | PresenceMessage::SyncResponse { .. } => {
+                    // These are handled by the Presence server, not channels
                 }
             }
         }

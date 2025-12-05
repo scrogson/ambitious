@@ -124,6 +124,12 @@ impl NodeMonitorRegistry {
     /// Notify all monitors that a node went down.
     pub fn notify_node_down(&self, node_atom: Atom, reason: String) {
         if let Some((_, monitors)) = self.local_monitors.remove(&node_atom) {
+            tracing::info!(
+                node = %node_atom,
+                monitor_count = monitors.len(),
+                reason = %reason,
+                "Notifying monitors about node disconnect"
+            );
             for (pid, ref_id) in monitors {
                 // Remove from reverse lookup
                 self.monitor_refs.remove(&ref_id);
@@ -135,12 +141,23 @@ impl NodeMonitorRegistry {
                     monitor_ref: ref_id,
                 };
 
+                tracing::debug!(
+                    target_pid = ?pid,
+                    monitor_ref = ref_id,
+                    "Sending NodeDown message"
+                );
+
                 if let Ok(payload) = postcard::to_allocvec(&msg)
                     && let Some(handle) = crate::process::global::try_handle()
                 {
                     let _ = handle.registry().send_raw(pid, payload);
                 }
             }
+        } else {
+            tracing::debug!(
+                node = %node_atom,
+                "No monitors registered for disconnected node"
+            );
         }
 
         // Also clean up any remote monitors from this node

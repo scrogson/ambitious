@@ -26,6 +26,16 @@ impl PresenceRef {
         Self(format!("{}:{}:{}", node, timestamp, count))
     }
 
+    /// Create a PresenceRef from a string.
+    pub fn from_string(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Get the ref as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Get the node that created this ref.
     pub fn node(&self) -> &str {
         self.0.split(':').next().unwrap_or("unknown")
@@ -114,5 +124,15 @@ pub enum PresenceMessage {
         topic: String,
         /// The current presence state.
         state: HashMap<String, PresenceState>,
+    },
+    /// Request full state sync from all peers (sent on startup).
+    SyncRequest {
+        /// The PID of the requesting Presence server.
+        from: Pid,
+    },
+    /// Response to sync request - full state for all topics.
+    SyncResponse {
+        /// All topics and their presence state.
+        state: HashMap<String, HashMap<String, PresenceState>>,
     },
 }

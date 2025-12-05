@@ -1,17 +1,17 @@
 //! Presence GenServer implementation.
 
+use super::crdt::{PresenceCrdt, PresenceDelta as CrdtDelta, Tag, TrackedEntry};
 use super::types::{PresenceDiff, PresenceMessage, PresenceMeta, PresenceRef, PresenceState};
-use crate::core::{Pid, RawTerm};
+use crate::core::{Atom, Pid, RawTerm};
 use crate::dist::pg;
+use crate::distribution::{NodeDown, monitor_node};
 use crate::gen_server::{
     CallResult, CastResult, ContinueArg, ContinueResult, From, GenServer, InfoResult, InitResult,
     async_trait,
 };
 use crate::pubsub::PubSub;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for starting a Presence server.
@@ -95,23 +95,24 @@ pub struct PresenceServerState {
     pubsub: String,
     /// The pg group for presence servers.
     pg_group: String,
-    /// Presence state per topic: topic -> (key -> state).
-    state: Arc<DashMap<String, HashMap<String, PresenceState>>>,
-    /// Reverse lookup: PID -> set of (topic, key) pairs.
-    pid_to_presence: Arc<DashMap<Pid, HashSet<(String, String)>>>,
+    /// CRDT-based presence state.
+    crdt: PresenceCrdt,
     /// Our own PID.
     self_pid: Option<Pid>,
+    /// Nodes we're monitoring for disconnect.
+    monitored_nodes: HashSet<Atom>,
 }
 
 impl Default for PresenceServerState {
     fn default() -> Self {
+        // Use a placeholder replica name; will be updated in handle_continue
         Self {
             name: String::new(),
             pubsub: String::new(),
             pg_group: String::new(),
-            state: Arc::new(DashMap::new()),
-            pid_to_presence: Arc::new(DashMap::new()),
+            crdt: PresenceCrdt::new("unknown"),
             self_pid: None,
+            monitored_nodes: HashSet::new(),
         }
     }
 }
@@ -129,13 +130,17 @@ impl GenServer for Presence {
 
     async fn init(config: PresenceConfig) -> InitResult<PresenceServerState> {
         let pg_group = format!("presence:{}", config.name);
+
+        // Get node name for replica identifier
+        let replica = crate::core::node::node_name_atom().as_str();
+
         let state = PresenceServerState {
             name: config.name,
             pubsub: config.pubsub,
             pg_group,
-            state: Arc::new(DashMap::new()),
-            pid_to_presence: Arc::new(DashMap::new()),
+            crdt: PresenceCrdt::new(replica),
             self_pid: None,
+            monitored_nodes: HashSet::new(),
         };
 
         // Register and subscribe in handle_continue
@@ -154,45 +159,35 @@ impl GenServer for Presence {
                 pid,
                 meta,
             } => {
-                let presence_meta = PresenceMeta {
-                    phx_ref: PresenceRef::new(),
-                    phx_ref_prev: None,
-                    pid,
-                    meta,
-                    updated_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                };
-                let phx_ref = presence_meta.phx_ref.clone();
+                // Track using CRDT
+                let tag = state.crdt.track(&topic, pid, &key, meta.clone());
 
-                // Add to state
-                {
-                    let mut topic_state = state.state.entry(topic.clone()).or_default();
-                    let key_state = topic_state.entry(key.clone()).or_default();
-                    key_state.metas.push(presence_meta.clone());
-                    tracing::debug!(
-                        topic = %topic,
-                        key = %key,
-                        pid = ?pid,
-                        total_keys = topic_state.len(),
-                        "Presence::track - added to state"
-                    );
-                }
+                tracing::debug!(
+                    topic = %topic,
+                    key = %key,
+                    pid = ?pid,
+                    tag = ?tag,
+                    "Presence::track - added to CRDT state"
+                );
 
-                // Track reverse lookup
-                state
-                    .pid_to_presence
-                    .entry(pid)
-                    .or_default()
-                    .insert((topic.clone(), key.clone()));
+                // Create PresenceRef from Tag
+                let phx_ref = tag_to_ref(&tag);
 
-                // Broadcast delta via PubSub
+                // Broadcast delta via PubSub (using old format for compatibility)
                 let diff = PresenceDiff {
                     joins: [(
-                        key,
+                        key.clone(),
                         PresenceState {
-                            metas: vec![presence_meta],
+                            metas: vec![PresenceMeta {
+                                phx_ref: phx_ref.clone(),
+                                phx_ref_prev: None,
+                                pid,
+                                meta,
+                                updated_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs(),
+                            }],
                         },
                     )]
                     .into_iter()
@@ -201,95 +196,81 @@ impl GenServer for Presence {
                 };
                 broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
 
+                // Also broadcast CRDT delta to other Presence servers
+                if let Some(crdt_delta) = state.crdt.take_delta() {
+                    broadcast_crdt_delta(&state.pg_group, &topic, crdt_delta).await;
+                }
+
                 CallResult::Reply(PresenceReply::Ok(Some(phx_ref)), std::mem::take(state))
             }
 
             PresenceCall::Untrack { topic, key, pid } => {
-                let mut removed_metas = Vec::new();
+                let removed_tags = state.crdt.untrack(&topic, &key, pid);
 
-                // Remove from state
-                if let Some(mut topic_state) = state.state.get_mut(&topic)
-                    && let Some(key_state) = topic_state.get_mut(&key)
-                {
-                    removed_metas = key_state
-                        .metas
+                // Broadcast leave delta if we removed something
+                if !removed_tags.is_empty() {
+                    // Get the entries we removed for the legacy format
+                    let metas: Vec<PresenceMeta> = removed_tags
                         .iter()
-                        .filter(|m| m.pid == pid)
-                        .cloned()
+                        .map(|tag| PresenceMeta {
+                            phx_ref: tag_to_ref(tag),
+                            phx_ref_prev: None,
+                            pid,
+                            meta: vec![],
+                            updated_at: 0,
+                        })
                         .collect();
-                    key_state.metas.retain(|m| m.pid != pid);
 
-                    if key_state.metas.is_empty() {
-                        topic_state.remove(&key);
-                    }
-                }
-
-                // Update reverse lookup
-                if let Some(mut presences) = state.pid_to_presence.get_mut(&pid) {
-                    presences.remove(&(topic.clone(), key.clone()));
-                }
-
-                // Broadcast delta if we removed something
-                if !removed_metas.is_empty() {
                     let diff = PresenceDiff {
                         joins: HashMap::new(),
-                        leaves: [(
-                            key,
-                            PresenceState {
-                                metas: removed_metas,
-                            },
-                        )]
-                        .into_iter()
-                        .collect(),
+                        leaves: [(key.clone(), PresenceState { metas })]
+                            .into_iter()
+                            .collect(),
                     };
                     broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
+
+                    // Also broadcast CRDT delta
+                    if let Some(crdt_delta) = state.crdt.take_delta() {
+                        broadcast_crdt_delta(&state.pg_group, &topic, crdt_delta).await;
+                    }
                 }
 
                 CallResult::Reply(PresenceReply::Ok(None), std::mem::take(state))
             }
 
             PresenceCall::UntrackAll { pid } => {
-                if let Some((_, presences)) = state.pid_to_presence.remove(&pid) {
-                    let mut by_topic: HashMap<String, Vec<(String, Vec<PresenceMeta>)>> =
-                        HashMap::new();
+                let removed = state.crdt.untrack_all(pid);
 
-                    for (topic, key) in presences {
-                        let mut removed_metas = Vec::new();
+                // Broadcast deltas per topic
+                for (topic, entries) in &removed {
+                    let metas: Vec<PresenceMeta> = entries.iter().map(entry_to_meta).collect();
 
-                        if let Some(mut topic_state) = state.state.get_mut(&topic)
-                            && let Some(key_state) = topic_state.get_mut(&key)
-                        {
-                            removed_metas = key_state
-                                .metas
-                                .iter()
-                                .filter(|m| m.pid == pid)
-                                .cloned()
-                                .collect();
-                            key_state.metas.retain(|m| m.pid != pid);
-
-                            if key_state.metas.is_empty() {
-                                topic_state.remove(&key);
-                            }
-                        }
-
-                        if !removed_metas.is_empty() {
-                            by_topic
-                                .entry(topic)
+                    if !metas.is_empty() {
+                        // Group by key
+                        let mut by_key: HashMap<String, Vec<PresenceMeta>> = HashMap::new();
+                        for entry in entries {
+                            by_key
+                                .entry(entry.key.clone())
                                 .or_default()
-                                .push((key, removed_metas));
+                                .push(entry_to_meta(entry));
                         }
-                    }
 
-                    // Broadcast deltas per topic
-                    for (topic, leaves) in by_topic {
                         let diff = PresenceDiff {
                             joins: HashMap::new(),
-                            leaves: leaves
+                            leaves: by_key
                                 .into_iter()
                                 .map(|(k, metas)| (k, PresenceState { metas }))
                                 .collect(),
                         };
-                        broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
+                        broadcast_delta(&state.pubsub, &state.name, topic, diff).await;
+                    }
+                }
+
+                // Broadcast CRDT delta
+                if let Some(crdt_delta) = state.crdt.take_delta() {
+                    // For untrack_all, we don't have a single topic, so broadcast to all
+                    for topic in removed.keys() {
+                        broadcast_crdt_delta(&state.pg_group, topic, crdt_delta.clone()).await;
                     }
                 }
 
@@ -302,65 +283,69 @@ impl GenServer for Presence {
                 pid,
                 meta,
             } => {
-                let mut new_ref = None;
+                // Update is untrack + track
+                let removed_tags = state.crdt.untrack(&topic, &key, pid);
+                let new_tag = state.crdt.track(&topic, pid, &key, meta.clone());
+                let new_ref = tag_to_ref(&new_tag);
 
-                if let Some(mut topic_state) = state.state.get_mut(&topic)
-                    && let Some(key_state) = topic_state.get_mut(&key)
-                {
-                    for m in &mut key_state.metas {
-                        if m.pid == pid {
-                            let new_meta = PresenceMeta {
-                                phx_ref: PresenceRef::new(),
-                                phx_ref_prev: Some(m.phx_ref.clone()),
+                // Broadcast join with previous ref
+                let prev_ref = removed_tags.first().map(tag_to_ref);
+                let diff = PresenceDiff {
+                    joins: [(
+                        key.clone(),
+                        PresenceState {
+                            metas: vec![PresenceMeta {
+                                phx_ref: new_ref.clone(),
+                                phx_ref_prev: prev_ref,
                                 pid,
-                                meta: meta.clone(),
+                                meta,
                                 updated_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_secs(),
-                            };
-                            new_ref = Some(new_meta.phx_ref.clone());
+                            }],
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    leaves: HashMap::new(),
+                };
+                broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
 
-                            // Broadcast the update
-                            let diff = PresenceDiff {
-                                joins: [(
-                                    key.clone(),
-                                    PresenceState {
-                                        metas: vec![new_meta.clone()],
-                                    },
-                                )]
-                                .into_iter()
-                                .collect(),
-                                leaves: HashMap::new(),
-                            };
-
-                            *m = new_meta;
-                            broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
-                            break;
-                        }
-                    }
+                // Broadcast CRDT delta
+                if let Some(crdt_delta) = state.crdt.take_delta() {
+                    broadcast_crdt_delta(&state.pg_group, &topic, crdt_delta).await;
                 }
 
-                CallResult::Reply(PresenceReply::Ok(new_ref), std::mem::take(state))
+                CallResult::Reply(
+                    PresenceReply::Ok(if removed_tags.is_empty() {
+                        None
+                    } else {
+                        Some(new_ref)
+                    }),
+                    std::mem::take(state),
+                )
             }
 
             PresenceCall::List { topic } => {
-                let presences = state
-                    .state
-                    .get(&topic)
-                    .map(|s| s.clone())
-                    .unwrap_or_default();
+                // Get presences from CRDT and convert to old format
+                let crdt_presences = state.crdt.list(&topic);
+                let presences = crdt_to_presence_state(&crdt_presences);
+
                 tracing::debug!(
                     topic = %topic,
                     presence_count = presences.len(),
                     keys = ?presences.keys().collect::<Vec<_>>(),
                     "Presence::list called"
                 );
+
                 CallResult::Reply(PresenceReply::List(presences), std::mem::take(state))
             }
 
             PresenceCall::Get { topic, key } => {
-                let presence = state.state.get(&topic).and_then(|s| s.get(&key).cloned());
+                let presence = state.crdt.get(&topic, &key).map(|entries| PresenceState {
+                    metas: entries.iter().map(entry_to_meta).collect(),
+                });
                 CallResult::Reply(PresenceReply::Get(presence), std::mem::take(state))
             }
         }
@@ -372,14 +357,18 @@ impl GenServer for Presence {
     ) -> CastResult<PresenceServerState> {
         match msg {
             PresenceCast::ApplyDelta { topic, diff } => {
-                apply_delta(&state.state, &topic, diff);
+                // Convert old delta format to CRDT delta and merge
+                let crdt_delta = presence_diff_to_crdt_delta(&topic, &diff);
+                let _result = state.crdt.merge(&crdt_delta);
                 CastResult::NoReply(std::mem::take(state))
             }
             PresenceCast::SyncState {
                 topic,
                 state: remote_state,
             } => {
-                merge_state(&state.state, &topic, remote_state);
+                // Convert old state format to CRDT delta and merge
+                let crdt_delta = presence_state_to_crdt_delta(&topic, &remote_state);
+                let _result = state.crdt.merge(&crdt_delta);
                 CastResult::NoReply(std::mem::take(state))
             }
         }
@@ -389,7 +378,148 @@ impl GenServer for Presence {
         msg: RawTerm,
         state: &mut PresenceServerState,
     ) -> InfoResult<PresenceServerState> {
-        // Handle presence messages from other Presence servers
+        // Check for NodeDown message (node disconnect notification)
+        if let Ok(node_down) = postcard::from_bytes::<NodeDown>(msg.as_ref()) {
+            tracing::info!(
+                node = %node_down.node_name,
+                reason = ?node_down.reason,
+                "Presence detected node disconnect, removing presences"
+            );
+
+            // Remove all presences from the disconnected node
+            let removed = state.crdt.remove_down_replica(&node_down.node_name);
+            state
+                .monitored_nodes
+                .remove(&Atom::new(&node_down.node_name));
+
+            if !removed.is_empty() {
+                tracing::debug!(
+                    removed_count = removed.len(),
+                    "Removed presences from disconnected node"
+                );
+
+                // Broadcast leaves for each topic
+                let mut by_topic: HashMap<String, Vec<TrackedEntry>> = HashMap::new();
+                for entry in removed {
+                    by_topic.entry(entry.topic.clone()).or_default().push(entry);
+                }
+
+                for (topic, entries) in by_topic {
+                    let mut leaves: HashMap<String, PresenceState> = HashMap::new();
+                    for entry in entries {
+                        leaves
+                            .entry(entry.key.clone())
+                            .or_insert_with(|| PresenceState { metas: vec![] })
+                            .metas
+                            .push(entry_to_meta(&entry));
+                    }
+
+                    let diff = PresenceDiff {
+                        joins: HashMap::new(),
+                        leaves,
+                    };
+                    broadcast_delta(&state.pubsub, &state.name, &topic, diff).await;
+                }
+            }
+
+            return InfoResult::NoReply(std::mem::take(state));
+        }
+
+        // Try to decode as CRDT delta first (new format)
+        if let Ok(crdt_msg) = postcard::from_bytes::<CrdtPresenceMessage>(msg.as_ref()) {
+            match crdt_msg {
+                CrdtPresenceMessage::Delta { topic, delta } => {
+                    tracing::debug!(
+                        topic = %topic,
+                        joins = delta.joins.len(),
+                        leaves = delta.leave_tags.len(),
+                        "Presence received CRDT delta from remote node"
+                    );
+
+                    // Check if any of the joins are from a node we're not monitoring
+                    let my_node = crate::core::node::node_name_atom();
+                    for entry in &delta.joins {
+                        let replica = Atom::new(&entry.tag.replica);
+                        if replica != my_node
+                            && !state.monitored_nodes.contains(&replica)
+                            && let Ok(_monitor_ref) = monitor_node(replica)
+                        {
+                            state.monitored_nodes.insert(replica);
+                            tracing::info!(
+                                node = %entry.tag.replica,
+                                my_pid = ?crate::runtime::current_pid(),
+                                "Presence monitoring remote node for disconnect (from delta)"
+                            );
+
+                            // Send our state to them since they're new
+                            let our_delta = state.crdt.extract_all();
+                            if !our_delta.is_empty() {
+                                let response = CrdtPresenceMessage::Delta {
+                                    topic: topic.clone(),
+                                    delta: our_delta,
+                                };
+                                if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
+                                    // Find their presence server PID
+                                    for peer_pid in pg::get_members(&state.pg_group) {
+                                        if peer_pid.node() == replica {
+                                            tracing::debug!(
+                                                peer = ?peer_pid,
+                                                "Sending our presence state to new remote node"
+                                            );
+                                            let _ = crate::send_raw(peer_pid, msg_bytes.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let _result = state.crdt.merge(&delta);
+                }
+                CrdtPresenceMessage::SyncRequest { from, context } => {
+                    tracing::debug!(
+                        from = ?from,
+                        context_size = context.len(),
+                        "Presence received CRDT sync request"
+                    );
+
+                    // Monitor the requesting node for disconnects
+                    let from_node = from.node();
+                    let my_node = crate::core::node::node_name_atom();
+                    if from_node != my_node
+                        && !state.monitored_nodes.contains(&from_node)
+                        && let Ok(_monitor_ref) = monitor_node(from_node)
+                    {
+                        state.monitored_nodes.insert(from_node);
+                        tracing::debug!(
+                            node = %from_node,
+                            "Presence monitoring remote node for disconnect (from sync request)"
+                        );
+                    }
+
+                    // Extract only what they need
+                    let delta = state.crdt.extract(&context);
+
+                    if !delta.is_empty() {
+                        let response = CrdtPresenceMessage::SyncResponse { delta };
+                        if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
+                            let _ = crate::send_raw(from, msg_bytes);
+                        }
+                    }
+                }
+                CrdtPresenceMessage::SyncResponse { delta } => {
+                    tracing::debug!(
+                        joins = delta.joins.len(),
+                        "Presence received CRDT sync response"
+                    );
+                    let _result = state.crdt.merge(&delta);
+                }
+            }
+            return InfoResult::NoReply(std::mem::take(state));
+        }
+
+        // Fall back to legacy format for backwards compatibility
         if let Ok(presence_msg) = postcard::from_bytes::<PresenceMessage>(msg.as_ref()) {
             match presence_msg {
                 PresenceMessage::Delta { topic, diff } => {
@@ -397,9 +527,10 @@ impl GenServer for Presence {
                         topic = %topic,
                         joins = diff.joins.len(),
                         leaves = diff.leaves.len(),
-                        "Presence received delta from remote node, applying"
+                        "Presence received legacy delta from remote node"
                     );
-                    apply_delta(&state.state, &topic, diff);
+                    let crdt_delta = presence_diff_to_crdt_delta(&topic, &diff);
+                    let _result = state.crdt.merge(&crdt_delta);
                 }
                 PresenceMessage::StateSync {
                     topic,
@@ -408,9 +539,38 @@ impl GenServer for Presence {
                     tracing::trace!(
                         topic = %topic,
                         remote_keys = remote_state.len(),
-                        "Presence received state sync from remote node, merging"
+                        "Presence received legacy state sync"
                     );
-                    merge_state(&state.state, &topic, remote_state);
+                    let crdt_delta = presence_state_to_crdt_delta(&topic, &remote_state);
+                    let _result = state.crdt.merge(&crdt_delta);
+                }
+                PresenceMessage::SyncRequest { from } => {
+                    tracing::debug!(
+                        from = ?from,
+                        "Presence received legacy sync request, sending CRDT state"
+                    );
+
+                    // Send full state as CRDT delta
+                    let delta = state.crdt.extract_all();
+
+                    if !delta.is_empty() {
+                        let response = CrdtPresenceMessage::SyncResponse { delta };
+                        if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
+                            let _ = crate::send_raw(from, msg_bytes);
+                        }
+                    }
+                }
+                PresenceMessage::SyncResponse {
+                    state: remote_state,
+                } => {
+                    tracing::debug!(
+                        topics = remote_state.len(),
+                        "Presence received legacy sync response"
+                    );
+                    for (topic, topic_state) in remote_state {
+                        let crdt_delta = presence_state_to_crdt_delta(&topic, &topic_state);
+                        let _result = state.crdt.merge(&crdt_delta);
+                    }
                 }
             }
         }
@@ -427,6 +587,9 @@ impl GenServer for Presence {
         // Register ourselves by name
         let _ = crate::register(&state.name, self_pid);
 
+        // Get existing members BEFORE joining the group
+        let existing_members = pg::get_members(&state.pg_group);
+
         // Join the pg group so other Presence servers can find us
         pg::join(&state.pg_group, self_pid);
 
@@ -435,12 +598,187 @@ impl GenServer for Presence {
             pubsub = %state.pubsub,
             pg_group = %state.pg_group,
             pid = ?self_pid,
-            "Presence started"
+            replica = %state.crdt.replica(),
+            "Presence started with CRDT"
         );
+
+        // Request state from existing Presence servers on other nodes
+        let my_node = crate::core::node::node_name_atom();
+
+        // Send CRDT sync request with our context and monitor remote nodes
+        let sync_request = CrdtPresenceMessage::SyncRequest {
+            from: self_pid,
+            context: state.crdt.context().clone(),
+        };
+        if let Ok(msg_bytes) = postcard::to_allocvec(&sync_request) {
+            for peer_pid in existing_members {
+                // Only request from remote nodes (not ourselves)
+                if peer_pid != self_pid && peer_pid.node() != my_node {
+                    let peer_node = peer_pid.node();
+
+                    // Monitor this node for disconnects (if not already monitoring)
+                    if !state.monitored_nodes.contains(&peer_node)
+                        && let Ok(_monitor_ref) = monitor_node(peer_node)
+                    {
+                        state.monitored_nodes.insert(peer_node);
+                        tracing::debug!(
+                            node = %peer_node,
+                            "Presence monitoring remote node for disconnect"
+                        );
+                    }
+
+                    tracing::debug!(
+                        peer = ?peer_pid,
+                        "Requesting CRDT presence sync from remote Presence server"
+                    );
+                    let _ = crate::send_raw(peer_pid, msg_bytes.clone());
+                }
+            }
+        }
+
+        // Also monitor all currently connected nodes (in case we missed some)
+        for node in crate::node::list(crate::node::ListOption::Connected) {
+            if node != my_node
+                && !state.monitored_nodes.contains(&node)
+                && let Ok(_monitor_ref) = monitor_node(node)
+            {
+                state.monitored_nodes.insert(node);
+                tracing::debug!(
+                    node = %node,
+                    "Presence monitoring connected node for disconnect"
+                );
+            }
+        }
 
         ContinueResult::NoReply(std::mem::take(state))
     }
 }
+
+// =============================================================================
+// CRDT-specific message type
+// =============================================================================
+
+/// CRDT-based presence messages for synchronization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum CrdtPresenceMessage {
+    /// Delta update with CRDT semantics.
+    Delta { topic: String, delta: CrdtDelta },
+    /// Request sync with causal context.
+    SyncRequest {
+        from: Pid,
+        context: HashMap<String, u64>,
+    },
+    /// Sync response with CRDT delta.
+    SyncResponse { delta: CrdtDelta },
+}
+
+// =============================================================================
+// Conversion functions
+// =============================================================================
+
+/// Convert a Tag to PresenceRef.
+fn tag_to_ref(tag: &Tag) -> PresenceRef {
+    PresenceRef::from_string(format!("{}:{}", tag.replica, tag.clock))
+}
+
+/// Convert a TrackedEntry to PresenceMeta.
+fn entry_to_meta(entry: &TrackedEntry) -> PresenceMeta {
+    PresenceMeta {
+        phx_ref: tag_to_ref(&entry.tag),
+        phx_ref_prev: None,
+        pid: entry.pid,
+        meta: entry.meta.clone(),
+        updated_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    }
+}
+
+/// Convert CRDT list result to old PresenceState format.
+fn crdt_to_presence_state(
+    crdt_result: &HashMap<String, Vec<TrackedEntry>>,
+) -> HashMap<String, PresenceState> {
+    crdt_result
+        .iter()
+        .map(|(key, entries)| {
+            (
+                key.clone(),
+                PresenceState {
+                    metas: entries.iter().map(entry_to_meta).collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Convert old PresenceDiff to CRDT delta.
+fn presence_diff_to_crdt_delta(topic: &str, diff: &PresenceDiff) -> CrdtDelta {
+    let mut delta = CrdtDelta::default();
+
+    // Convert joins
+    for (key, state) in &diff.joins {
+        for meta in &state.metas {
+            // Parse tag from phx_ref if possible, otherwise create a new one
+            let tag = ref_to_tag(&meta.phx_ref);
+            delta.joins.push(TrackedEntry {
+                topic: topic.to_string(),
+                pid: meta.pid,
+                key: key.clone(),
+                meta: meta.meta.clone(),
+                tag,
+            });
+        }
+    }
+
+    // Convert leaves
+    for state in diff.leaves.values() {
+        for meta in &state.metas {
+            delta.leave_tags.push(ref_to_tag(&meta.phx_ref));
+        }
+    }
+
+    delta
+}
+
+/// Convert old PresenceState to CRDT delta.
+fn presence_state_to_crdt_delta(topic: &str, state: &HashMap<String, PresenceState>) -> CrdtDelta {
+    let mut delta = CrdtDelta::default();
+
+    for (key, presence_state) in state {
+        for meta in &presence_state.metas {
+            let tag = ref_to_tag(&meta.phx_ref);
+            delta.joins.push(TrackedEntry {
+                topic: topic.to_string(),
+                pid: meta.pid,
+                key: key.clone(),
+                meta: meta.meta.clone(),
+                tag,
+            });
+        }
+    }
+
+    delta
+}
+
+/// Convert PresenceRef to Tag.
+fn ref_to_tag(phx_ref: &PresenceRef) -> Tag {
+    // Try to parse "replica:clock" format
+    let ref_str = phx_ref.as_str();
+    if let Some((replica, clock_str)) = ref_str.rsplit_once(':')
+        && let Ok(clock) = clock_str.parse::<u64>()
+    {
+        return Tag::new(replica, clock);
+    }
+
+    // Fallback: use the ref as replica with clock 0
+    // This handles legacy refs that aren't in our format
+    Tag::new(ref_str, 0)
+}
+
+// =============================================================================
+// Broadcasting functions
+// =============================================================================
 
 /// Broadcast a delta to other nodes via PubSub and to other Presence servers via pg.
 async fn broadcast_delta(pubsub: &str, presence_name: &str, topic: &str, diff: PresenceDiff) {
@@ -455,12 +793,32 @@ async fn broadcast_delta(pubsub: &str, presence_name: &str, topic: &str, diff: P
 
     // Broadcast to all subscribers of the presence topic (channels)
     let presence_topic = format!("presence:{}", topic);
+    tracing::info!(
+        topic = %topic,
+        presence_topic = %presence_topic,
+        joins = diff.joins.len(),
+        leaves = diff.leaves.len(),
+        "Broadcasting presence delta to subscribers"
+    );
     let _ = PubSub::broadcast(pubsub, &presence_topic, &msg).await;
 
-    // Also send to other Presence servers in the pg group so they can merge state
-    // The pg group name is "presence:{presence_name}" (e.g., "presence:chat_presence")
-    let pg_group = format!("presence:{}", presence_name);
-    let members = pg::get_members(&pg_group);
+    // Note: We also send CRDT delta separately via broadcast_crdt_delta
+    // The legacy format is for channel subscribers, CRDT format is for Presence servers
+    let _ = presence_name; // Suppress unused warning
+}
+
+/// Broadcast CRDT delta to other Presence servers.
+async fn broadcast_crdt_delta(pg_group: &str, topic: &str, delta: CrdtDelta) {
+    if delta.is_empty() {
+        return;
+    }
+
+    let msg = CrdtPresenceMessage::Delta {
+        topic: topic.to_string(),
+        delta,
+    };
+
+    let members = pg::get_members(pg_group);
     let self_pid = crate::current_pid();
     let my_node = crate::core::node::node_name_atom();
 
@@ -471,75 +829,9 @@ async fn broadcast_delta(pubsub: &str, presence_name: &str, topic: &str, diff: P
                 tracing::trace!(
                     target_pid = ?pid,
                     topic = %topic,
-                    "Forwarding presence delta to remote Presence server"
+                    "Forwarding CRDT presence delta to remote Presence server"
                 );
                 let _ = crate::send_raw(pid, msg_bytes.clone());
-            }
-        }
-    }
-}
-
-/// Apply a delta to local state.
-fn apply_delta(
-    state: &DashMap<String, HashMap<String, PresenceState>>,
-    topic: &str,
-    diff: PresenceDiff,
-) {
-    let mut topic_state = state.entry(topic.to_string()).or_default();
-
-    // Process leaves first
-    for (key, leave_state) in diff.leaves {
-        if let Some(local_state) = topic_state.get_mut(&key) {
-            for leave_meta in &leave_state.metas {
-                local_state
-                    .metas
-                    .retain(|m| m.phx_ref != leave_meta.phx_ref);
-            }
-            if local_state.metas.is_empty() {
-                topic_state.remove(&key);
-            }
-        }
-    }
-
-    // Process joins
-    for (key, join_state) in diff.joins {
-        let local_state = topic_state.entry(key).or_default();
-        for join_meta in join_state.metas {
-            // Remove old version if this is an update
-            if let Some(ref prev) = join_meta.phx_ref_prev {
-                local_state.metas.retain(|m| &m.phx_ref != prev);
-            }
-            // Add new meta if not already present
-            let exists = local_state
-                .metas
-                .iter()
-                .any(|m| m.phx_ref == join_meta.phx_ref);
-            if !exists {
-                local_state.metas.push(join_meta);
-            }
-        }
-    }
-}
-
-/// Merge remote state into local state.
-fn merge_state(
-    state: &DashMap<String, HashMap<String, PresenceState>>,
-    topic: &str,
-    remote: HashMap<String, PresenceState>,
-) {
-    let mut topic_state = state.entry(topic.to_string()).or_default();
-
-    for (key, remote_state) in remote {
-        let local_state = topic_state.entry(key).or_default();
-
-        // Merge metas - add any we don't have
-        for remote_meta in remote_state.metas {
-            let exists = local_state
-                .metas
-                .iter()
-                .any(|m| m.phx_ref == remote_meta.phx_ref);
-            if !exists {
-                local_state.metas.push(remote_meta);
             }
         }
     }
@@ -735,5 +1027,23 @@ mod tests {
     fn test_presence_diff_empty() {
         let diff = PresenceDiff::default();
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_tag_to_ref_conversion() {
+        let tag = Tag::new("node1@localhost", 42);
+        let phx_ref = tag_to_ref(&tag);
+        assert!(phx_ref.as_str().contains("node1@localhost"));
+        assert!(phx_ref.as_str().contains("42"));
+    }
+
+    #[test]
+    fn test_ref_to_tag_roundtrip() {
+        let original_tag = Tag::new("node1@localhost", 123);
+        let phx_ref = tag_to_ref(&original_tag);
+        let recovered_tag = ref_to_tag(&phx_ref);
+
+        assert_eq!(original_tag.replica, recovered_tag.replica);
+        assert_eq!(original_tag.clock, recovered_tag.clock);
     }
 }
