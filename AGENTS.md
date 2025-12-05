@@ -336,3 +336,7 @@ cargo doc --open               # Generate and view docs
 - [Elixir Process](https://hexdocs.pm/elixir/Process.html)
 - [Erlang gen_server](https://www.erlang.org/doc/man/gen_server.html)
 - Rebirth project: ../rebirth (WASM-based inspiration)
+
+# Remember
+
+- always run `just ci` before committing
