@@ -58,11 +58,12 @@ pub use registry::cleanup_owned_stores;
 use crate::core::Pid;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::sync::Arc;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Global counter for generating unique store IDs.
 static STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -574,6 +575,414 @@ where
 }
 
 // ============================================================================
+// OrderedStore - BTreeMap-backed store with sorted keys
+// ============================================================================
+
+/// Internal ordered store data that can be shared across clones.
+struct OrderedStoreInner<K, V> {
+    id: StoreId,
+    owner: Pid,
+    data: RwLock<BTreeMap<K, V>>,
+    access: Access,
+    #[allow(dead_code)]
+    name: Option<String>,
+    #[allow(dead_code)]
+    heir: Option<Pid>,
+    deleted: std::sync::atomic::AtomicBool,
+}
+
+/// A typed, process-owned concurrent key-value store with ordered keys.
+///
+/// `OrderedStore<K, V>` is similar to [`Store`] but maintains keys in sorted
+/// order, enabling efficient range queries and ordered iteration.
+///
+/// # Type Parameters
+///
+/// - `K`: Key type, must be `Ord + Clone + Send + Sync`
+/// - `V`: Value type, must be `Clone + Send + Sync`
+///
+/// # Thread Safety
+///
+/// OrderedStore is thread-safe using read-write locks. Multiple readers can
+/// access concurrently, but writes require exclusive access.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::store::OrderedStore;
+///
+/// let scores: OrderedStore<i32, String> = OrderedStore::new();
+/// scores.insert(100, "Alice".into());
+/// scores.insert(85, "Bob".into());
+/// scores.insert(92, "Charlie".into());
+///
+/// // Get entries in sorted order
+/// let top_scores = scores.range(90.., 10)?;  // All scores >= 90
+/// ```
+pub struct OrderedStore<K, V> {
+    inner: Arc<OrderedStoreInner<K, V>>,
+}
+
+impl<K, V> Clone for OrderedStore<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<K, V> Default for OrderedStore<K, V>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> OrderedStore<K, V>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Creates a new ordered store owned by the current process.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of a process context.
+    pub fn new() -> Self {
+        Self::with_options(StoreOptions::default())
+    }
+
+    /// Creates a new ordered store with the given options.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of a process context.
+    pub fn with_options(opts: StoreOptions) -> Self {
+        let owner =
+            crate::try_current_pid().expect("OrderedStore::new() must be called from a process");
+        Self::new_with_owner(owner, opts)
+    }
+
+    /// Creates a new ordered store with an explicit owner (for internal use).
+    pub(crate) fn new_with_owner(owner: Pid, opts: StoreOptions) -> Self {
+        let id = StoreId::new();
+
+        let inner = Arc::new(OrderedStoreInner {
+            id,
+            owner,
+            data: RwLock::new(BTreeMap::new()),
+            access: opts.access,
+            name: opts.name.clone(),
+            heir: opts.heir,
+            deleted: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let store = Self { inner };
+
+        // Register in global registry
+        registry::register_store(id, owner, opts.name, opts.heir);
+
+        store
+    }
+
+    /// Returns the unique ID of this store.
+    pub fn id(&self) -> StoreId {
+        self.inner.id
+    }
+
+    /// Returns the PID of the owner process.
+    pub fn owner(&self) -> Pid {
+        self.inner.owner
+    }
+
+    /// Returns the access control setting.
+    pub fn access(&self) -> Access {
+        self.inner.access
+    }
+
+    /// Returns `true` if this store has been deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.inner.deleted.load(Ordering::Acquire)
+    }
+
+    /// Checks if the current process can access this store.
+    fn check_access(&self) -> Result<(), StoreError> {
+        if self.is_deleted() {
+            return Err(StoreError::StoreDeleted);
+        }
+
+        match self.inner.access {
+            Access::Public => Ok(()),
+            Access::Private => {
+                let caller = crate::try_current_pid().ok_or(StoreError::NoProcessContext)?;
+                if caller == self.inner.owner {
+                    Ok(())
+                } else {
+                    Err(StoreError::AccessDenied)
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Basic Operations
+    // =========================================================================
+
+    /// Inserts a key-value pair into the store.
+    ///
+    /// Returns the previous value if the key was already present.
+    pub fn insert(&self, key: K, value: V) -> Result<Option<V>, StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        Ok(data.insert(key, value))
+    }
+
+    /// Gets a value by key.
+    pub fn get(&self, key: &K) -> Result<Option<V>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.get(key).cloned())
+    }
+
+    /// Removes a key from the store.
+    pub fn remove(&self, key: &K) -> Result<Option<V>, StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        Ok(data.remove(key))
+    }
+
+    /// Returns `true` if the store contains the given key.
+    pub fn contains_key(&self, key: &K) -> Result<bool, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.contains_key(key))
+    }
+
+    /// Atomically updates a value in the store.
+    pub fn update<F>(&self, key: K, f: F) -> Result<V, StoreError>
+    where
+        F: FnOnce(Option<V>) -> V,
+    {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        let new_value = f(data.get(&key).cloned());
+        data.insert(key, new_value.clone());
+        Ok(new_value)
+    }
+
+    // =========================================================================
+    // Bulk Operations
+    // =========================================================================
+
+    /// Inserts multiple key-value pairs.
+    pub fn insert_many(&self, items: impl IntoIterator<Item = (K, V)>) -> Result<(), StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        for (k, v) in items {
+            data.insert(k, v);
+        }
+        Ok(())
+    }
+
+    /// Returns all keys in sorted order.
+    pub fn keys(&self) -> Result<Vec<K>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.keys().cloned().collect())
+    }
+
+    /// Returns all values in key-sorted order.
+    pub fn values(&self) -> Result<Vec<V>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.values().cloned().collect())
+    }
+
+    /// Returns all key-value pairs in sorted order.
+    pub fn iter(&self) -> Result<Vec<(K, V)>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
+    /// Returns the number of entries in the store.
+    pub fn len(&self) -> Result<usize, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.len())
+    }
+
+    /// Returns `true` if the store is empty.
+    pub fn is_empty(&self) -> Result<bool, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.is_empty())
+    }
+
+    /// Removes all entries from the store.
+    pub fn clear(&self) -> Result<(), StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        data.clear();
+        Ok(())
+    }
+
+    /// Retains only the entries that satisfy the predicate.
+    pub fn retain<F>(&self, mut f: F) -> Result<(), StoreError>
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        data.retain(|k, v| f(k, v));
+        Ok(())
+    }
+
+    // =========================================================================
+    // Ordered Operations (unique to OrderedStore)
+    // =========================================================================
+
+    /// Returns the first (smallest) key-value pair.
+    pub fn first(&self) -> Result<Option<(K, V)>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.first_key_value().map(|(k, v)| (k.clone(), v.clone())))
+    }
+
+    /// Returns the last (largest) key-value pair.
+    pub fn last(&self) -> Result<Option<(K, V)>, StoreError> {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.last_key_value().map(|(k, v)| (k.clone(), v.clone())))
+    }
+
+    /// Removes and returns the first (smallest) key-value pair.
+    pub fn pop_first(&self) -> Result<Option<(K, V)>, StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        Ok(data.pop_first())
+    }
+
+    /// Removes and returns the last (largest) key-value pair.
+    pub fn pop_last(&self) -> Result<Option<(K, V)>, StoreError> {
+        self.check_access()?;
+        let mut data = self.inner.data.write().unwrap();
+        Ok(data.pop_last())
+    }
+
+    /// Returns key-value pairs in a range, up to a limit.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The range of keys to include
+    /// * `limit` - Maximum number of entries to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get up to 10 entries with keys >= 50
+    /// let entries = store.range(50.., 10)?;
+    ///
+    /// // Get up to 5 entries with keys in [10, 20]
+    /// let entries = store.range(10..=20, 5)?;
+    /// ```
+    pub fn range<R>(&self, range: R, limit: usize) -> Result<Vec<(K, V)>, StoreError>
+    where
+        R: std::ops::RangeBounds<K>,
+    {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data
+            .range(range)
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    /// Returns key-value pairs in a range in reverse order, up to a limit.
+    pub fn range_rev<R>(&self, range: R, limit: usize) -> Result<Vec<(K, V)>, StoreError>
+    where
+        R: std::ops::RangeBounds<K>,
+    {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+
+        // Convert bounds for rev iteration
+        let start = range.start_bound();
+        let end = range.end_bound();
+
+        Ok(data
+            .range((
+                match start {
+                    Bound::Included(k) => Bound::Included(k.clone()),
+                    Bound::Excluded(k) => Bound::Excluded(k.clone()),
+                    Bound::Unbounded => Bound::Unbounded,
+                },
+                match end {
+                    Bound::Included(k) => Bound::Included(k.clone()),
+                    Bound::Excluded(k) => Bound::Excluded(k.clone()),
+                    Bound::Unbounded => Bound::Unbounded,
+                },
+            ))
+            .rev()
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    /// Returns the number of entries in a range.
+    pub fn range_count<R>(&self, range: R) -> Result<usize, StoreError>
+    where
+        R: std::ops::RangeBounds<K>,
+    {
+        self.check_access()?;
+        let data = self.inner.data.read().unwrap();
+        Ok(data.range(range).count())
+    }
+
+    // =========================================================================
+    // Ownership Operations
+    // =========================================================================
+
+    /// Transfers ownership of this store to another process.
+    pub fn give_away(&self, new_owner: Pid) -> Result<(), StoreError> {
+        let caller = crate::try_current_pid().ok_or(StoreError::NoProcessContext)?;
+
+        if caller != self.inner.owner {
+            return Err(StoreError::AccessDenied);
+        }
+
+        registry::transfer_ownership(self.inner.id, self.inner.owner, new_owner);
+        Ok(())
+    }
+
+    /// Marks this store as deleted.
+    #[allow(dead_code)]
+    pub(crate) fn mark_deleted(&self) {
+        self.inner.deleted.store(true, Ordering::Release);
+    }
+}
+
+impl<K, V> fmt::Debug for OrderedStore<K, V>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let len = self.inner.data.read().map(|d| d.len()).unwrap_or(0);
+        f.debug_struct("OrderedStore")
+            .field("id", &self.inner.id)
+            .field("owner", &self.inner.owner)
+            .field("access", &self.inner.access)
+            .field("len", &len)
+            .finish()
+    }
+}
+
+// ============================================================================
 // Global Store Lookup
 // ============================================================================
 
@@ -724,5 +1133,188 @@ mod tests {
 
         assert_eq!(opts.access, Access::Private);
         assert_eq!(opts.name, Some("my_store".into()));
+    }
+
+    // =========================================================================
+    // OrderedStore Tests
+    // =========================================================================
+
+    fn create_test_ordered_store<K, V>() -> OrderedStore<K, V>
+    where
+        K: Ord + Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+    {
+        let pid = Pid::new();
+        OrderedStore::new_with_owner(pid, StoreOptions::default())
+    }
+
+    #[test]
+    fn test_ordered_store_basic_operations() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        // Insert
+        assert_eq!(store.insert(1, "one".into()).unwrap(), None);
+        assert_eq!(store.insert(1, "ONE".into()).unwrap(), Some("one".into()));
+
+        // Get
+        assert_eq!(store.get(&1).unwrap(), Some("ONE".into()));
+        assert_eq!(store.get(&2).unwrap(), None);
+
+        // Contains
+        assert!(store.contains_key(&1).unwrap());
+        assert!(!store.contains_key(&2).unwrap());
+
+        // Remove
+        assert_eq!(store.remove(&1).unwrap(), Some("ONE".into()));
+        assert_eq!(store.remove(&1).unwrap(), None);
+    }
+
+    #[test]
+    fn test_ordered_store_sorted_keys() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        // Insert in random order
+        store.insert(30, "thirty".into()).unwrap();
+        store.insert(10, "ten".into()).unwrap();
+        store.insert(20, "twenty".into()).unwrap();
+
+        // Keys should be in sorted order
+        let keys = store.keys().unwrap();
+        assert_eq!(keys, vec![10, 20, 30]);
+
+        // Values should be in key-sorted order
+        let values = store.values().unwrap();
+        assert_eq!(values, vec!["ten", "twenty", "thirty"]);
+
+        // Iter should be in sorted order
+        let entries = store.iter().unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (10, "ten".into()),
+                (20, "twenty".into()),
+                (30, "thirty".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ordered_store_first_last() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        // Empty store
+        assert_eq!(store.first().unwrap(), None);
+        assert_eq!(store.last().unwrap(), None);
+
+        store.insert(20, "twenty".into()).unwrap();
+        store.insert(10, "ten".into()).unwrap();
+        store.insert(30, "thirty".into()).unwrap();
+
+        assert_eq!(store.first().unwrap(), Some((10, "ten".into())));
+        assert_eq!(store.last().unwrap(), Some((30, "thirty".into())));
+    }
+
+    #[test]
+    fn test_ordered_store_pop_first_last() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        store.insert(10, "ten".into()).unwrap();
+        store.insert(20, "twenty".into()).unwrap();
+        store.insert(30, "thirty".into()).unwrap();
+
+        assert_eq!(store.pop_first().unwrap(), Some((10, "ten".into())));
+        assert_eq!(store.len().unwrap(), 2);
+
+        assert_eq!(store.pop_last().unwrap(), Some((30, "thirty".into())));
+        assert_eq!(store.len().unwrap(), 1);
+
+        assert_eq!(store.first().unwrap(), Some((20, "twenty".into())));
+    }
+
+    #[test]
+    fn test_ordered_store_range() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        for i in 1..=10 {
+            store.insert(i * 10, format!("val{}", i)).unwrap();
+        }
+
+        // Range with both bounds
+        let entries = store.range(30..=70, 100).unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].0, 30);
+        assert_eq!(entries[4].0, 70);
+
+        // Range with limit
+        let entries = store.range(30..=70, 2).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 30);
+        assert_eq!(entries[1].0, 40);
+
+        // Range from start
+        let entries = store.range(..=30, 100).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        // Range to end
+        let entries = store.range(80.., 100).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_ordered_store_range_rev() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        for i in 1..=5 {
+            store.insert(i * 10, format!("val{}", i)).unwrap();
+        }
+
+        let entries = store.range_rev(20..=40, 100).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0, 40); // Reversed order
+        assert_eq!(entries[1].0, 30);
+        assert_eq!(entries[2].0, 20);
+    }
+
+    #[test]
+    fn test_ordered_store_range_count() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        for i in 1..=10 {
+            store.insert(i * 10, format!("val{}", i)).unwrap();
+        }
+
+        assert_eq!(store.range_count(30..=70).unwrap(), 5);
+        assert_eq!(store.range_count(..=30).unwrap(), 3);
+        assert_eq!(store.range_count(80..).unwrap(), 3);
+        assert_eq!(store.range_count(..).unwrap(), 10);
+    }
+
+    #[test]
+    fn test_ordered_store_clone() {
+        let store1: OrderedStore<i32, String> = create_test_ordered_store();
+        store1.insert(1, "one".into()).unwrap();
+
+        let store2 = store1.clone();
+        assert_eq!(store2.get(&1).unwrap(), Some("one".into()));
+
+        // Modifications through one clone are visible through the other
+        store2.insert(1, "ONE".into()).unwrap();
+        assert_eq!(store1.get(&1).unwrap(), Some("ONE".into()));
+    }
+
+    #[test]
+    fn test_ordered_store_retain() {
+        let store: OrderedStore<i32, String> = create_test_ordered_store();
+
+        store.insert(1, "one".into()).unwrap();
+        store.insert(2, "two".into()).unwrap();
+        store.insert(3, "three".into()).unwrap();
+
+        store.retain(|k, _| *k > 1).unwrap();
+
+        assert_eq!(store.len().unwrap(), 2);
+        assert!(!store.contains_key(&1).unwrap());
+        assert!(store.contains_key(&2).unwrap());
+        assert!(store.contains_key(&3).unwrap());
     }
 }

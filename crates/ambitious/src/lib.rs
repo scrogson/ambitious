@@ -247,7 +247,7 @@ pub mod prelude {
     pub use crate::timer::{TimerError, TimerRef, TimerResult};
 
     // Store essentials
-    pub use crate::store::{Access, Store, StoreError, StoreId, StoreOptions};
+    pub use crate::store::{Access, OrderedStore, Store, StoreError, StoreId, StoreOptions};
 }
 
 #[cfg(test)]
