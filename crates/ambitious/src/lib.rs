@@ -122,6 +122,9 @@ pub mod atom;
 /// Core types: Pid, Ref, Term, ExitReason, SystemMessage.
 pub mod core;
 
+/// Message trait for typed, self-describing messages.
+pub mod message;
+
 /// Runtime infrastructure: mailbox, context, process registry.
 pub mod runtime;
 
@@ -201,7 +204,7 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use ambitious_macros::{GenServerImpl, ambitious_process, main, self_pid, test};
+pub use ambitious_macros::{GenServerImpl, Message, ambitious_process, main, self_pid, test};
 
 /// Prelude module for convenient imports.
 ///

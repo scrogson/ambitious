@@ -48,7 +48,7 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, ItemFn, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, ItemFn, parse_macro_input};
 
 /// Derive macro for GenServer implementation helpers.
 ///
@@ -228,4 +228,173 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Derive macro for implementing the Message trait.
+///
+/// This generates implementations for `encode_local`, `decode_local`,
+/// `encode_remote`, and `decode_remote` with automatic type tagging.
+///
+/// # Supported Types
+///
+/// - Unit structs: `struct Ping;`
+/// - Newtype structs: `struct Add(i64);`
+/// - Structs with named fields: `struct Login { user: String, pass: String }`
+///
+/// # Attributes
+///
+/// - `#[message(tag = "custom")]` - Override the default tag (type name)
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::Message;
+///
+/// #[derive(Message)]
+/// struct Get;
+///
+/// #[derive(Message)]
+/// #[message(tag = "increment")]
+/// struct Inc;
+///
+/// #[derive(Message)]
+/// struct Add(i64);
+///
+/// #[derive(Message)]
+/// struct SetUser {
+///     name: String,
+///     age: u32,
+/// }
+/// ```
+#[proc_macro_derive(Message, attributes(message))]
+pub fn derive_message(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    // Check for custom tag attribute
+    let tag = get_message_tag(&input).unwrap_or_else(|| name.to_string());
+
+    // Generate different code based on struct variant
+    let (encode_body, decode_body) = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Unit => {
+                // Unit struct: struct Ping;
+                (
+                    quote! {
+                        ::ambitious::message::encode_with_tag(Self::tag(), &[])
+                    },
+                    quote! {
+                        let _ = bytes;
+                        Ok(Self)
+                    },
+                )
+            }
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                // Newtype struct: struct Add(i64);
+                (
+                    quote! {
+                        let payload = ::ambitious::message::encode_payload(&self.0);
+                        ::ambitious::message::encode_with_tag(Self::tag(), &payload)
+                    },
+                    quote! {
+                        let inner = ::ambitious::message::decode_payload(bytes)?;
+                        Ok(Self(inner))
+                    },
+                )
+            }
+            Fields::Unnamed(_) => {
+                // Multi-field tuple struct not supported yet
+                return syn::Error::new_spanned(
+                    input,
+                    "Message derive only supports unit structs, newtype structs (single field), and named structs",
+                )
+                .to_compile_error()
+                .into();
+            }
+            Fields::Named(fields) => {
+                // Named struct: struct Login { user: String }
+                let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
+
+                (
+                    quote! {
+                        let payload = ::ambitious::message::encode_payload(&(#(&self.#field_names),*));
+                        ::ambitious::message::encode_with_tag(Self::tag(), &payload)
+                    },
+                    quote! {
+                        let (#(#field_names),*) = ::ambitious::message::decode_payload(bytes)?;
+                        Ok(Self { #(#field_names),* })
+                    },
+                )
+            }
+        },
+        Data::Enum(_) => {
+            return syn::Error::new_spanned(
+                input,
+                "Message derive does not support enums yet. Use separate structs for each message type.",
+            )
+            .to_compile_error()
+            .into();
+        }
+        Data::Union(_) => {
+            return syn::Error::new_spanned(input, "Message derive does not support unions")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let expanded = quote! {
+        impl ::ambitious::message::Message for #name {
+            fn tag() -> &'static str {
+                #tag
+            }
+
+            fn encode_local(&self) -> Vec<u8> {
+                #encode_body
+            }
+
+            fn decode_local(bytes: &[u8]) -> Result<Self, ::ambitious::core::DecodeError> {
+                #decode_body
+            }
+
+            fn encode_remote(&self) -> Vec<u8> {
+                // For now, use same encoding as local
+                // TODO: Implement ETF encoding
+                self.encode_local()
+            }
+
+            fn decode_remote(bytes: &[u8]) -> Result<Self, ::ambitious::core::DecodeError> {
+                // For now, use same decoding as local
+                // TODO: Implement ETF decoding
+                Self::decode_local(bytes)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Extract custom tag from #[message(tag = "...")] attribute
+fn get_message_tag(input: &DeriveInput) -> Option<String> {
+    for attr in &input.attrs {
+        if attr.path().is_ident("message")
+            && let Ok(meta) = attr.meta.require_list()
+        {
+            let tokens = meta.tokens.to_string();
+            // Simple parsing: look for tag = "value"
+            if let Some(start) = tokens.find("tag") {
+                let rest = &tokens[start..];
+                if let Some(eq_pos) = rest.find('=') {
+                    let after_eq = &rest[eq_pos + 1..].trim();
+                    // Extract string value between quotes
+                    if let Some(quote_start) = after_eq.find('"') {
+                        let after_quote = &after_eq[quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            return Some(after_quote[..quote_end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }

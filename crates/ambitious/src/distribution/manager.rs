@@ -13,8 +13,8 @@ use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -50,7 +50,8 @@ impl ConnectedNode {
 
     /// Update the last seen timestamp to now.
     fn touch(&self) {
-        self.last_seen_ms.store(current_time_ms(), Ordering::Relaxed);
+        self.last_seen_ms
+            .store(current_time_ms(), Ordering::Relaxed);
     }
 
     /// Check if this node has timed out (no response within HEARTBEAT_TIMEOUT).
@@ -457,10 +458,9 @@ async fn handle_incoming_connection(
         remote_creation,
     );
 
-    manager.nodes.insert(
-        remote_node_atom,
-        ConnectedNode::new(info, connection, tx),
-    );
+    manager
+        .nodes
+        .insert(remote_node_atom, ConnectedNode::new(info, connection, tx));
     manager.addr_to_node.insert(addr, remote_node_atom);
 
     // Remember this node's address for potential reconnection

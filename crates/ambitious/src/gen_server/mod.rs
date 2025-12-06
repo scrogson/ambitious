@@ -93,6 +93,14 @@ mod protocol;
 mod server;
 mod types;
 
+/// GenServer v2 - improved actor pattern with `&mut self` and typed messages.
+///
+/// This is the next generation GenServer implementation with:
+/// - `&mut self` style handlers (struct IS the process)
+/// - Typed message handlers (`Call<M>`, `Cast<M>`, `Info<M>`)
+/// - Clean result types (`Init`, `Reply`, `Status`)
+pub mod v2;
+
 pub use async_trait::async_trait;
 pub use error::{CallError, StartError, StopError};
 pub use server::{GenServer, call, cast, reply, start, start_link, stop};

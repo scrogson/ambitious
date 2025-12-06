@@ -21,6 +21,12 @@ pub enum DecodeError {
     /// Failed to deserialize the term bytes.
     #[error("failed to decode term: {0}")]
     Deserialize(#[from] postcard::Error),
+    /// Invalid or malformed data.
+    #[error("invalid data: {0}")]
+    InvalidData(String),
+    /// Postcard-specific error (for Message trait).
+    #[error("postcard error: {0}")]
+    Postcard(String),
 }
 
 /// A trait for Erlang-like terms that can be serialized and sent between processes.

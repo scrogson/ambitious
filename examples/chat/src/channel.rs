@@ -6,12 +6,12 @@
 use crate::protocol::HistoryMessage;
 use crate::room::{Room, RoomCall, RoomReply};
 use crate::room_supervisor;
+use ambitious::RawTerm;
 use ambitious::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, Socket, broadcast_from, push,
 };
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
-use ambitious::RawTerm;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +95,10 @@ const CHANNEL_INFO_MAGIC: u64 = 0xC4A7_14F0_DEAD_BEEF;
 
 impl ChannelInfoMessage {
     fn new(info: ChannelInfo) -> Self {
-        Self { magic: CHANNEL_INFO_MAGIC, info }
+        Self {
+            magic: CHANNEL_INFO_MAGIC,
+            info,
+        }
     }
 
     fn is_valid(&self) -> bool {
@@ -283,7 +286,10 @@ impl Channel for RoomChannel {
                     let pid = socket.pid;
                     ambitious::spawn(move || async move {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let _ = ambitious::send(pid, &ChannelInfoMessage::new(ChannelInfo::PushPresenceState));
+                        let _ = ambitious::send(
+                            pid,
+                            &ChannelInfoMessage::new(ChannelInfo::PushPresenceState),
+                        );
                     });
 
                     return HandleResult::NoReply;
@@ -357,7 +363,10 @@ impl Channel for RoomChannel {
                 match room_event {
                     RoomOutEvent::PresenceSyncRequest { from_pid } => {
                         // Forward to our internal handler
-                        let _ = ambitious::send(socket.pid, &ChannelInfoMessage::new(ChannelInfo::PresenceSyncRequest { from_pid }));
+                        let _ = ambitious::send(
+                            socket.pid,
+                            &ChannelInfoMessage::new(ChannelInfo::PresenceSyncRequest { from_pid }),
+                        );
                     }
                     _ => {
                         // Other broadcasts are handled by the transport layer
@@ -372,7 +381,7 @@ impl Channel for RoomChannel {
             match presence_msg {
                 PresenceMessage::Delta { topic: _, diff } => {
                     // Process joins - notify client of new users
-                    for (_key, state) in &diff.joins {
+                    for state in diff.joins.values() {
                         for meta in &state.metas {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves
@@ -390,7 +399,7 @@ impl Channel for RoomChannel {
                     }
 
                     // Process leaves - notify client of users leaving
-                    for (_key, state) in &diff.leaves {
+                    for state in diff.leaves.values() {
                         for meta in &state.metas {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves

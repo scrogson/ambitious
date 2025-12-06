@@ -15,6 +15,7 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 
+pub mod etf;
 mod exit_reason;
 mod message;
 pub mod node;
