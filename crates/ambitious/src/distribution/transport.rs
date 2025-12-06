@@ -3,6 +3,8 @@
 //! Handles the low-level QUIC connections using the `quinn` crate.
 
 use super::protocol::{DistError, DistMessage, frame_message, parse_frame};
+use super::traits::{self, Transport, TransportConnection as TransportConnectionTrait};
+use async_trait::async_trait;
 use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
 };
@@ -214,6 +216,83 @@ impl QuicConnection {
     /// Check if the connection is still open.
     pub fn is_open(&self) -> bool {
         self.connection.close_reason().is_none()
+    }
+}
+
+// =============================================================================
+// Transport Trait Implementations
+// =============================================================================
+
+#[async_trait]
+impl Transport for QuicTransport {
+    type Connection = QuicConnection;
+
+    async fn accept(&self) -> Option<Self::Connection> {
+        // Delegate to the existing method
+        QuicTransport::accept(self).await
+    }
+
+    async fn connect(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Self::Connection, DistError> {
+        QuicTransport::connect(self, addr, server_name).await
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr, DistError> {
+        QuicTransport::local_addr(self)
+    }
+
+    fn node_name(&self) -> &str {
+        QuicTransport::node_name(self)
+    }
+
+    fn creation(&self) -> u32 {
+        QuicTransport::creation(self)
+    }
+
+    fn close(&self) {
+        QuicTransport::close(self)
+    }
+}
+
+/// Wrapper around quinn's RecvStream that implements our RecvStream trait.
+pub struct QuicRecvStream {
+    inner: RecvStream,
+}
+
+#[async_trait]
+impl traits::RecvStream for QuicRecvStream {
+    async fn recv_message(&mut self) -> Result<DistMessage, DistError> {
+        QuicConnection::recv_message(&mut self.inner).await
+    }
+}
+
+#[async_trait]
+impl TransportConnectionTrait for QuicConnection {
+    type RecvStream = QuicRecvStream;
+
+    async fn send_message(&self, msg: &DistMessage) -> Result<(), DistError> {
+        QuicConnection::send_message(self, msg).await
+    }
+
+    async fn accept_and_recv(&self) -> Result<(DistMessage, Self::RecvStream), DistError> {
+        let (_send, mut recv) = self.accept_stream().await?;
+        let msg = QuicConnection::recv_message(&mut recv).await?;
+        Ok((msg, QuicRecvStream { inner: recv }))
+    }
+
+    fn remote_address(&self) -> SocketAddr {
+        QuicConnection::remote_address(self)
+    }
+
+    fn close(&self, reason: &str) {
+        QuicConnection::close(self, reason)
+    }
+
+    fn is_open(&self) -> bool {
+        QuicConnection::is_open(self)
     }
 }
 

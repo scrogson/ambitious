@@ -7,7 +7,7 @@
 use crate::room::{Room, RoomInit};
 use ambitious::Pid;
 use ambitious::dist::global;
-use ambitious::gen_server;
+use ambitious::gen_server::v2 as gen_server;
 use ambitious::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
 use ambitious::supervisor::{ChildSpec, RestartType, StartChildError, StartError};
 use std::sync::OnceLock;

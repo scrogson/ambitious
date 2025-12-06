@@ -35,6 +35,7 @@
 //! ```
 
 mod discovery;
+pub mod erlang;
 pub mod global;
 mod manager;
 mod monitor;
@@ -42,17 +43,28 @@ mod node;
 pub mod pg;
 mod process_monitor;
 pub(crate) mod protocol;
+mod tcp_transport;
+mod traits;
 mod transport;
 
 #[cfg(test)]
 mod tests;
 
 pub use discovery::NodeDiscovery;
-pub use manager::{connect, disconnect, node_info, nodes};
+pub use manager::{NodeType, connect, disconnect, node_info, nodes};
 pub use monitor::{NodeDown, NodeDownReason, NodeMonitorRef, demonitor_node, monitor_node};
 pub use node::{Config, init_distribution};
 pub use process_monitor::{demonitor_process, link_process, monitor_process, unlink_process};
 pub use protocol::DistError;
+pub use tcp_transport::{TcpConnection, TcpTransport};
+pub use traits::{PostcardProtocol, Protocol, Transport, TransportConnection, TransportType};
+
+// Re-export Erlang types when feature is enabled
+#[cfg(feature = "erlang-dist")]
+pub use erlang::{
+    Connection as ErlangConnectionRaw, ConnectionConfig as ErlangConnectionConfig, ControlMessage,
+    DistributionFlags, ErlangConfig, ErlangConnection, ErlangMessage, ErlangPid, ErlangRef,
+};
 
 use std::sync::OnceLock;
 

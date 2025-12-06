@@ -1,19 +1,27 @@
-//! Room registry implementation using GenServer.
+//! Room registry implementation using GenServer v2 API.
 //!
 //! The registry provides room lookups across the cluster.
 //! Rooms are registered globally when users join via Channels,
 //! making them visible to all nodes.
+//!
+//! In v2, the struct IS the process state. `init` constructs it,
+//! and handlers mutate it via `&mut self`.
 
 use crate::protocol::RoomInfo;
-use ambitious::RawTerm;
+use ambitious::Pid;
+use ambitious::core::DecodeError;
 use ambitious::dist::global;
-use ambitious::gen_server::{self, prelude::*};
+use ambitious::gen_server::v2::*;
+use ambitious::message::{Message, decode_payload, decode_tag, encode_payload, encode_with_tag};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Registry GenServer implementation.
-pub struct Registry;
+/// Registry GenServer - the struct IS the state.
+pub struct Registry {
+    /// Local cache of room name -> PID mappings.
+    rooms: HashMap<String, Pid>,
+}
 
 /// Call requests to Registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +30,29 @@ pub enum RegistryCall {
     GetRoom(String),
     /// List all rooms with info.
     ListRooms,
+}
+
+impl Message for RegistryCall {
+    fn tag() -> &'static str {
+        "RegistryCall"
+    }
+
+    fn encode_local(&self) -> Vec<u8> {
+        let payload = encode_payload(self);
+        encode_with_tag(Self::tag(), &payload)
+    }
+
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
 }
 
 /// Reply messages from Registry.
@@ -33,9 +64,28 @@ pub enum RegistryReply {
     Rooms(Vec<RoomInfo>),
 }
 
-/// Cast messages to Registry (currently none).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegistryCast {}
+impl Message for RegistryReply {
+    fn tag() -> &'static str {
+        "RegistryReply"
+    }
+
+    fn encode_local(&self) -> Vec<u8> {
+        let payload = encode_payload(self);
+        encode_with_tag(Self::tag(), &payload)
+    }
+
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
 
 // =============================================================================
 // Client API
@@ -46,14 +96,14 @@ impl Registry {
     pub const NAME: &'static str = "registry";
 
     /// Start the registry GenServer.
-    pub async fn start() -> Result<Pid, StartError> {
-        gen_server::start::<Registry>(()).await
+    pub async fn start() -> Result<Pid, Error> {
+        start::<Registry>(()).await
     }
 
     /// Get a room by name.
     #[allow(dead_code)]
     pub async fn get_room(name: &str) -> Option<Pid> {
-        match Self::call(RegistryCall::GetRoom(name.to_string())).await? {
+        match Self::do_call(RegistryCall::GetRoom(name.to_string())).await? {
             RegistryReply::Room(pid) => pid,
             _ => None,
         }
@@ -61,17 +111,19 @@ impl Registry {
 
     /// List all rooms.
     pub async fn list_rooms() -> Vec<RoomInfo> {
-        match Self::call(RegistryCall::ListRooms).await {
+        match Self::do_call(RegistryCall::ListRooms).await {
             Some(RegistryReply::Rooms(rooms)) => rooms,
             _ => vec![],
         }
     }
 
     /// Internal: make a call to the registry.
-    async fn call(request: RegistryCall) -> Option<RegistryReply> {
+    async fn do_call(request: RegistryCall) -> Option<RegistryReply> {
         let registry_pid = ambitious::whereis(Self::NAME)?;
 
-        match gen_server::call::<Registry>(registry_pid, request, Duration::from_secs(5)).await {
+        match call::<RegistryCall, RegistryReply>(registry_pid, request, Duration::from_secs(5))
+            .await
+        {
             Ok(reply) => Some(reply),
             Err(e) => {
                 tracing::error!(error = ?e, "Registry call failed");
@@ -81,53 +133,78 @@ impl Registry {
     }
 }
 
-/// Registry state.
-pub struct RegistryState {
-    /// Local cache of room name -> PID mappings.
-    rooms: HashMap<String, Pid>,
-}
-
 #[async_trait]
 impl GenServer for Registry {
-    type State = RegistryState;
-    type InitArg = ();
-    type Call = RegistryCall;
-    type Cast = RegistryCast;
-    type Reply = RegistryReply;
+    type Args = ();
 
-    async fn init(_arg: ()) -> InitResult<RegistryState> {
+    async fn init(_arg: ()) -> Init<Self> {
         tracing::info!("Room registry started");
-        InitResult::Ok(RegistryState {
+        Init::Ok(Registry {
             rooms: HashMap::new(),
         })
     }
 
-    async fn handle_call(
-        request: RegistryCall,
-        _from: From,
-        state: &mut RegistryState,
-    ) -> CallResult<RegistryState, RegistryReply> {
+    async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
+        // Decode the tag to determine message type
+        let (tag, msg_payload) = match decode_tag(&payload) {
+            Ok((t, p)) => (t, p),
+            Err(_) => {
+                return RawReply::StopNoReply(ambitious::core::ExitReason::Error(
+                    "decode error".into(),
+                ));
+            }
+        };
+
+        match tag {
+            "RegistryCall" => {
+                if let Ok(msg) = RegistryCall::decode_local(msg_payload) {
+                    let result = self.call(msg, from).await;
+                    reply_to_raw(result)
+                } else {
+                    RawReply::StopNoReply(ambitious::core::ExitReason::Error("decode error".into()))
+                }
+            }
+            _ => RawReply::StopNoReply(ambitious::core::ExitReason::Error(format!(
+                "unknown call: {}",
+                tag
+            ))),
+        }
+    }
+}
+
+// Helper to convert Reply<T> to RawReply
+fn reply_to_raw<T: Message>(reply: Reply<T>) -> RawReply {
+    match reply {
+        Reply::Ok(v) => RawReply::Ok(v.encode_local()),
+        Reply::Continue(v, arg) => RawReply::Continue(v.encode_local(), arg),
+        Reply::Timeout(v, d) => RawReply::Timeout(v.encode_local(), d),
+        Reply::NoReply => RawReply::NoReply,
+        Reply::Stop(r, v) => RawReply::Stop(r, v.encode_local()),
+        Reply::StopNoReply(r) => RawReply::StopNoReply(r),
+    }
+}
+
+#[async_trait]
+impl Call<RegistryCall> for Registry {
+    type Reply = RegistryReply;
+
+    async fn call(&mut self, request: RegistryCall, _from: From) -> Reply<RegistryReply> {
         match request {
             RegistryCall::GetRoom(name) => {
                 // Check local cache first
-                let mut pid = state.rooms.get(&name).copied();
+                let mut pid = self.rooms.get(&name).copied();
 
                 // If not in cache, check global registry
                 if pid.is_none() {
                     let global_name = format!("room:{}", name);
                     if let Some(global_pid) = global::whereis(&global_name) {
                         // Cache it locally
-                        state.rooms.insert(name, global_pid);
+                        self.rooms.insert(name, global_pid);
                         pid = Some(global_pid);
                     }
                 }
 
-                CallResult::reply(
-                    RegistryReply::Room(pid),
-                    RegistryState {
-                        rooms: state.rooms.clone(),
-                    },
-                )
+                Reply::Ok(RegistryReply::Room(pid))
             }
 
             RegistryCall::ListRooms => {
@@ -148,37 +225,9 @@ impl GenServer for Registry {
                         user_count: 0,
                     })
                     .collect();
-                CallResult::reply(
-                    RegistryReply::Rooms(infos),
-                    RegistryState {
-                        rooms: state.rooms.clone(),
-                    },
-                )
+
+                Reply::Ok(RegistryReply::Rooms(infos))
             }
         }
-    }
-
-    async fn handle_cast(
-        _msg: RegistryCast,
-        state: &mut RegistryState,
-    ) -> CastResult<RegistryState> {
-        CastResult::noreply(RegistryState {
-            rooms: state.rooms.clone(),
-        })
-    }
-
-    async fn handle_info(_msg: RawTerm, state: &mut RegistryState) -> InfoResult<RegistryState> {
-        CastResult::noreply(RegistryState {
-            rooms: state.rooms.clone(),
-        })
-    }
-
-    async fn handle_continue(
-        _arg: ContinueArg,
-        state: &mut RegistryState,
-    ) -> ContinueResult<RegistryState> {
-        CastResult::noreply(RegistryState {
-            rooms: state.rooms.clone(),
-        })
     }
 }

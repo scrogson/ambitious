@@ -18,6 +18,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// The type of a connected node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeType {
+    /// A native Ambitious node (Rust-to-Rust).
+    Native,
+    /// An Erlang/BEAM node (via Erlang Distribution Protocol).
+    #[cfg(feature = "erlang-dist")]
+    Erlang,
+}
+
+/// Handle for managing an Erlang node connection.
+///
+/// Wraps an `ErlangConnection` with message queuing and lifecycle management.
+#[cfg(feature = "erlang-dist")]
+pub struct ErlangNodeHandle {
+    /// Node info.
+    info: NodeInfo,
+    /// Sender for outgoing ETF-encoded messages.
+    tx: mpsc::Sender<erltf::OwnedTerm>,
+    /// Last seen timestamp.
+    last_seen_ms: AtomicU64,
+}
+
 /// How often to send heartbeat pings to connected nodes.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -74,6 +97,10 @@ fn current_time_ms() -> u64 {
 ///
 /// Handles all node connections and message routing.
 /// Nodes are identified by their name (as an Atom) rather than numeric IDs.
+///
+/// Supports two types of connections:
+/// - **Native nodes**: Rust-to-Rust connections using QUIC/TCP with postcard encoding
+/// - **Erlang nodes**: BEAM interop using the Erlang Distribution Protocol (feature-gated)
 pub struct DistributionManager {
     /// Our node name.
     node_name: String,
@@ -81,7 +108,7 @@ pub struct DistributionManager {
     node_name_atom: Atom,
     /// Our creation number.
     creation: u32,
-    /// Connected nodes by node name atom.
+    /// Connected native nodes by node name atom.
     nodes: DashMap<Atom, ConnectedNode>,
     /// Node name lookup by address.
     addr_to_node: DashMap<SocketAddr, Atom>,
@@ -95,6 +122,11 @@ pub struct DistributionManager {
     monitors: NodeMonitorRegistry,
     /// Process monitor/link registry.
     process_monitors: ProcessMonitorRegistry,
+    /// Connected Erlang nodes (feature-gated).
+    #[cfg(feature = "erlang-dist")]
+    erlang_nodes: DashMap<Atom, ErlangNodeHandle>,
+    /// Node type lookup (for all connected nodes).
+    node_types: DashMap<Atom, NodeType>,
 }
 
 impl DistributionManager {
@@ -112,6 +144,9 @@ impl DistributionManager {
             transport: RwLock::new(None),
             monitors: NodeMonitorRegistry::new(),
             process_monitors: ProcessMonitorRegistry::new(),
+            #[cfg(feature = "erlang-dist")]
+            erlang_nodes: DashMap::new(),
+            node_types: DashMap::new(),
         }
     }
 
@@ -195,6 +230,7 @@ impl DistributionManager {
             ConnectedNode::new(node_info, connection, tx),
         );
         self.addr_to_node.insert(addr, remote_node_atom);
+        self.node_types.insert(remote_node_atom, NodeType::Native);
 
         // Remember this node's address for potential reconnection
         self.known_nodes.insert(remote_node_atom, addr);
@@ -260,6 +296,9 @@ impl DistributionManager {
 
     /// Disconnect from a node.
     pub fn disconnect_from(&self, node_atom: Atom) -> Result<(), DistError> {
+        // Remove from node types first
+        self.node_types.remove(&node_atom);
+
         if let Some((_, node)) = self.nodes.remove(&node_atom) {
             node.connection.close("disconnect requested");
             if let Some(addr) = node.info.addr {
@@ -359,14 +398,39 @@ impl DistributionManager {
         });
     }
 
-    /// Get list of connected nodes.
+    /// Get list of connected nodes (both native and Erlang).
     pub fn connected_nodes(&self) -> Vec<Atom> {
+        self.node_types.iter().map(|r| *r.key()).collect()
+    }
+
+    /// Get list of connected native nodes only.
+    pub fn native_nodes(&self) -> Vec<Atom> {
         self.nodes.iter().map(|r| *r.key()).collect()
+    }
+
+    /// Get list of connected Erlang nodes only.
+    #[cfg(feature = "erlang-dist")]
+    pub fn erlang_nodes(&self) -> Vec<Atom> {
+        self.erlang_nodes.iter().map(|r| *r.key()).collect()
+    }
+
+    /// Get the type of a connected node.
+    pub fn node_type(&self, node_atom: Atom) -> Option<NodeType> {
+        self.node_types.get(&node_atom).map(|r| *r)
     }
 
     /// Get info about a connected node.
     pub fn get_node_info(&self, node_atom: Atom) -> Option<NodeInfo> {
-        self.nodes.get(&node_atom).map(|n| n.info.clone())
+        // Check native nodes first
+        if let Some(node) = self.nodes.get(&node_atom) {
+            return Some(node.info.clone());
+        }
+        // Then check Erlang nodes
+        #[cfg(feature = "erlang-dist")]
+        if let Some(node) = self.erlang_nodes.get(&node_atom) {
+            return Some(node.info.clone());
+        }
+        None
     }
 
     /// Get the monitor registry.
@@ -387,6 +451,16 @@ impl DistributionManager {
     /// Get our node name atom.
     pub fn node_name_atom(&self) -> Atom {
         self.node_name_atom
+    }
+
+    /// Get our node name.
+    pub fn node_name(&self) -> &str {
+        &self.node_name
+    }
+
+    /// Get our creation number.
+    pub fn creation(&self) -> u32 {
+        self.creation
     }
 }
 
@@ -462,6 +536,9 @@ async fn handle_incoming_connection(
         .nodes
         .insert(remote_node_atom, ConnectedNode::new(info, connection, tx));
     manager.addr_to_node.insert(addr, remote_node_atom);
+    manager
+        .node_types
+        .insert(remote_node_atom, NodeType::Native);
 
     // Remember this node's address for potential reconnection
     manager.known_nodes.insert(remote_node_atom, addr);
@@ -537,6 +614,7 @@ async fn message_sender_loop(
             .is_some_and(|node| node.info.addr == Some(connection_addr));
 
         if should_cleanup {
+            manager.node_types.remove(&node_atom);
             if let Some((_, node)) = manager.nodes.remove(&node_atom) {
                 if let Some(addr) = node.info.addr {
                     manager.addr_to_node.remove(&addr);
@@ -611,6 +689,7 @@ async fn message_receiver_loop(node_atom: Atom, connection_addr: SocketAddr) {
             .is_some_and(|node| node.info.addr == Some(connection_addr));
 
         if should_cleanup {
+            manager.node_types.remove(&node_atom);
             if let Some((_, node)) = manager.nodes.remove(&node_atom) {
                 if let Some(addr) = node.info.addr {
                     manager.addr_to_node.remove(&addr);
@@ -873,6 +952,7 @@ async fn heartbeat_loop() {
                 );
 
                 // Remove the node and trigger cleanup
+                manager.node_types.remove(&node_atom);
                 if let Some((_, node)) = manager.nodes.remove(&node_atom) {
                     tracing::info!(
                         node = %node_atom,
