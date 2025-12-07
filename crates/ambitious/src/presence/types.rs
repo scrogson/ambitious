@@ -1,6 +1,7 @@
 //! Presence types.
 
-use crate::core::Pid;
+use crate::core::{DecodeError, Pid};
+use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +9,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A unique reference for a presence entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PresenceRef(String);
+
+impl Message for PresenceRef {
+    fn tag() -> &'static str {
+        "PresenceRef"
+    }
+
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
 
 impl PresenceRef {
     /// Generate a new unique reference.

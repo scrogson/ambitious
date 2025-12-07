@@ -4,7 +4,7 @@
 //! Clients join "lobby:main" to access these features.
 
 use ambitious::channel::{Channel, HandleIn, HandleResult, JoinResult, ReplyStatus, Socket};
-use ambitious::{channel, handle_in, Message};
+use ambitious::{Message, channel, handle_in};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::RoomInfo;
@@ -40,11 +40,7 @@ pub struct LobbyChannel {
 impl Channel for LobbyChannel {
     type JoinPayload = LobbyJoinPayload;
 
-    async fn join(
-        _topic: &str,
-        payload: Self::JoinPayload,
-        _socket: &Socket,
-    ) -> JoinResult<Self> {
+    async fn join(_topic: &str, payload: Self::JoinPayload, _socket: &Socket) -> JoinResult<Self> {
         tracing::info!(nick = ?payload.nick, "Client joining lobby");
         JoinResult::Ok(LobbyChannel { nick: payload.nick })
     }

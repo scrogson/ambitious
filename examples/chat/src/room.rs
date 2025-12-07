@@ -1,14 +1,14 @@
-//! Chat room GenServer implementation using v2 API.
+//! Chat room GenServer implementation.
 //!
 //! Each room is a GenServer that stores message history and is registered globally.
 //! When users join a room, they fetch history directly from the room.
 //!
-//! In v2, the struct IS the process state. `init` constructs it,
+//! The struct IS the process state. `init` constructs it,
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::HistoryMessage;
+use ambitious::gen_server::*;
 use ambitious::{Message, call, cast};
-use ambitious::gen_server::v2::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,11 +80,11 @@ impl GenServer for Room {
 // =============================================================================
 
 #[call]
-impl Call<GetHistory> for Room {
+impl HandleCall<GetHistory> for Room {
     type Reply = History;
     type Output = Reply<History>;
 
-    async fn call(&mut self, _request: GetHistory, _from: From) -> Reply<History> {
+    async fn handle_call(&mut self, _request: GetHistory, _from: From) -> Reply<History> {
         let history: Vec<HistoryMessage> = self.history.iter().cloned().collect();
         Reply::Ok(History(history))
     }
@@ -95,10 +95,10 @@ impl Call<GetHistory> for Room {
 // =============================================================================
 
 #[cast]
-impl Cast<StoreMessage> for Room {
+impl HandleCast<StoreMessage> for Room {
     type Output = Status;
 
-    async fn cast(&mut self, msg: StoreMessage) -> Status {
+    async fn handle_cast(&mut self, msg: StoreMessage) -> Status {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -322,11 +322,7 @@ pub trait Channel: Sized + Send + Sync + 'static {
     ///
     /// This constructs the channel state. Return `JoinResult::Ok(self)`
     /// to allow the join, or `JoinResult::Error` to deny.
-    async fn join(
-        topic: &str,
-        payload: Self::JoinPayload,
-        socket: &Socket,
-    ) -> JoinResult<Self>;
+    async fn join(topic: &str, payload: Self::JoinPayload, socket: &Socket) -> JoinResult<Self>;
 
     /// Called when the channel is terminating.
     ///
@@ -423,36 +419,36 @@ pub enum RawHandleResult {
 pub fn handle_result_to_raw<T: Serialize>(result: HandleResult<T>) -> RawHandleResult {
     match result {
         HandleResult::NoReply => RawHandleResult::NoReply,
-        HandleResult::Reply { status, payload } => {
-            match postcard::to_allocvec(&payload) {
-                Ok(bytes) => RawHandleResult::Reply { status, payload: bytes },
-                Err(_) => RawHandleResult::NoReply,
-            }
-        }
-        HandleResult::ReplyRaw { status, payload } => {
-            RawHandleResult::Reply { status, payload }
-        }
-        HandleResult::Broadcast { event, payload } => {
-            match postcard::to_allocvec(&payload) {
-                Ok(bytes) => RawHandleResult::Broadcast { event, payload: bytes },
-                Err(_) => RawHandleResult::NoReply,
-            }
-        }
-        HandleResult::BroadcastFrom { event, payload } => {
-            match postcard::to_allocvec(&payload) {
-                Ok(bytes) => RawHandleResult::BroadcastFrom { event, payload: bytes },
-                Err(_) => RawHandleResult::NoReply,
-            }
-        }
-        HandleResult::Push { event, payload } => {
-            match postcard::to_allocvec(&payload) {
-                Ok(bytes) => RawHandleResult::Push { event, payload: bytes },
-                Err(_) => RawHandleResult::NoReply,
-            }
-        }
-        HandleResult::PushRaw { event, payload } => {
-            RawHandleResult::Push { event, payload }
-        }
+        HandleResult::Reply { status, payload } => match postcard::to_allocvec(&payload) {
+            Ok(bytes) => RawHandleResult::Reply {
+                status,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::ReplyRaw { status, payload } => RawHandleResult::Reply { status, payload },
+        HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
+            Ok(bytes) => RawHandleResult::Broadcast {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::BroadcastFrom { event, payload } => match postcard::to_allocvec(&payload) {
+            Ok(bytes) => RawHandleResult::BroadcastFrom {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
+            Ok(bytes) => RawHandleResult::Push {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::PushRaw { event, payload } => RawHandleResult::Push { event, payload },
         HandleResult::Stop { reason } => RawHandleResult::Stop { reason },
     }
 }
@@ -513,11 +509,12 @@ pub mod dispatch {
     use std::sync::OnceLock;
 
     /// Type-erased async dispatch function for HandleIn handlers.
-    pub type AnyHandleInDispatchFn = for<'a> fn(
-        &'a mut (dyn Any + Send),
-        &'a [u8],
-        &'a Socket,
-    ) -> Pin<Box<dyn Future<Output = RawHandleResult> + Send + 'a>>;
+    pub type AnyHandleInDispatchFn =
+        for<'a> fn(
+            &'a mut (dyn Any + Send),
+            &'a [u8],
+            &'a Socket,
+        ) -> Pin<Box<dyn Future<Output = RawHandleResult> + Send + 'a>>;
 
     /// A registered HandleIn handler entry.
     pub struct HandleInEntry {
@@ -690,7 +687,16 @@ pub enum PayloadFormat {
 }
 
 /// Factory function to create a channel instance.
-pub type ChannelFactory<C> = Box<dyn Fn(&str, &[u8], &Socket) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<C, JoinError>> + Send>> + Send + Sync>;
+pub type ChannelFactory<C> = Box<
+    dyn Fn(
+            &str,
+            &[u8],
+            &Socket,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<C, JoinError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Trait for type-erased channel handling.
 ///
@@ -770,9 +776,7 @@ impl<C: Channel> ChannelHandler for TypedChannelHandler<C> {
             .map_err(|e| JoinError::new(format!("invalid payload: {}", e)))?;
 
         match C::join(topic, join_payload, &socket).await {
-            JoinResult::Ok(channel) => {
-                Ok((Box::new(TypedChannelInstance { channel }), None))
-            }
+            JoinResult::Ok(channel) => Ok((Box::new(TypedChannelInstance { channel }), None)),
             JoinResult::OkReply(channel, reply) => {
                 Ok((Box::new(TypedChannelInstance { channel }), Some(reply)))
             }
@@ -930,7 +934,8 @@ impl ChannelServer {
                 pg::join(&group, self.client_pid);
 
                 // Store the channel connection
-                self.channels.insert(topic, ChannelConnection { socket, instance });
+                self.channels
+                    .insert(topic, ChannelConnection { socket, instance });
 
                 ChannelReply::JoinOk {
                     msg_ref,
@@ -953,7 +958,10 @@ impl ChannelServer {
         msg_ref: String,
     ) -> Option<ChannelReply> {
         let conn = self.channels.get_mut(&topic)?;
-        let result = conn.instance.handle_event(&event, &payload, &conn.socket).await;
+        let result = conn
+            .instance
+            .handle_event(&event, &payload, &conn.socket)
+            .await;
 
         match result {
             RawHandleResult::NoReply => None,
@@ -965,21 +973,28 @@ impl ChannelServer {
                 },
                 payload,
             }),
-            RawHandleResult::Broadcast { event: broadcast_event, payload: broadcast_payload } => {
+            RawHandleResult::Broadcast {
+                event: broadcast_event,
+                payload: broadcast_payload,
+            } => {
                 self.do_broadcast(&topic, &broadcast_event, broadcast_payload);
                 None
             }
-            RawHandleResult::BroadcastFrom { event: broadcast_event, payload: broadcast_payload } => {
+            RawHandleResult::BroadcastFrom {
+                event: broadcast_event,
+                payload: broadcast_payload,
+            } => {
                 self.do_broadcast_from(&topic, &broadcast_event, broadcast_payload);
                 None
             }
-            RawHandleResult::Push { event: push_event, payload: push_payload } => {
-                Some(ChannelReply::Push {
-                    topic,
-                    event: push_event,
-                    payload: push_payload,
-                })
-            }
+            RawHandleResult::Push {
+                event: push_event,
+                payload: push_payload,
+            } => Some(ChannelReply::Push {
+                topic,
+                event: push_event,
+                payload: push_payload,
+            }),
             RawHandleResult::Stop { reason } => {
                 self.handle_leave(topic).await;
                 tracing::debug!(reason = %reason, "Channel stopped");
@@ -991,7 +1006,9 @@ impl ChannelServer {
     /// Handle a leave request.
     pub async fn handle_leave(&mut self, topic: String) {
         if let Some(mut conn) = self.channels.remove(&topic) {
-            conn.instance.terminate(TerminateReason::Left, &conn.socket).await;
+            conn.instance
+                .terminate(TerminateReason::Left, &conn.socket)
+                .await;
 
             // Unsubscribe from pg
             let group = format!("channel:{}", topic);

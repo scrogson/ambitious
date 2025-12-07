@@ -32,8 +32,8 @@
 //! ```
 
 use super::{
-    Channel, ChannelHandler, ChannelInstance, ChannelReply, JoinError,
-    RawHandleResult, ReplyStatus, Socket, TerminateReason, TypedChannelHandler,
+    Channel, ChannelHandler, ChannelInstance, ChannelReply, JoinError, RawHandleResult,
+    ReplyStatus, Socket, TerminateReason, TypedChannelHandler,
 };
 use crate::Pid;
 use crate::dist::pg;
@@ -280,11 +280,7 @@ impl<C: Channel> ChannelInstance for JsonChannelInstance<C> {
         self.channel.handle_in_raw(event, payload, socket).await
     }
 
-    async fn handle_info(
-        &mut self,
-        msg: crate::core::RawTerm,
-        socket: &Socket,
-    ) -> RawHandleResult {
+    async fn handle_info(&mut self, msg: crate::core::RawTerm, socket: &Socket) -> RawHandleResult {
         self.channel.handle_info_raw(msg, socket).await
     }
 
@@ -326,8 +322,7 @@ impl WebSocketEndpoint {
         C: Channel,
         C::JoinPayload: DeserializeOwned,
     {
-        self.handlers
-            .push(Arc::new(JsonChannelHandler::<C>::new()));
+        self.handlers.push(Arc::new(JsonChannelHandler::<C>::new()));
         self
     }
 
@@ -428,7 +423,9 @@ impl WsSession {
         let socket = Socket::new(self.pid, &topic);
 
         // Call join
-        let (instance, reply_payload) = handler.handle_join(&topic, &payload, socket.clone()).await?;
+        let (instance, reply_payload) = handler
+            .handle_join(&topic, &payload, socket.clone())
+            .await?;
 
         // Subscribe to topic via pg
         let group = format!("channel:{}", topic);
@@ -454,7 +451,11 @@ impl WsSession {
         payload: Vec<u8>,
     ) -> Option<RawHandleResult> {
         let conn = self.channels.get_mut(topic)?;
-        Some(conn.instance.handle_event(event, &payload, &conn.socket).await)
+        Some(
+            conn.instance
+                .handle_event(event, &payload, &conn.socket)
+                .await,
+        )
     }
 
     async fn handle_leave(&mut self, topic: &str) {
@@ -469,16 +470,16 @@ impl WsSession {
         }
     }
 
-    async fn handle_info_all(&mut self, msg: crate::core::RawTerm) -> Vec<(String, RawHandleResult)> {
+    async fn handle_info_all(
+        &mut self,
+        msg: crate::core::RawTerm,
+    ) -> Vec<(String, RawHandleResult)> {
         let mut results = Vec::new();
         let topics: Vec<String> = self.channels.keys().cloned().collect();
 
         for topic in topics {
             if let Some(conn) = self.channels.get_mut(&topic) {
-                let result = conn
-                    .instance
-                    .handle_info(msg.clone(), &conn.socket)
-                    .await;
+                let result = conn.instance.handle_info(msg.clone(), &conn.socket).await;
                 results.push((topic, result));
             }
         }
@@ -877,8 +878,8 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
 /// Use this when you want your channel to work with JSON payloads
 /// instead of postcard-serialized bytes.
 pub mod json_payload {
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
     use serde_json::Value;
 
     /// Serialize a payload to JSON bytes.

@@ -168,6 +168,29 @@ impl_message_for_primitive!(f64, "f64");
 impl_message_for_primitive!(bool, "bool");
 impl_message_for_primitive!(String, "String");
 
+/// Implementation of Message for `Option<T>` where T: Message + Serialize + DeserializeOwned.
+impl<T: Message + Serialize + DeserializeOwned> Message for Option<T> {
+    fn tag() -> &'static str {
+        "Option"
+    }
+
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
 /// Encode a tag and payload into local format.
 ///
 /// Helper for implementing `encode_local`.

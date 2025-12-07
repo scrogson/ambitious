@@ -495,7 +495,7 @@ fn get_message_tag(input: &DeriveInput) -> Option<String> {
 // GenServer Handler Registration Macros
 // =============================================================================
 
-/// Extract the GenServer type and Message type from `impl Call<M> for G`.
+/// Extract the GenServer type and Message type from `impl HandleCall<M> for G`.
 fn extract_call_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
     // Get the self type (the GenServer type, e.g., Counter)
     let server_type = (*impl_block.self_ty).clone();
@@ -503,53 +503,53 @@ fn extract_call_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
     // Get the trait being implemented
     let trait_path = impl_block.trait_.as_ref()?.1.clone();
 
-    // The trait should be `Call<M>` - extract M
+    // The trait should be `HandleCall<M>` - extract M
     let last_segment = trait_path.segments.last()?;
-    if last_segment.ident != "Call" {
+    if last_segment.ident != "HandleCall" {
         return None;
     }
 
-    // Extract the generic argument M from Call<M>
-    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-        if let Some(syn::GenericArgument::Type(msg_type)) = args.args.first() {
-            return Some((server_type, msg_type.clone()));
-        }
+    // Extract the generic argument M from HandleCall<M>
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+        && let Some(syn::GenericArgument::Type(msg_type)) = args.args.first()
+    {
+        return Some((server_type, msg_type.clone()));
     }
 
     None
 }
 
-/// Extract the GenServer type and Message type from `impl Cast<M> for G`.
+/// Extract the GenServer type and Message type from `impl HandleCast<M> for G`.
 fn extract_cast_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
     let server_type = (*impl_block.self_ty).clone();
     let trait_path = impl_block.trait_.as_ref()?.1.clone();
     let last_segment = trait_path.segments.last()?;
-    if last_segment.ident != "Cast" {
+    if last_segment.ident != "HandleCast" {
         return None;
     }
 
-    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-        if let Some(syn::GenericArgument::Type(msg_type)) = args.args.first() {
-            return Some((server_type, msg_type.clone()));
-        }
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+        && let Some(syn::GenericArgument::Type(msg_type)) = args.args.first()
+    {
+        return Some((server_type, msg_type.clone()));
     }
 
     None
 }
 
-/// Extract the GenServer type and Message type from `impl Info<M> for G`.
+/// Extract the GenServer type and Message type from `impl HandleInfo<M> for G`.
 fn extract_info_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
     let server_type = (*impl_block.self_ty).clone();
     let trait_path = impl_block.trait_.as_ref()?.1.clone();
     let last_segment = trait_path.segments.last()?;
-    if last_segment.ident != "Info" {
+    if last_segment.ident != "HandleInfo" {
         return None;
     }
 
-    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-        if let Some(syn::GenericArgument::Type(msg_type)) = args.args.first() {
-            return Some((server_type, msg_type.clone()));
-        }
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+        && let Some(syn::GenericArgument::Type(msg_type)) = args.args.first()
+    {
+        return Some((server_type, msg_type.clone()));
     }
 
     None
@@ -558,27 +558,31 @@ fn extract_info_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
 /// Generate a unique static name from server and message types.
 fn handler_static_name(prefix: &str, server: &Type, msg: &Type) -> syn::Ident {
     // Convert types to strings and sanitize for use as identifier
-    let server_str = quote!(#server).to_string().replace([' ', ':', '<', '>', ','], "_");
-    let msg_str = quote!(#msg).to_string().replace([' ', ':', '<', '>', ','], "_");
+    let server_str = quote!(#server)
+        .to_string()
+        .replace([' ', ':', '<', '>', ','], "_");
+    let msg_str = quote!(#msg)
+        .to_string()
+        .replace([' ', ':', '<', '>', ','], "_");
     format_ident!("__{}_{}_{}", prefix, server_str, msg_str)
 }
 
-/// Attribute macro for Call handler registration.
+/// Attribute macro for HandleCall handler registration.
 ///
-/// Apply this to an `impl Call<M> for G` block to automatically register
+/// Apply this to an `impl HandleCall<M> for G` block to automatically register
 /// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use ambitious::gen_server::v2::*;
+/// use ambitious::gen_server::*;
 ///
 /// #[call]
-/// impl Call<GetCount> for Counter {
+/// impl HandleCall<GetCount> for Counter {
 ///     type Reply = i64;
 ///     type Output = Reply<i64>;
 ///
-///     async fn call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
+///     async fn handle_call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
 ///         Reply::Ok(self.count)
 ///     }
 /// }
@@ -590,7 +594,7 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let Some((server_type, msg_type)) = extract_call_types(&impl_block) else {
         return syn::Error::new_spanned(
             &impl_block,
-            "#[call] can only be applied to `impl Call<M> for G` blocks",
+            "#[call] can only be applied to `impl HandleCall<M> for G` blocks",
         )
         .to_compile_error()
         .into();
@@ -599,17 +603,17 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("CALL", &server_type, &msg_type);
 
     let expanded = quote! {
-        #[::ambitious::gen_server::v2::async_trait]
+        #[::ambitious::gen_server::async_trait]
         #impl_block
 
-        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::CALL_HANDLERS)]
+        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::dispatch::CALL_HANDLERS)]
         #[linkme(crate = ::ambitious::linkme)]
-        static #static_name: ::ambitious::gen_server::v2::dispatch::CallHandlerEntry = ::ambitious::gen_server::v2::dispatch::CallHandlerEntry {
+        static #static_name: ::ambitious::gen_server::dispatch::CallHandlerEntry = ::ambitious::gen_server::dispatch::CallHandlerEntry {
             server_type_id: || ::std::any::TypeId::of::<#server_type>(),
             msg_tag: || <#msg_type as ::ambitious::message::Message>::tag(),
             dispatch: |server_any, payload, from| {
                 Box::pin(async move {
-                    use ::ambitious::gen_server::v2::Call;
+                    use ::ambitious::gen_server::HandleCall;
                     use ::ambitious::message::Message;
 
                     // Downcast the Any to our server type
@@ -619,15 +623,15 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let msg = match <#msg_type>::decode_local(payload) {
                         Ok(m) => m,
                         Err(e) => {
-                            return ::ambitious::gen_server::v2::RawReply::StopNoReply(
+                            return ::ambitious::gen_server::RawReply::StopNoReply(
                                 ::ambitious::core::ExitReason::Error(format!("decode error: {}", e)),
                             );
                         }
                     };
 
-                    let result = <#server_type as Call<#msg_type>>::call(server, msg, from).await;
-                    let reply: ::ambitious::gen_server::v2::Reply<_> = result.into();
-                    ::ambitious::gen_server::v2::dispatch::reply_to_raw(reply)
+                    let result = <#server_type as HandleCall<#msg_type>>::handle_call(server, msg, from).await;
+                    let reply: ::ambitious::gen_server::Reply<_> = result.into();
+                    ::ambitious::gen_server::dispatch::reply_to_raw(reply)
                 })
             },
         };
@@ -636,21 +640,21 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Attribute macro for Cast handler registration.
+/// Attribute macro for HandleCast handler registration.
 ///
-/// Apply this to an `impl Cast<M> for G` block to automatically register
+/// Apply this to an `impl HandleCast<M> for G` block to automatically register
 /// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use ambitious::gen_server::v2::*;
+/// use ambitious::gen_server::*;
 ///
 /// #[cast]
-/// impl Cast<Increment> for Counter {
+/// impl HandleCast<Increment> for Counter {
 ///     type Output = Status;
 ///
-///     async fn cast(&mut self, _msg: Increment) -> Status {
+///     async fn handle_cast(&mut self, _msg: Increment) -> Status {
 ///         self.count += 1;
 ///         Status::Ok
 ///     }
@@ -663,7 +667,7 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let Some((server_type, msg_type)) = extract_cast_types(&impl_block) else {
         return syn::Error::new_spanned(
             &impl_block,
-            "#[cast] can only be applied to `impl Cast<M> for G` blocks",
+            "#[cast] can only be applied to `impl HandleCast<M> for G` blocks",
         )
         .to_compile_error()
         .into();
@@ -672,17 +676,17 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("CAST", &server_type, &msg_type);
 
     let expanded = quote! {
-        #[::ambitious::gen_server::v2::async_trait]
+        #[::ambitious::gen_server::async_trait]
         #impl_block
 
-        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::CAST_HANDLERS)]
+        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::dispatch::CAST_HANDLERS)]
         #[linkme(crate = ::ambitious::linkme)]
-        static #static_name: ::ambitious::gen_server::v2::dispatch::CastHandlerEntry = ::ambitious::gen_server::v2::dispatch::CastHandlerEntry {
+        static #static_name: ::ambitious::gen_server::dispatch::CastHandlerEntry = ::ambitious::gen_server::dispatch::CastHandlerEntry {
             server_type_id: || ::std::any::TypeId::of::<#server_type>(),
             msg_tag: || <#msg_type as ::ambitious::message::Message>::tag(),
             dispatch: |server_any, payload| {
                 Box::pin(async move {
-                    use ::ambitious::gen_server::v2::Cast;
+                    use ::ambitious::gen_server::HandleCast;
                     use ::ambitious::message::Message;
 
                     let server = server_any.downcast_mut::<#server_type>()
@@ -691,13 +695,13 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let msg = match <#msg_type>::decode_local(payload) {
                         Ok(m) => m,
                         Err(e) => {
-                            return ::ambitious::gen_server::v2::Status::Stop(
+                            return ::ambitious::gen_server::Status::Stop(
                                 ::ambitious::core::ExitReason::Error(format!("decode error: {}", e)),
                             );
                         }
                     };
 
-                    let result = <#server_type as Cast<#msg_type>>::cast(server, msg).await;
+                    let result = <#server_type as HandleCast<#msg_type>>::handle_cast(server, msg).await;
                     result.into()
                 })
             },
@@ -707,21 +711,21 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Attribute macro for Info handler registration.
+/// Attribute macro for HandleInfo handler registration.
 ///
-/// Apply this to an `impl Info<M> for G` block to automatically register
+/// Apply this to an `impl HandleInfo<M> for G` block to automatically register
 /// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use ambitious::gen_server::v2::*;
+/// use ambitious::gen_server::*;
 ///
 /// #[info]
-/// impl Info<Tick> for Counter {
+/// impl HandleInfo<Tick> for Counter {
 ///     type Output = Status;
 ///
-///     async fn info(&mut self, _msg: Tick) -> Status {
+///     async fn handle_info(&mut self, _msg: Tick) -> Status {
 ///         println!("tick at {}", self.count);
 ///         Status::Timeout(Duration::from_secs(1))
 ///     }
@@ -734,7 +738,7 @@ pub fn info(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let Some((server_type, msg_type)) = extract_info_types(&impl_block) else {
         return syn::Error::new_spanned(
             &impl_block,
-            "#[info] can only be applied to `impl Info<M> for G` blocks",
+            "#[info] can only be applied to `impl HandleInfo<M> for G` blocks",
         )
         .to_compile_error()
         .into();
@@ -743,17 +747,17 @@ pub fn info(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("INFO", &server_type, &msg_type);
 
     let expanded = quote! {
-        #[::ambitious::gen_server::v2::async_trait]
+        #[::ambitious::gen_server::async_trait]
         #impl_block
 
-        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::INFO_HANDLERS)]
+        #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::dispatch::INFO_HANDLERS)]
         #[linkme(crate = ::ambitious::linkme)]
-        static #static_name: ::ambitious::gen_server::v2::dispatch::InfoHandlerEntry = ::ambitious::gen_server::v2::dispatch::InfoHandlerEntry {
+        static #static_name: ::ambitious::gen_server::dispatch::InfoHandlerEntry = ::ambitious::gen_server::dispatch::InfoHandlerEntry {
             server_type_id: || ::std::any::TypeId::of::<#server_type>(),
             msg_tag: || <#msg_type as ::ambitious::message::Message>::tag(),
             dispatch: |server_any, payload| {
                 Box::pin(async move {
-                    use ::ambitious::gen_server::v2::Info;
+                    use ::ambitious::gen_server::HandleInfo;
                     use ::ambitious::message::Message;
 
                     let server = server_any.downcast_mut::<#server_type>()
@@ -762,13 +766,13 @@ pub fn info(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let msg = match <#msg_type>::decode_local(payload) {
                         Ok(m) => m,
                         Err(e) => {
-                            return ::ambitious::gen_server::v2::Status::Stop(
+                            return ::ambitious::gen_server::Status::Stop(
                                 ::ambitious::core::ExitReason::Error(format!("decode error: {}", e)),
                             );
                         }
                     };
 
-                    let result = <#server_type as Info<#msg_type>>::info(server, msg).await;
+                    let result = <#server_type as HandleInfo<#msg_type>>::handle_info(server, msg).await;
                     result.into()
                 })
             },
@@ -791,15 +795,14 @@ fn extract_handle_in_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
         return None;
     }
 
-    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-        if let Some(syn::GenericArgument::Type(msg_type)) = args.args.first() {
-            return Some((channel_type, msg_type.clone()));
-        }
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+        && let Some(syn::GenericArgument::Type(msg_type)) = args.args.first()
+    {
+        return Some((channel_type, msg_type.clone()));
     }
 
     None
 }
-
 
 /// Attribute macro for Channel HandleIn handler registration.
 ///
@@ -928,8 +931,10 @@ pub fn channel(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Verify this is a Channel impl
-    let is_channel_impl = impl_block.trait_.as_ref().map_or(false, |(_, path, _)| {
-        path.segments.last().map_or(false, |seg| seg.ident == "Channel")
+    let is_channel_impl = impl_block.trait_.as_ref().is_some_and(|(_, path, _)| {
+        path.segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Channel")
     });
 
     if !is_channel_impl {
@@ -984,16 +989,14 @@ fn parse_channel_attr(attr: TokenStream) -> Result<String, syn::Error> {
     let mut topic = None;
 
     for meta in metas {
-        if let syn::Meta::NameValue(nv) = meta {
-            if nv.path.is_ident("topic") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(lit_str),
-                    ..
-                }) = nv.value
-                {
-                    topic = Some(lit_str.value());
-                }
-            }
+        if let syn::Meta::NameValue(nv) = meta
+            && nv.path.is_ident("topic")
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit_str),
+                ..
+            }) = nv.value
+        {
+            topic = Some(lit_str.value());
         }
     }
 

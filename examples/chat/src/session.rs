@@ -11,7 +11,7 @@ use crate::registry::Registry;
 use crate::room::StoreMessage;
 use crate::room_supervisor;
 use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
-use ambitious::gen_server::v2 as gen_server;
+use ambitious::gen_server;
 use ambitious::{Pid, RawTerm, Term};
 use std::sync::Arc;
 use std::time::Duration;

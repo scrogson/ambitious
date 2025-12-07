@@ -1,14 +1,25 @@
-//! Internal protocol messages for GenServer communication.
+//! GenServer internal protocol messages.
 //!
-//! These messages are used internally for call/cast/reply coordination.
+//! Protocol messages wrap typed payloads for call/cast/reply coordination.
 
-use super::types::From;
 use crate::core::{DecodeError, ExitReason, Ref, Term};
 use serde::{Deserialize, Serialize};
 
+/// Reference to a caller awaiting a reply.
+///
+/// Used in `Call::call` to identify who to reply to.
+/// Can be used with `reply()` for delayed responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct From {
+    /// The caller's process ID.
+    pub pid: crate::core::Pid,
+    /// Unique reference for this call.
+    pub reference: Ref,
+}
+
 /// Internal GenServer protocol messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GenServerMessage {
+pub enum Message {
     /// A synchronous call request.
     Call {
         /// The From handle for replying.
@@ -44,52 +55,59 @@ pub enum GenServerMessage {
     },
 }
 
-// GenServerMessage already implements Message via the blanket impl
+impl Message {
+    /// Encode this message to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        Term::encode(self)
+    }
 
-/// Encodes a call request.
+    /// Decode a message from bytes.
+    pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
+        Term::decode(data)
+    }
+}
+
+/// Encode a call request.
+#[allow(dead_code)]
 pub fn encode_call<M: Term>(from: From, request: &M) -> Vec<u8> {
-    let msg = GenServerMessage::Call {
+    Message::Call {
         from,
         payload: request.encode(),
-    };
-    msg.encode()
+    }
+    .encode()
 }
 
-/// Encodes a cast message.
+/// Encode a cast message.
+#[allow(dead_code)]
 pub fn encode_cast<M: Term>(msg: &M) -> Vec<u8> {
-    let msg = GenServerMessage::Cast {
+    Message::Cast {
         payload: msg.encode(),
-    };
-    msg.encode()
+    }
+    .encode()
 }
 
-/// Encodes a reply.
-pub fn encode_reply<M: Term>(reference: Ref, reply: &M) -> Vec<u8> {
-    let msg = GenServerMessage::Reply {
+/// Encode a reply from raw bytes.
+///
+/// The payload should already be encoded (e.g., via `Message::encode_local()`).
+pub fn encode_reply(reference: Ref, payload: &[u8]) -> Vec<u8> {
+    Message::Reply {
         reference,
-        payload: reply.encode(),
-    };
-    msg.encode()
+        payload: payload.to_vec(),
+    }
+    .encode()
 }
 
-/// Encodes a stop request.
+/// Encode a stop request.
 pub fn encode_stop(reason: ExitReason, from: Option<From>) -> Vec<u8> {
-    let msg = GenServerMessage::Stop { reason, from };
-    msg.encode()
+    Message::Stop { reason, from }.encode()
 }
 
-/// Encodes a timeout message.
+/// Encode a timeout message.
 pub fn encode_timeout() -> Vec<u8> {
-    GenServerMessage::Timeout.encode()
+    Message::Timeout.encode()
 }
 
-/// Encodes a continue message.
+/// Encode a continue message.
 pub fn encode_continue(arg: &[u8]) -> Vec<u8> {
-    let msg = GenServerMessage::Continue { arg: arg.to_vec() };
-    msg.encode()
-}
-
-/// Decodes a GenServer protocol message.
-pub fn decode(data: &[u8]) -> Result<GenServerMessage, DecodeError> {
-    <GenServerMessage as Term>::decode(data)
+    Message::Continue { arg: arg.to_vec() }.encode()
 }

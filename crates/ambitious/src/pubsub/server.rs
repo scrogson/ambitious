@@ -1,11 +1,12 @@
 //! PubSub GenServer implementation.
 
-use crate::core::{Pid, RawTerm};
+use crate::core::{DecodeError, Pid};
 use crate::dist::pg;
 use crate::gen_server::{
-    CallResult, CastResult, ContinueArg, ContinueResult, From, GenServer, InfoResult, InitResult,
-    async_trait,
+    From, GenServer, HandleCall, HandleCast, HandleInfo, Init, Reply, Status, async_trait, call,
+    cast, start,
 };
+use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
 use crate::registry::Registry;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -25,55 +26,276 @@ impl PubSubConfig {
     }
 }
 
-/// Messages that can be sent to the PubSub server via call.
+// =============================================================================
+// Message Types
+// =============================================================================
+
+/// Subscribe a PID to a topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubSubCall {
-    /// Subscribe a PID to a topic.
-    Subscribe { topic: String, pid: Pid },
-    /// Unsubscribe a PID from a topic.
-    Unsubscribe { topic: String, pid: Pid },
-    /// Unsubscribe a PID from all topics.
-    UnsubscribeAll { pid: Pid },
-    /// Get subscribers for a topic.
-    Subscribers { topic: String },
-    /// Get local subscribers for a topic.
-    LocalSubscribers { topic: String },
+pub struct Subscribe {
+    /// The topic to subscribe to.
+    pub topic: String,
+    /// The PID to subscribe.
+    pub pid: Pid,
 }
 
-/// Messages that can be sent to the PubSub server via cast (fire-and-forget).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubSubCast {
-    /// Broadcast a message to all subscribers of a topic.
-    Broadcast {
-        topic: String,
-        payload: Vec<u8>,
-        exclude: Option<Pid>,
-    },
-    /// Local-only broadcast (don't forward to other nodes).
-    LocalBroadcast {
-        topic: String,
-        payload: Vec<u8>,
-        exclude: Option<Pid>,
-    },
-    /// Forward a broadcast from another node (internal use).
-    ForwardBroadcast {
-        topic: String,
-        payload: Vec<u8>,
-        exclude: Option<Pid>,
-    },
+impl Message for Subscribe {
+    fn tag() -> &'static str {
+        "Subscribe"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
 }
 
-/// Reply from PubSub calls.
+/// Unsubscribe a PID from a topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubSubReply {
-    /// Operation succeeded.
-    Ok,
-    /// List of subscribers.
-    Subscribers(Vec<Pid>),
+pub struct Unsubscribe {
+    /// The topic to unsubscribe from.
+    pub topic: String,
+    /// The PID to unsubscribe.
+    pub pid: Pid,
 }
 
-/// Internal state of the PubSub server.
-pub struct PubSubState {
+impl Message for Unsubscribe {
+    fn tag() -> &'static str {
+        "Unsubscribe"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Unsubscribe a PID from all topics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnsubscribeAll {
+    /// The PID to unsubscribe.
+    pub pid: Pid,
+}
+
+impl Message for UnsubscribeAll {
+    fn tag() -> &'static str {
+        "UnsubscribeAll"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Get subscribers for a topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetSubscribers {
+    /// The topic to get subscribers for.
+    pub topic: String,
+}
+
+impl Message for GetSubscribers {
+    fn tag() -> &'static str {
+        "GetSubscribers"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Get local subscribers for a topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetLocalSubscribers {
+    /// The topic to get local subscribers for.
+    pub topic: String,
+}
+
+impl Message for GetLocalSubscribers {
+    fn tag() -> &'static str {
+        "GetLocalSubscribers"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Reply containing a list of subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscribers(pub Vec<Pid>);
+
+impl Message for Subscribers {
+    fn tag() -> &'static str {
+        "Subscribers"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Broadcast a message to all subscribers of a topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Broadcast {
+    /// The topic to broadcast to.
+    pub topic: String,
+    /// The serialized message payload.
+    pub payload: Vec<u8>,
+    /// Optional PID to exclude from broadcast.
+    pub exclude: Option<Pid>,
+}
+
+impl Message for Broadcast {
+    fn tag() -> &'static str {
+        "Broadcast"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Local-only broadcast (don't forward to other nodes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalBroadcast {
+    /// The topic to broadcast to.
+    pub topic: String,
+    /// The serialized message payload.
+    pub payload: Vec<u8>,
+    /// Optional PID to exclude from broadcast.
+    pub exclude: Option<Pid>,
+}
+
+impl Message for LocalBroadcast {
+    fn tag() -> &'static str {
+        "LocalBroadcast"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Forward a broadcast from another node (internal use).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardBroadcast {
+    /// The topic to broadcast to.
+    pub topic: String,
+    /// The serialized message payload.
+    pub payload: Vec<u8>,
+    /// Optional PID to exclude from broadcast.
+    pub exclude: Option<Pid>,
+}
+
+impl Message for ForwardBroadcast {
+    fn tag() -> &'static str {
+        "ForwardBroadcast"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &encode_payload(self))
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+/// Internal message to complete initialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompleteInit;
+
+impl Message for CompleteInit {
+    fn tag() -> &'static str {
+        "CompleteInit"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        encode_with_tag(Self::tag(), &[])
+    }
+    fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
+        Ok(CompleteInit)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+// =============================================================================
+// PubSub Server (struct IS the state)
+// =============================================================================
+
+/// The PubSub GenServer - struct IS the state.
+pub struct PubSub {
     /// The name this PubSub is registered under.
     name: String,
     /// Local registry for efficient local dispatch.
@@ -85,148 +307,173 @@ pub struct PubSubState {
     self_pid: Option<Pid>,
 }
 
-/// The PubSub GenServer.
-pub struct PubSub;
+// Register handlers for automatic dispatch
+crate::register_handlers!(PubSub {
+    calls: [
+        Subscribe,
+        Unsubscribe,
+        UnsubscribeAll,
+        GetSubscribers,
+        GetLocalSubscribers
+    ],
+    casts: [Broadcast, LocalBroadcast, ForwardBroadcast],
+    infos: [CompleteInit],
+});
 
 #[async_trait]
 impl GenServer for PubSub {
-    type State = PubSubState;
-    type InitArg = PubSubConfig;
-    type Call = PubSubCall;
-    type Cast = PubSubCast;
-    type Reply = PubSubReply;
+    type Args = PubSubConfig;
 
-    async fn init(config: PubSubConfig) -> InitResult<PubSubState> {
+    async fn init(config: PubSubConfig) -> Init<Self> {
         let pg_group = format!("pubsub:{}", config.name);
 
         // Create the local registry for subscriptions
         let registry = Registry::new_duplicate(format!("pubsub:{}", config.name));
 
-        let state = PubSubState {
+        let server = PubSub {
             name: config.name,
             registry,
             pg_group,
             self_pid: None,
         };
 
-        // We'll join the pg group in handle_continue after we have our PID
-        InitResult::ok_continue(state, &())
+        // We'll complete init after we have our PID via handle_info
+        Init::Continue(server, CompleteInit.encode_local())
     }
+}
 
-    async fn handle_call(
-        request: PubSubCall,
-        _from: From,
-        state: &mut PubSubState,
-    ) -> CallResult<PubSubState, PubSubReply> {
-        match request {
-            PubSubCall::Subscribe { topic, pid } => {
-                // Only add to local registry if PID is local
-                if pid.is_local() {
-                    let _ = state.registry.register(topic, pid, ());
-                }
-                CallResult::Reply(PubSubReply::Ok, std::mem::take(state))
-            }
-            PubSubCall::Unsubscribe { topic, pid } => {
-                if pid.is_local() {
-                    state.registry.unregister(&topic, pid);
-                }
-                CallResult::Reply(PubSubReply::Ok, std::mem::take(state))
-            }
-            PubSubCall::UnsubscribeAll { pid } => {
-                state.registry.unregister_all(pid);
-                CallResult::Reply(PubSubReply::Ok, std::mem::take(state))
-            }
-            PubSubCall::Subscribers { topic } => {
-                // Get all subscribers from pg (includes remote)
-                let pg_topic_group = format!("{}:{}", state.pg_group, topic);
-                let subscribers = pg::get_members(&pg_topic_group);
-                CallResult::Reply(PubSubReply::Subscribers(subscribers), std::mem::take(state))
-            }
-            PubSubCall::LocalSubscribers { topic } => {
-                let subscribers: Vec<Pid> = state
-                    .registry
-                    .lookup(&topic)
-                    .into_iter()
-                    .map(|(pid, _)| pid)
-                    .collect();
-                CallResult::Reply(PubSubReply::Subscribers(subscribers), std::mem::take(state))
-            }
+#[async_trait]
+impl HandleCall<Subscribe> for PubSub {
+    type Reply = ();
+    type Output = Reply<()>;
+
+    async fn handle_call(&mut self, msg: Subscribe, _from: From) -> Reply<()> {
+        // Only add to local registry if PID is local
+        if msg.pid.is_local() {
+            let _ = self.registry.register(msg.topic, msg.pid, ());
         }
+        Reply::Ok(())
     }
+}
 
-    async fn handle_cast(msg: PubSubCast, state: &mut PubSubState) -> CastResult<PubSubState> {
-        match msg {
-            PubSubCast::Broadcast {
-                topic,
-                payload,
-                exclude,
-            } => {
-                // Dispatch to local subscribers
-                dispatch_local(&state.registry, &topic, &payload, exclude);
+#[async_trait]
+impl HandleCall<Unsubscribe> for PubSub {
+    type Reply = ();
+    type Output = Reply<()>;
 
-                // Forward to other PubSub nodes
-                forward_to_remote_nodes(&state.pg_group, &topic, &payload, exclude, state.self_pid);
-
-                CastResult::NoReply(std::mem::take(state))
-            }
-            PubSubCast::LocalBroadcast {
-                topic,
-                payload,
-                exclude,
-            } => {
-                // Only dispatch locally, don't forward
-                dispatch_local(&state.registry, &topic, &payload, exclude);
-                CastResult::NoReply(std::mem::take(state))
-            }
-            PubSubCast::ForwardBroadcast {
-                topic,
-                payload,
-                exclude,
-            } => {
-                // This came from another node, only dispatch locally
-                dispatch_local(&state.registry, &topic, &payload, exclude);
-                CastResult::NoReply(std::mem::take(state))
-            }
+    async fn handle_call(&mut self, msg: Unsubscribe, _from: From) -> Reply<()> {
+        if msg.pid.is_local() {
+            self.registry.unregister(&msg.topic, msg.pid);
         }
+        Reply::Ok(())
     }
+}
 
-    async fn handle_info(_msg: RawTerm, state: &mut PubSubState) -> InfoResult<PubSubState> {
-        // Handle any raw messages (e.g., from pg or other processes)
-        InfoResult::NoReply(std::mem::take(state))
+#[async_trait]
+impl HandleCall<UnsubscribeAll> for PubSub {
+    type Reply = ();
+    type Output = Reply<()>;
+
+    async fn handle_call(&mut self, msg: UnsubscribeAll, _from: From) -> Reply<()> {
+        self.registry.unregister_all(msg.pid);
+        Reply::Ok(())
     }
+}
 
-    async fn handle_continue(
-        _arg: ContinueArg,
-        state: &mut PubSubState,
-    ) -> ContinueResult<PubSubState> {
+#[async_trait]
+impl HandleCall<GetSubscribers> for PubSub {
+    type Reply = Subscribers;
+    type Output = Reply<Subscribers>;
+
+    async fn handle_call(&mut self, msg: GetSubscribers, _from: From) -> Reply<Subscribers> {
+        // Get all subscribers from pg (includes remote)
+        let pg_topic_group = format!("{}:{}", self.pg_group, msg.topic);
+        let subscribers = pg::get_members(&pg_topic_group);
+        Reply::Ok(Subscribers(subscribers))
+    }
+}
+
+#[async_trait]
+impl HandleCall<GetLocalSubscribers> for PubSub {
+    type Reply = Subscribers;
+    type Output = Reply<Subscribers>;
+
+    async fn handle_call(&mut self, msg: GetLocalSubscribers, _from: From) -> Reply<Subscribers> {
+        let subscribers: Vec<Pid> = self
+            .registry
+            .lookup(&msg.topic)
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .collect();
+        Reply::Ok(Subscribers(subscribers))
+    }
+}
+
+#[async_trait]
+impl HandleCast<Broadcast> for PubSub {
+    type Output = Status;
+
+    async fn handle_cast(&mut self, msg: Broadcast) -> Status {
+        // Dispatch to local subscribers
+        dispatch_local(&self.registry, &msg.topic, &msg.payload, msg.exclude);
+
+        // Forward to other PubSub nodes
+        forward_to_remote_nodes(
+            &self.pg_group,
+            &msg.topic,
+            &msg.payload,
+            msg.exclude,
+            self.self_pid,
+        );
+
+        Status::Ok
+    }
+}
+
+#[async_trait]
+impl HandleCast<LocalBroadcast> for PubSub {
+    type Output = Status;
+
+    async fn handle_cast(&mut self, msg: LocalBroadcast) -> Status {
+        // Only dispatch locally, don't forward
+        dispatch_local(&self.registry, &msg.topic, &msg.payload, msg.exclude);
+        Status::Ok
+    }
+}
+
+#[async_trait]
+impl HandleCast<ForwardBroadcast> for PubSub {
+    type Output = Status;
+
+    async fn handle_cast(&mut self, msg: ForwardBroadcast) -> Status {
+        // This came from another node, only dispatch locally
+        dispatch_local(&self.registry, &msg.topic, &msg.payload, msg.exclude);
+        Status::Ok
+    }
+}
+
+#[async_trait]
+impl HandleInfo<CompleteInit> for PubSub {
+    type Output = Status;
+
+    async fn handle_info(&mut self, _msg: CompleteInit) -> Status {
         // Join the pg group for this PubSub
         let self_pid = crate::current_pid();
-        state.self_pid = Some(self_pid);
+        self.self_pid = Some(self_pid);
 
-        pg::join(&state.pg_group, self_pid);
+        pg::join(&self.pg_group, self_pid);
 
         // Register ourselves by name
-        let _ = crate::register(&state.name, self_pid);
+        let _ = crate::register(&self.name, self_pid);
 
         tracing::debug!(
-            name = %state.name,
-            pg_group = %state.pg_group,
+            name = %self.name,
+            pg_group = %self.pg_group,
             pid = ?self_pid,
             "PubSub started"
         );
 
-        ContinueResult::NoReply(std::mem::take(state))
-    }
-}
-
-impl Default for PubSubState {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            registry: Registry::new_duplicate("default"),
-            pg_group: String::new(),
-            self_pid: None,
-        }
+        Status::Ok
     }
 }
 
@@ -259,22 +506,21 @@ fn forward_to_remote_nodes(
     let my_node = crate::core::node::node_name_atom();
 
     // Send ForwardBroadcast to each remote PubSub
-    let forward_msg = PubSubCast::ForwardBroadcast {
+    let forward_msg = ForwardBroadcast {
         topic: topic.to_string(),
         payload: payload.to_vec(),
         exclude,
     };
 
-    if let Ok(msg_bytes) = postcard::to_allocvec(&forward_msg) {
-        for pid in members {
-            // Skip ourselves
-            if Some(pid) == self_pid {
-                continue;
-            }
-            // Only send to remote nodes
-            if pid.node() != my_node {
-                let _ = crate::send_raw(pid, msg_bytes.clone());
-            }
+    let msg_bytes = forward_msg.encode_local();
+    for pid in members {
+        // Skip ourselves
+        if Some(pid) == self_pid {
+            continue;
+        }
+        // Only send to remote nodes
+        if pid.node() != my_node {
+            let _ = crate::send_raw(pid, msg_bytes.clone());
         }
     }
 }
@@ -289,7 +535,7 @@ impl PubSub {
     /// The server will be registered under the configured name and join
     /// a pg group for distributed coordination.
     pub async fn start_link(config: PubSubConfig) -> Result<Pid, String> {
-        crate::gen_server::start::<PubSub>(config)
+        start::<PubSub>(config)
             .await
             .map_err(|e| format!("failed to start PubSub: {:?}", e))
     }
@@ -309,12 +555,12 @@ impl PubSub {
         let server_pid =
             crate::whereis(pubsub).ok_or_else(|| format!("PubSub '{}' not found", pubsub))?;
 
-        let request = PubSubCall::Subscribe {
+        let request = Subscribe {
             topic: topic.to_string(),
             pid,
         };
 
-        crate::gen_server::call::<PubSub>(server_pid, request, Duration::from_secs(5))
+        call::<Subscribe, ()>(server_pid, request, Duration::from_secs(5))
             .await
             .map_err(|e| format!("subscribe failed: {:?}", e))?;
 
@@ -331,12 +577,12 @@ impl PubSub {
         let server_pid =
             crate::whereis(pubsub).ok_or_else(|| format!("PubSub '{}' not found", pubsub))?;
 
-        let request = PubSubCall::Unsubscribe {
+        let request = Unsubscribe {
             topic: topic.to_string(),
             pid,
         };
 
-        crate::gen_server::call::<PubSub>(server_pid, request, Duration::from_secs(5))
+        call::<Unsubscribe, ()>(server_pid, request, Duration::from_secs(5))
             .await
             .map_err(|e| format!("unsubscribe failed: {:?}", e))?;
 
@@ -348,9 +594,9 @@ impl PubSub {
         let server_pid =
             crate::whereis(pubsub).ok_or_else(|| format!("PubSub '{}' not found", pubsub))?;
 
-        let request = PubSubCall::UnsubscribeAll { pid };
+        let request = UnsubscribeAll { pid };
 
-        crate::gen_server::call::<PubSub>(server_pid, request, Duration::from_secs(5))
+        call::<UnsubscribeAll, ()>(server_pid, request, Duration::from_secs(5))
             .await
             .map_err(|e| format!("unsubscribe_all failed: {:?}", e))?;
 
@@ -394,13 +640,13 @@ impl PubSub {
         let payload =
             postcard::to_allocvec(message).map_err(|e| format!("serialize failed: {}", e))?;
 
-        let cast_msg = PubSubCast::Broadcast {
+        let cast_msg = Broadcast {
             topic: topic.to_string(),
             payload,
             exclude,
         };
 
-        let _ = crate::gen_server::cast::<PubSub>(server_pid, cast_msg);
+        cast(server_pid, cast_msg);
         Ok(())
     }
 
@@ -437,13 +683,13 @@ impl PubSub {
         let payload =
             postcard::to_allocvec(message).map_err(|e| format!("serialize failed: {}", e))?;
 
-        let cast_msg = PubSubCast::LocalBroadcast {
+        let cast_msg = LocalBroadcast {
             topic: topic.to_string(),
             payload,
             exclude,
         };
 
-        let _ = crate::gen_server::cast::<PubSub>(server_pid, cast_msg);
+        cast(server_pid, cast_msg);
         Ok(())
     }
 
@@ -452,13 +698,13 @@ impl PubSub {
         let server_pid =
             crate::whereis(pubsub).ok_or_else(|| format!("PubSub '{}' not found", pubsub))?;
 
-        let request = PubSubCall::Subscribers {
+        let request = GetSubscribers {
             topic: topic.to_string(),
         };
 
-        match crate::gen_server::call::<PubSub>(server_pid, request, Duration::from_secs(5)).await {
-            Ok(PubSubReply::Subscribers(subs)) => Ok(subs),
-            Ok(_) => Err("unexpected reply".to_string()),
+        match call::<GetSubscribers, Subscribers>(server_pid, request, Duration::from_secs(5)).await
+        {
+            Ok(Subscribers(subs)) => Ok(subs),
             Err(e) => Err(format!("subscribers failed: {:?}", e)),
         }
     }
@@ -468,13 +714,14 @@ impl PubSub {
         let server_pid =
             crate::whereis(pubsub).ok_or_else(|| format!("PubSub '{}' not found", pubsub))?;
 
-        let request = PubSubCall::LocalSubscribers {
+        let request = GetLocalSubscribers {
             topic: topic.to_string(),
         };
 
-        match crate::gen_server::call::<PubSub>(server_pid, request, Duration::from_secs(5)).await {
-            Ok(PubSubReply::Subscribers(subs)) => Ok(subs),
-            Ok(_) => Err("unexpected reply".to_string()),
+        match call::<GetLocalSubscribers, Subscribers>(server_pid, request, Duration::from_secs(5))
+            .await
+        {
+            Ok(Subscribers(subs)) => Ok(subs),
             Err(e) => Err(format!("local_subscribers failed: {:?}", e)),
         }
     }

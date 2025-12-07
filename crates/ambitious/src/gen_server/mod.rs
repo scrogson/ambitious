@@ -1,67 +1,65 @@
-//! # ambitious-gen-server
+//! # GenServer Pattern
 //!
-//! GenServer pattern implementation for Ambitious.
+//! GenServer is a process abstraction for building stateful, message-driven actors.
+//! The struct IS the process - `init` constructs it, and handlers mutate it via `&mut self`.
 //!
-//! This crate provides the `GenServer` trait and related types for implementing
-//! request/response servers, mirroring Elixir's GenServer behavior.
+//! # Design
 //!
-//! # Overview
-//!
-//! A GenServer is a process that:
-//! - Maintains internal state
-//! - Handles synchronous calls (request/response)
-//! - Handles asynchronous casts (fire-and-forget)
-//! - Handles arbitrary info messages
+//! - **Typed message handlers**: `HandleCall<M>`, `HandleCast<M>`, `HandleInfo<M>` traits
+//! - **Clean result types**: `Init`, `Reply`, `Status` enums
+//! - **Self-as-state**: The struct implementing `GenServer` IS the state
 //!
 //! # Example
 //!
 //! ```ignore
-//! use ambitious_gen_server::{GenServer, InitResult, CallResult, CastResult, From};
-//! use serde::{Serialize, Deserialize};
+//! use ambitious::gen_server::*;
+//! use ambitious::{call, cast, Message};
 //!
-//! // Define a simple counter server
-//! struct Counter;
-//!
-//! #[derive(Serialize, Deserialize)]
-//! enum CounterCall {
-//!     Get,
-//!     Increment,
+//! struct Counter {
+//!     count: i64,
+//!     name: String,
 //! }
 //!
-//! #[derive(Serialize, Deserialize)]
-//! enum CounterCast {
-//!     Reset,
+//! struct CounterArgs {
+//!     initial: i64,
+//!     name: String,
 //! }
+//!
+//! // Messages
+//! #[derive(Message)]
+//! struct Get;
+//!
+//! #[derive(Message)]
+//! struct Increment;
 //!
 //! impl GenServer for Counter {
-//!     type State = i64;
-//!     type InitArg = i64;
-//!     type Call = CounterCall;
-//!     type Cast = CounterCast;
+//!     type Args = CounterArgs;
+//!
+//!     async fn init(args: CounterArgs) -> Init<Self> {
+//!         Init::Ok(Counter {
+//!             count: args.initial,
+//!             name: args.name,
+//!         })
+//!     }
+//! }
+//!
+//! #[call]
+//! impl HandleCall<Get> for Counter {
 //!     type Reply = i64;
+//!     type Output = Reply<i64>;
 //!
-//!     fn init(initial: i64) -> InitResult<i64> {
-//!         InitResult::ok(initial)
+//!     async fn handle_call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
+//!         Reply::Ok(self.count)
 //!     }
+//! }
 //!
-//!     fn handle_call(
-//!         request: CounterCall,
-//!         _from: From,
-//!         state: &mut i64,
-//!     ) -> CallResult<i64, i64> {
-//!         match request {
-//!             CounterCall::Get => CallResult::reply(*state, *state),
-//!             CounterCall::Increment => {
-//!                 *state += 1;
-//!                 CallResult::reply(*state, *state)
-//!             }
-//!         }
-//!     }
+//! #[cast]
+//! impl HandleCast<Increment> for Counter {
+//!     type Output = Status;
 //!
-//!     fn handle_cast(msg: CounterCast, state: &mut i64) -> CastResult<i64> {
-//!         match msg {
-//!             CounterCast::Reset => CastResult::noreply(0),
-//!         }
+//!     async fn handle_cast(&mut self, _msg: Increment) -> Status {
+//!         self.count += 1;
+//!         Status::Ok
 //!     }
 //! }
 //! ```
@@ -69,48 +67,39 @@
 //! # Client API
 //!
 //! ```ignore
-//! use ambitious_gen_server::{start, call, cast, stop};
-//! use std::time::Duration;
-//!
 //! // Start the server
-//! let pid = start::<Counter>(&handle, 0).await?;
+//! let pid = start::<Counter>(CounterArgs { initial: 0, name: "test".into() }).await?;
 //!
-//! // Make a synchronous call
-//! let value = call::<Counter>(&handle, &mut ctx, pid, CounterCall::Get, Duration::from_secs(5)).await?;
+//! // Make a typed call
+//! let count: i64 = call(pid, Get, Duration::from_secs(5)).await?;
 //!
-//! // Send an async cast
-//! cast::<Counter>(&handle, pid, CounterCast::Reset)?;
+//! // Send a typed cast
+//! cast(pid, Increment);
 //!
 //! // Stop the server
-//! stop(&handle, &mut ctx, pid, ExitReason::Normal, Duration::from_secs(5)).await?;
+//! stop(pid, ExitReason::Normal, Duration::from_secs(5)).await?;
 //! ```
 
 #![deny(warnings)]
 #![deny(missing_docs)]
 
-mod error;
+pub mod dispatch;
 mod protocol;
 mod server;
+mod traits;
 mod types;
 
-/// GenServer v2 - improved actor pattern with `&mut self` and typed messages.
-///
-/// This is the next generation GenServer implementation with:
-/// - `&mut self` style handlers (struct IS the process)
-/// - Typed message handlers (`Call<M>`, `Cast<M>`, `Info<M>`)
-/// - Clean result types (`Init`, `Reply`, `Status`)
-pub mod v2;
-
 pub use async_trait::async_trait;
-pub use error::{CallError, StartError, StopError};
-pub use server::{GenServer, call, cast, reply, start, start_link, stop};
-pub use types::{
-    CallResult, CastResult, ContinueArg, ContinueResult, From, InfoResult, InitResult,
-    NameResolver, ServerRef,
-};
+pub use protocol::From;
+pub use server::{Error, RawReply, call, call_raw, cast, cast_raw, reply, start, start_link, stop};
+pub use traits::{GenServer, HandleCall, HandleCast, HandleContinue, HandleInfo, HasHandlers};
+pub use types::{Init, Reply, Status};
 
-// Re-export commonly used types
+// Re-export core types for convenience
 pub use crate::core::{ExitReason, Pid, Ref, Term};
+
+// Re-export the register_handlers macro
+pub use crate::register_handlers;
 
 /// Prelude module for convenient imports.
 ///
@@ -120,297 +109,261 @@ pub use crate::core::{ExitReason, Pid, Ref, Term};
 /// ```
 pub mod prelude {
     pub use super::{
-        CallError, CallResult, CastResult, ContinueArg, ContinueResult, ExitReason, From,
-        GenServer, InfoResult, InitResult, Pid, StartError, StopError, async_trait, call, cast,
-        start, start_link, stop,
+        Error, ExitReason, From, GenServer, HandleCall, HandleCast, HandleContinue, HandleInfo,
+        HasHandlers, Init, Pid, RawReply, Reply, Status, async_trait, call, call_raw, cast,
+        cast_raw, register_handlers, start, start_link, stop,
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RawTerm;
+    use crate::core::DecodeError;
+    use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::Duration;
-    use tokio::time::sleep;
 
-    // A simple counter GenServer for testing
-    struct Counter;
+    // =========================================================================
+    // Counter Example - demonstrates HandleCall and HandleCast with Message trait
+    // =========================================================================
 
-    #[derive(Debug, Serialize, Deserialize)]
-    enum CounterCall {
-        Get,
-        Increment,
-        Add(i64),
+    /// A simple counter GenServer.
+    #[allow(dead_code)]
+    struct Counter {
+        count: i64,
+        name: String,
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
-    enum CounterCast {
-        Reset,
-        Set(i64),
+    /// Arguments for starting a Counter.
+    #[allow(dead_code)]
+    struct CounterArgs {
+        initial: i64,
+        name: String,
     }
+
+    // Message types with manual Message impl
+    // (derive macro generates ::ambitious:: paths which don't work inside the crate)
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Get;
+
+    impl Message for Get {
+        fn tag() -> &'static str {
+            "Get"
+        }
+        fn encode_local(&self) -> Vec<u8> {
+            encode_with_tag(Self::tag(), &[])
+        }
+        fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
+            Ok(Get)
+        }
+        fn encode_remote(&self) -> Vec<u8> {
+            self.encode_local()
+        }
+        fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+            Self::decode_local(bytes)
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Increment;
+
+    impl Message for Increment {
+        fn tag() -> &'static str {
+            "Increment"
+        }
+        fn encode_local(&self) -> Vec<u8> {
+            encode_with_tag(Self::tag(), &[])
+        }
+        fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
+            Ok(Increment)
+        }
+        fn encode_remote(&self) -> Vec<u8> {
+            self.encode_local()
+        }
+        fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+            Self::decode_local(bytes)
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Add(i64);
+
+    impl Message for Add {
+        fn tag() -> &'static str {
+            "Add"
+        }
+        fn encode_local(&self) -> Vec<u8> {
+            let payload = encode_payload(&self.0);
+            encode_with_tag(Self::tag(), &payload)
+        }
+        fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+            let inner = decode_payload(bytes)?;
+            Ok(Add(inner))
+        }
+        fn encode_remote(&self) -> Vec<u8> {
+            self.encode_local()
+        }
+        fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+            Self::decode_local(bytes)
+        }
+    }
+
+    // Register handlers for automatic dispatch
+    register_handlers!(Counter {
+        calls: [Get, Add],
+        casts: [Increment],
+    });
 
     #[async_trait]
     impl GenServer for Counter {
-        type State = i64;
-        type InitArg = i64;
-        type Call = CounterCall;
-        type Cast = CounterCast;
+        type Args = CounterArgs;
+
+        async fn init(args: CounterArgs) -> Init<Self> {
+            Init::Ok(Counter {
+                count: args.initial,
+                name: args.name,
+            })
+        }
+
+        // Override to use HasHandlers dispatch
+        async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
+            <Self as HasHandlers>::handle_call_dispatch(self, payload, from).await
+        }
+
+        async fn handle_cast_raw(&mut self, payload: Vec<u8>) -> Status {
+            <Self as HasHandlers>::handle_cast_dispatch(self, payload).await
+        }
+
+        async fn handle_info_raw(&mut self, payload: Vec<u8>) -> Status {
+            <Self as HasHandlers>::handle_info_dispatch(self, payload).await
+        }
+    }
+
+    #[async_trait]
+    impl HandleCall<Get> for Counter {
         type Reply = i64;
+        type Output = Reply<i64>;
 
-        async fn init(initial: i64) -> InitResult<i64> {
-            InitResult::ok(initial)
+        async fn handle_call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
+            Reply::Ok(self.count)
         }
+    }
 
-        async fn handle_call(
-            request: CounterCall,
-            _from: From,
-            state: &mut i64,
-        ) -> CallResult<i64, i64> {
-            match request {
-                CounterCall::Get => CallResult::reply(*state, *state),
-                CounterCall::Increment => {
-                    *state += 1;
-                    CallResult::reply(*state, *state)
-                }
-                CounterCall::Add(n) => {
-                    *state += n;
-                    CallResult::reply(*state, *state)
-                }
-            }
+    #[async_trait]
+    impl HandleCall<Add> for Counter {
+        type Reply = i64;
+        type Output = Reply<i64>;
+
+        async fn handle_call(&mut self, msg: Add, _from: From) -> Reply<i64> {
+            self.count += msg.0;
+            Reply::Ok(self.count)
         }
+    }
 
-        async fn handle_cast(msg: CounterCast, _state: &mut i64) -> CastResult<i64> {
-            match msg {
-                CounterCast::Reset => CastResult::noreply(0),
-                CounterCast::Set(n) => CastResult::noreply(n),
-            }
-        }
+    #[async_trait]
+    impl HandleCast<Increment> for Counter {
+        type Output = Status;
 
-        async fn handle_info(_msg: RawTerm, state: &mut i64) -> InfoResult<i64> {
-            CastResult::noreply(*state)
-        }
-
-        async fn handle_continue(_arg: ContinueArg, state: &mut i64) -> ContinueResult<i64> {
-            CastResult::noreply(*state)
+        async fn handle_cast(&mut self, _msg: Increment) -> Status {
+            self.count += 1;
+            Status::Ok
         }
     }
 
     #[tokio::test]
-    async fn test_start_gen_server() {
-        crate::process::global::init();
-        let handle = crate::process::global::handle();
+    async fn test_counter_call() {
+        crate::init();
+        let handle = crate::handle();
 
-        let pid = start::<Counter>(42).await.unwrap();
-        assert!(handle.alive(pid));
-
-        // Give it time to run
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    #[tokio::test]
-    async fn test_gen_server_call() {
-        crate::process::global::init();
-        let handle = crate::process::global::handle();
-
-        let server_pid = start::<Counter>(10).await.unwrap();
-
-        // Create a client process to make the call
         let result = Arc::new(AtomicI64::new(-1));
         let result_clone = result.clone();
 
-        let _client_pid = handle.spawn(move || async move {
-            // Make a call to get the current value
-            match call::<Counter>(server_pid, CounterCall::Get, Duration::from_secs(5)).await {
-                Ok(value) => {
-                    result_clone.store(value, Ordering::SeqCst);
-                }
-                Err(_) => {
-                    result_clone.store(-999, Ordering::SeqCst);
-                }
-            }
+        // Run test in a process context
+        handle.spawn(move || async move {
+            // Start the counter
+            let pid = start::<Counter>(CounterArgs {
+                initial: 42,
+                name: "test".into(),
+            })
+            .await
+            .expect("failed to start counter");
+
+            // Make a call to get the count using typed call
+            let count: i64 = call(pid, Get, Duration::from_secs(5))
+                .await
+                .expect("call failed");
+
+            result_clone.store(count, Ordering::SeqCst);
         });
 
-        // Wait for the call to complete
-        sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(result.load(Ordering::SeqCst), 10);
+        // Wait for test to complete
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(result.load(Ordering::SeqCst), 42);
     }
 
     #[tokio::test]
-    async fn test_gen_server_cast() {
-        crate::process::global::init();
-        let handle = crate::process::global::handle();
+    async fn test_counter_cast_and_call() {
+        crate::init();
+        let handle = crate::handle();
 
-        let server_pid = start::<Counter>(10).await.unwrap();
-
-        // Send a cast to reset the counter
-        cast::<Counter>(server_pid, CounterCast::Reset).unwrap();
-
-        // Give it time to process
-        sleep(Duration::from_millis(50)).await;
-
-        // Verify by making a call
         let result = Arc::new(AtomicI64::new(-1));
         let result_clone = result.clone();
 
-        let _client_pid = handle.spawn(move || async move {
-            if let Ok(value) =
-                call::<Counter>(server_pid, CounterCall::Get, Duration::from_secs(5)).await
-            {
-                result_clone.store(value, Ordering::SeqCst);
-            }
+        handle.spawn(move || async move {
+            let pid = start::<Counter>(CounterArgs {
+                initial: 0,
+                name: "test".into(),
+            })
+            .await
+            .expect("failed to start counter");
+
+            // Cast increment a few times using typed cast
+            cast(pid, Increment);
+            cast(pid, Increment);
+            cast(pid, Increment);
+
+            // Give casts time to process
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Get the count using typed call
+            let count: i64 = call(pid, Get, Duration::from_secs(5))
+                .await
+                .expect("call failed");
+
+            result_clone.store(count, Ordering::SeqCst);
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(result.load(Ordering::SeqCst), 0);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(result.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn test_init_stop() {
-        struct StoppingServer;
+    async fn test_counter_add() {
+        crate::init();
+        let handle = crate::handle();
 
-        #[async_trait]
-        impl GenServer for StoppingServer {
-            type State = ();
-            type InitArg = bool;
-            type Call = ();
-            type Cast = ();
-            type Reply = ();
+        let result = Arc::new(AtomicI64::new(-1));
+        let result_clone = result.clone();
 
-            async fn init(should_stop: bool) -> InitResult<()> {
-                if should_stop {
-                    InitResult::stop(ExitReason::error("init failed"))
-                } else {
-                    InitResult::ok(())
-                }
-            }
+        handle.spawn(move || async move {
+            let pid = start::<Counter>(CounterArgs {
+                initial: 10,
+                name: "test".into(),
+            })
+            .await
+            .expect("failed to start counter");
 
-            async fn handle_call(_: (), _: From, _: &mut ()) -> CallResult<(), ()> {
-                CallResult::reply((), ())
-            }
+            // Add 5 using typed call
+            let count: i64 = call(pid, Add(5), Duration::from_secs(5))
+                .await
+                .expect("call failed");
 
-            async fn handle_cast(_: (), _: &mut ()) -> CastResult<()> {
-                CastResult::noreply(())
-            }
-
-            async fn handle_info(_: RawTerm, _: &mut ()) -> InfoResult<()> {
-                CastResult::noreply(())
-            }
-
-            async fn handle_continue(_: ContinueArg, _: &mut ()) -> ContinueResult<()> {
-                CastResult::noreply(())
-            }
-        }
-
-        crate::process::global::init();
-
-        // Should start successfully
-        let pid = start::<StoppingServer>(false).await;
-        assert!(pid.is_ok());
-
-        // Should fail to start
-        let result = start::<StoppingServer>(true).await;
-        assert!(matches!(result, Err(StartError::Stop(_))));
-    }
-
-    #[tokio::test]
-    async fn test_init_ignore() {
-        struct IgnoringServer;
-
-        #[async_trait]
-        impl GenServer for IgnoringServer {
-            type State = ();
-            type InitArg = ();
-            type Call = ();
-            type Cast = ();
-            type Reply = ();
-
-            async fn init(_: ()) -> InitResult<()> {
-                InitResult::ignore()
-            }
-
-            async fn handle_call(_: (), _: From, _: &mut ()) -> CallResult<(), ()> {
-                CallResult::reply((), ())
-            }
-
-            async fn handle_cast(_: (), _: &mut ()) -> CastResult<()> {
-                CastResult::noreply(())
-            }
-
-            async fn handle_info(_: RawTerm, _: &mut ()) -> InfoResult<()> {
-                CastResult::noreply(())
-            }
-
-            async fn handle_continue(_: ContinueArg, _: &mut ()) -> ContinueResult<()> {
-                CastResult::noreply(())
-            }
-        }
-
-        crate::process::global::init();
-
-        let result = start::<IgnoringServer>(()).await;
-        assert!(matches!(result, Err(StartError::Ignore)));
-    }
-
-    #[tokio::test]
-    async fn test_terminate_callback() {
-        static TERMINATED: AtomicI64 = AtomicI64::new(0);
-
-        struct TerminatingServer;
-
-        #[async_trait]
-        impl GenServer for TerminatingServer {
-            type State = i64;
-            type InitArg = i64;
-            type Call = bool; // true = stop
-            type Cast = ();
-            type Reply = ();
-
-            async fn init(v: i64) -> InitResult<i64> {
-                InitResult::ok(v)
-            }
-
-            async fn handle_call(stop: bool, _: From, state: &mut i64) -> CallResult<i64, ()> {
-                if stop {
-                    CallResult::stop(ExitReason::Normal, (), *state)
-                } else {
-                    CallResult::reply((), *state)
-                }
-            }
-
-            async fn handle_cast(_: (), state: &mut i64) -> CastResult<i64> {
-                CastResult::noreply(*state)
-            }
-
-            async fn handle_info(_: RawTerm, state: &mut i64) -> InfoResult<i64> {
-                CastResult::noreply(*state)
-            }
-
-            async fn handle_continue(_: ContinueArg, state: &mut i64) -> ContinueResult<i64> {
-                CastResult::noreply(*state)
-            }
-
-            async fn terminate(_reason: ExitReason, state: &mut i64) {
-                TERMINATED.store(*state, Ordering::SeqCst);
-            }
-        }
-
-        crate::process::global::init();
-        let handle = crate::process::global::handle();
-
-        let server_pid = start::<TerminatingServer>(42).await.unwrap();
-
-        // Send a call that stops the server
-        let _client_pid = handle.spawn(move || async move {
-            let _ = call::<TerminatingServer>(server_pid, true, Duration::from_secs(5)).await;
+            result_clone.store(count, Ordering::SeqCst);
         });
 
-        sleep(Duration::from_millis(100)).await;
-
-        assert_eq!(TERMINATED.load(Ordering::SeqCst), 42);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(result.load(Ordering::SeqCst), 15);
     }
 }

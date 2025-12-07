@@ -309,26 +309,6 @@ where
     }
 }
 
-// Implement NameResolver for Registry<Vec<u8>, V> so it can be used with ServerRef::via()
-// Keys are stored as serialized bytes, allowing any Term type to be used as a key.
-impl<V> crate::gen_server::NameResolver for Registry<Vec<u8>, V>
-where
-    V: Clone + Send + Sync + Default + 'static,
-{
-    fn whereis_term(&self, key: &[u8]) -> Option<Pid> {
-        self.lookup_one(&key.to_vec()).map(|(pid, _)| pid)
-    }
-
-    fn register_term(&self, key: &[u8], pid: Pid) -> bool {
-        self.register(key.to_vec(), pid, V::default()).is_ok()
-    }
-
-    fn unregister_term(&self, key: &[u8]) {
-        // Remove all entries for this key
-        self.entries.remove(&key.to_vec());
-    }
-}
-
 /// Errors that can occur during registry operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {

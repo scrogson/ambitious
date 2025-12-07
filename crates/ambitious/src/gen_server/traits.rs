@@ -1,12 +1,12 @@
-//! GenServer v2 traits.
+//! GenServer traits.
 //!
 //! The struct IS the process. `init` constructs it, handlers mutate it via `&mut self`.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use ambitious::gen_server::v2::*;
-//! use ambitious::Message;
+//! use ambitious::gen_server::*;
+//! use ambitious::{call, Message};
 //!
 //! #[derive(Message)]
 //! struct Get;
@@ -23,19 +23,15 @@
 //!     }
 //! }
 //!
-//! #[async_trait]
-//! impl Call<Get> for Counter {
+//! #[call]
+//! impl HandleCall<Get> for Counter {
 //!     type Reply = i64;
+//!     type Output = Reply<i64>;
 //!
-//!     async fn call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
+//!     async fn handle_call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
 //!         Reply::Ok(self.count)
 //!     }
 //! }
-//!
-//! // Register handlers for automatic dispatch
-//! register_handlers!(Counter {
-//!     calls: [Get],
-//! });
 //! ```
 
 use super::dispatch::HandlerRegistry;
@@ -68,7 +64,7 @@ pub trait GenServer: Sized + Send + 'static {
 
     /// Handle a raw call message.
     ///
-    /// Override this to dispatch to typed `Call<M>` handlers.
+    /// Override this to dispatch to typed `HandleCall<M>` handlers.
     /// The default implementation returns an error.
     async fn handle_call_raw(&mut self, _payload: Vec<u8>, _from: From) -> RawReply {
         RawReply::StopNoReply(ExitReason::Error("handle_call not implemented".into()))
@@ -76,7 +72,7 @@ pub trait GenServer: Sized + Send + 'static {
 
     /// Handle a raw cast message.
     ///
-    /// Override this to dispatch to typed `Cast<M>` handlers.
+    /// Override this to dispatch to typed `HandleCast<M>` handlers.
     /// The default implementation ignores the message.
     async fn handle_cast_raw(&mut self, _payload: Vec<u8>) -> Status {
         Status::Ok
@@ -84,7 +80,7 @@ pub trait GenServer: Sized + Send + 'static {
 
     /// Handle a raw info message.
     ///
-    /// Override this to dispatch to typed `Info<M>` handlers.
+    /// Override this to dispatch to typed `HandleInfo<M>` handlers.
     /// The default implementation ignores the message.
     async fn handle_info_raw(&mut self, _msg: Vec<u8>) -> Status {
         Status::Ok
@@ -98,11 +94,11 @@ pub trait GenServer: Sized + Send + 'static {
         Status::Ok
     }
 
-    /// Handle a continue message.
+    /// Handle a raw continue message.
     ///
-    /// Override this if you use `Init::Continue` or `Status::Continue`.
+    /// Override this to dispatch to typed `HandleContinue<M>` handlers.
     /// The default implementation does nothing.
-    async fn handle_continue(&mut self, _arg: Vec<u8>) -> Status {
+    async fn handle_continue_raw(&mut self, _arg: Vec<u8>) -> Status {
         Status::Ok
     }
 }
@@ -122,21 +118,23 @@ pub trait GenServer: Sized + Send + 'static {
 /// struct GetCount;
 ///
 /// // Simple handler - returns Reply directly
-/// impl Call<GetCount> for Counter {
+/// #[call]
+/// impl HandleCall<GetCount> for Counter {
 ///     type Reply = i64;
 ///     type Output = Reply<i64>;
 ///
-///     async fn call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
+///     async fn handle_call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
 ///         Reply::Ok(self.count)
 ///     }
 /// }
 ///
 /// // Fallible handler - returns Result for ? operator support
-/// impl Call<FetchData> for DataServer {
+/// #[call]
+/// impl HandleCall<FetchData> for DataServer {
 ///     type Reply = Data;
 ///     type Output = Result<Reply<Data>, MyError>;
 ///
-///     async fn call(&mut self, _msg: FetchData, _from: From) -> Result<Reply<Data>, MyError> {
+///     async fn handle_call(&mut self, _msg: FetchData, _from: From) -> Result<Reply<Data>, MyError> {
 ///         let raw = self.db.fetch()?;  // Uses ? operator
 ///         let data = parse(raw)?;
 ///         Ok(Reply::Ok(data))
@@ -144,7 +142,7 @@ pub trait GenServer: Sized + Send + 'static {
 /// }
 /// ```
 #[async_trait]
-pub trait Call<M: Send + 'static>: GenServer {
+pub trait HandleCall<M: Send + 'static>: GenServer {
     /// The type returned to the caller.
     type Reply: Send + 'static;
 
@@ -153,7 +151,7 @@ pub trait Call<M: Send + 'static>: GenServer {
     type Output: Into<Reply<Self::Reply>> + Send;
 
     /// Handle the call message and return a reply.
-    async fn call(&mut self, msg: M, from: From) -> Self::Output;
+    async fn handle_call(&mut self, msg: M, from: From) -> Self::Output;
 }
 
 /// Handle an asynchronous cast (fire-and-forget pattern).
@@ -171,32 +169,34 @@ pub trait Call<M: Send + 'static>: GenServer {
 /// struct Increment;
 ///
 /// // Simple handler
-/// impl Cast<Increment> for Counter {
+/// #[cast]
+/// impl HandleCast<Increment> for Counter {
 ///     type Output = Status;
 ///
-///     async fn cast(&mut self, _msg: Increment) -> Status {
+///     async fn handle_cast(&mut self, _msg: Increment) -> Status {
 ///         self.count += 1;
 ///         Status::Ok
 ///     }
 /// }
 ///
 /// // Fallible handler
-/// impl Cast<ProcessData> for DataServer {
+/// #[cast]
+/// impl HandleCast<ProcessData> for DataServer {
 ///     type Output = Result<Status, MyError>;
 ///
-///     async fn cast(&mut self, msg: ProcessData) -> Result<Status, MyError> {
+///     async fn handle_cast(&mut self, msg: ProcessData) -> Result<Status, MyError> {
 ///         self.process(msg.data)?;
 ///         Ok(Status::Ok)
 ///     }
 /// }
 /// ```
 #[async_trait]
-pub trait Cast<M: Send + 'static>: GenServer {
+pub trait HandleCast<M: Send + 'static>: GenServer {
     /// The return type of the handler. Can be `Status` or `Result<Status, E>`.
     type Output: Into<Status> + Send;
 
     /// Handle the cast message.
-    async fn cast(&mut self, msg: M) -> Self::Output;
+    async fn handle_cast(&mut self, msg: M) -> Self::Output;
 }
 
 /// Handle info messages (system messages, timers, monitors, etc.).
@@ -214,22 +214,66 @@ pub trait Cast<M: Send + 'static>: GenServer {
 /// ```ignore
 /// struct Tick;
 ///
-/// impl Info<Tick> for Counter {
+/// #[info]
+/// impl HandleInfo<Tick> for Counter {
 ///     type Output = Status;
 ///
-///     async fn info(&mut self, _msg: Tick) -> Status {
+///     async fn handle_info(&mut self, _msg: Tick) -> Status {
 ///         println!("tick at {}", self.count);
 ///         Status::Timeout(Duration::from_secs(1))
 ///     }
 /// }
 /// ```
 #[async_trait]
-pub trait Info<M: Send + 'static>: GenServer {
+pub trait HandleInfo<M: Send + 'static>: GenServer {
     /// The return type of the handler. Can be `Status` or `Result<Status, E>`.
     type Output: Into<Status> + Send;
 
     /// Handle the info message.
-    async fn info(&mut self, msg: M) -> Self::Output;
+    async fn handle_info(&mut self, msg: M) -> Self::Output;
+}
+
+/// Handle continue messages (for multi-step initialization or deferred work).
+///
+/// Implement this trait for each continue message type your GenServer handles.
+/// Continue messages are triggered by returning `Init::Continue` or `Status::Continue`.
+///
+/// The `Output` associated type allows returning either:
+/// - `Status` - Direct status
+/// - `Result<Status, E>` - Errors stop the process (Erlang "let it crash")
+///
+/// # Example
+///
+/// ```ignore
+/// struct SetupDatabase;
+///
+/// impl GenServer for MyServer {
+///     type Args = Config;
+///
+///     async fn init(config: Config) -> Init<Self> {
+///         // Start immediately, defer heavy setup to handle_continue
+///         Init::Continue(MyServer { config }, SetupDatabase.encode_local())
+///     }
+/// }
+///
+/// #[cont]
+/// impl HandleContinue<SetupDatabase> for MyServer {
+///     type Output = Status;
+///
+///     async fn handle_continue(&mut self, _msg: SetupDatabase) -> Status {
+///         // Do heavy initialization here
+///         self.db = Database::connect(&self.config.db_url).await;
+///         Status::Ok
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait HandleContinue<M: Send + 'static>: GenServer {
+    /// The return type of the handler. Can be `Status` or `Result<Status, E>`.
+    type Output: Into<Status> + Send;
+
+    /// Handle the continue message.
+    async fn handle_continue(&mut self, msg: M) -> Self::Output;
 }
 
 /// Trait for GenServers with registered handlers.
@@ -264,6 +308,12 @@ pub trait HasHandlers: GenServer {
 
     /// Dispatch an info message using the registry.
     fn handle_info_dispatch(
+        server: &mut Self,
+        payload: Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Status> + Send + '_>>;
+
+    /// Dispatch a continue message using the registry.
+    fn handle_continue_dispatch(
         server: &mut Self,
         payload: Vec<u8>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Status> + Send + '_>>;

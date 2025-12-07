@@ -6,8 +6,8 @@
 //!
 //! # How It Works
 //!
-//! 1. Each `Call<M>`, `Cast<M>`, `Info<M>` impl is annotated with an attribute
-//!    macro (`#[call]`, `#[cast]`, `#[info]`) that registers a handler entry.
+//! 1. Each `HandleCall<M>`, `HandleCast<M>`, `HandleInfo<M>` impl is annotated with an
+//!    attribute macro (`#[call]`, `#[cast]`, `#[info]`) that registers a handler entry.
 //!
 //! 2. Handler entries are collected at link time using the `linkme` crate.
 //!
@@ -17,15 +17,14 @@
 //! # Example
 //!
 //! ```ignore
-//! use ambitious::gen_server::v2::*;
-//! use ambitious::Message;
+//! use ambitious::gen_server::*;
+//! use ambitious::{call, Message};
 //!
 //! #[derive(Message)]
 //! struct GetCount;
 //!
 //! struct Counter { count: i64 }
 //!
-//! #[async_trait]
 //! impl GenServer for Counter {
 //!     type Args = i64;
 //!     async fn init(initial: i64) -> Init<Self> {
@@ -35,12 +34,11 @@
 //!
 //! // The #[call] attribute registers this handler automatically
 //! #[call]
-//! #[async_trait]
-//! impl Call<GetCount> for Counter {
+//! impl HandleCall<GetCount> for Counter {
 //!     type Reply = i64;
 //!     type Output = Reply<i64>;
 //!
-//!     async fn call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
+//!     async fn handle_call(&mut self, _msg: GetCount, _from: From) -> Reply<i64> {
 //!         Reply::Ok(self.count)
 //!     }
 //! }
@@ -71,12 +69,16 @@ pub type AnyCallDispatchFn = for<'a> fn(
 ) -> Pin<Box<dyn Future<Output = RawReply> + Send + 'a>>;
 
 /// Type-erased async dispatch function for cast handlers.
-pub type AnyCastDispatchFn =
-    for<'a> fn(&'a mut (dyn Any + Send), &'a [u8]) -> Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
+pub type AnyCastDispatchFn = for<'a> fn(
+    &'a mut (dyn Any + Send),
+    &'a [u8],
+) -> Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
 
 /// Type-erased async dispatch function for info handlers.
-pub type AnyInfoDispatchFn =
-    for<'a> fn(&'a mut (dyn Any + Send), &'a [u8]) -> Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
+pub type AnyInfoDispatchFn = for<'a> fn(
+    &'a mut (dyn Any + Send),
+    &'a [u8],
+) -> Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
 
 // =============================================================================
 // Handler Entry Types (stored in distributed slices)
@@ -210,13 +212,16 @@ pub async fn dispatch_call<G: Send + 'static>(
 
     // We need to find a handler with a matching tag (static str comparison)
     // Since we store &'static str, we need to iterate to find a match
-    let dispatch = registry.calls.iter().find_map(|((tid, msg_tag), dispatch)| {
-        if *tid == type_id && *msg_tag == tag {
-            Some(*dispatch)
-        } else {
-            None
-        }
-    });
+    let dispatch = registry
+        .calls
+        .iter()
+        .find_map(|((tid, msg_tag), dispatch)| {
+            if *tid == type_id && *msg_tag == tag {
+                Some(*dispatch)
+            } else {
+                None
+            }
+        });
 
     if let Some(dispatch) = dispatch {
         Some(dispatch(server as &mut (dyn Any + Send), payload, from).await)
@@ -228,17 +233,24 @@ pub async fn dispatch_call<G: Send + 'static>(
 /// Dispatch a cast message to the appropriate handler.
 ///
 /// Returns `Some(status)` if a handler was found, `None` otherwise.
-pub async fn dispatch_cast<G: Send + 'static>(server: &mut G, tag: &str, payload: &[u8]) -> Option<Status> {
+pub async fn dispatch_cast<G: Send + 'static>(
+    server: &mut G,
+    tag: &str,
+    payload: &[u8],
+) -> Option<Status> {
     let registry = global_registry();
     let type_id = TypeId::of::<G>();
 
-    let dispatch = registry.casts.iter().find_map(|((tid, msg_tag), dispatch)| {
-        if *tid == type_id && *msg_tag == tag {
-            Some(*dispatch)
-        } else {
-            None
-        }
-    });
+    let dispatch = registry
+        .casts
+        .iter()
+        .find_map(|((tid, msg_tag), dispatch)| {
+            if *tid == type_id && *msg_tag == tag {
+                Some(*dispatch)
+            } else {
+                None
+            }
+        });
 
     if let Some(dispatch) = dispatch {
         Some(dispatch(server as &mut (dyn Any + Send), payload).await)
@@ -250,17 +262,24 @@ pub async fn dispatch_cast<G: Send + 'static>(server: &mut G, tag: &str, payload
 /// Dispatch an info message to the appropriate handler.
 ///
 /// Returns `Some(status)` if a handler was found, `None` otherwise.
-pub async fn dispatch_info<G: Send + 'static>(server: &mut G, tag: &str, payload: &[u8]) -> Option<Status> {
+pub async fn dispatch_info<G: Send + 'static>(
+    server: &mut G,
+    tag: &str,
+    payload: &[u8],
+) -> Option<Status> {
     let registry = global_registry();
     let type_id = TypeId::of::<G>();
 
-    let dispatch = registry.infos.iter().find_map(|((tid, msg_tag), dispatch)| {
-        if *tid == type_id && *msg_tag == tag {
-            Some(*dispatch)
-        } else {
-            None
-        }
-    });
+    let dispatch = registry
+        .infos
+        .iter()
+        .find_map(|((tid, msg_tag), dispatch)| {
+            if *tid == type_id && *msg_tag == tag {
+                Some(*dispatch)
+            } else {
+                None
+            }
+        });
 
     if let Some(dispatch) = dispatch {
         Some(dispatch(server as &mut (dyn Any + Send), payload).await)
@@ -318,6 +337,10 @@ pub struct InfoHandler<G: 'static> {
 unsafe impl<G: 'static> Send for InfoHandler<G> {}
 unsafe impl<G: 'static> Sync for InfoHandler<G> {}
 
+/// Type-erased async dispatch function for continue handlers (typed version).
+pub type ContinueDispatchFn<G> =
+    for<'a> fn(&'a mut G, &'a [u8]) -> Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
+
 /// Registry of handlers for a specific GenServer type.
 ///
 /// This is used by the `register_handlers!` macro for backwards compatibility.
@@ -325,6 +348,7 @@ pub struct HandlerRegistry<G: 'static> {
     calls: HashMap<&'static str, CallDispatchFn<G>>,
     casts: HashMap<&'static str, CastDispatchFn<G>>,
     infos: HashMap<&'static str, InfoDispatchFn<G>>,
+    continues: HashMap<&'static str, ContinueDispatchFn<G>>,
 }
 
 impl<G: 'static> HandlerRegistry<G> {
@@ -334,6 +358,7 @@ impl<G: 'static> HandlerRegistry<G> {
             calls: HashMap::new(),
             casts: HashMap::new(),
             infos: HashMap::new(),
+            continues: HashMap::new(),
         }
     }
 
@@ -350,6 +375,11 @@ impl<G: 'static> HandlerRegistry<G> {
     /// Register an info handler.
     pub fn register_info(&mut self, tag: &'static str, dispatch: InfoDispatchFn<G>) {
         self.infos.insert(tag, dispatch);
+    }
+
+    /// Register a continue handler.
+    pub fn register_continue(&mut self, tag: &'static str, dispatch: ContinueDispatchFn<G>) {
+        self.continues.insert(tag, dispatch);
     }
 
     /// Dispatch a call message to the appropriate handler.
@@ -379,6 +409,15 @@ impl<G: 'static> HandlerRegistry<G> {
     /// Dispatch an info message to the appropriate handler.
     pub async fn dispatch_info(&self, server: &mut G, tag: &str, payload: &[u8]) -> Status {
         if let Some(dispatch) = self.infos.get(tag) {
+            dispatch(server, payload).await
+        } else {
+            Status::Ok
+        }
+    }
+
+    /// Dispatch a continue message to the appropriate handler.
+    pub async fn dispatch_continue(&self, server: &mut G, tag: &str, payload: &[u8]) -> Status {
+        if let Some(dispatch) = self.continues.get(tag) {
             dispatch(server, payload).await
         } else {
             Status::Ok
@@ -415,78 +454,78 @@ pub fn reply_to_raw<T: Message>(reply: super::types::Reply<T>) -> RawReply {
 // Legacy Macros (for backwards compatibility with register_handlers!)
 // =============================================================================
 
-/// Macro to create a dispatch function for a Call handler.
+/// Macro to create a dispatch function for a HandleCall handler.
 ///
 /// This is used by the `register_handlers!` macro.
 #[macro_export]
 macro_rules! call_dispatch_fn {
     ($server:ty, $msg:ty, $reply:ty) => {
-        |server: &mut $server, payload: &[u8], from: $crate::gen_server::v2::From| {
+        |server: &mut $server, payload: &[u8], from: $crate::gen_server::From| {
             Box::pin(async move {
-                use $crate::gen_server::v2::Call;
+                use $crate::gen_server::HandleCall;
                 use $crate::message::Message;
 
                 let msg = match <$msg>::decode_local(payload) {
                     Ok(m) => m,
                     Err(e) => {
-                        return $crate::gen_server::v2::RawReply::StopNoReply(
+                        return $crate::gen_server::RawReply::StopNoReply(
                             $crate::core::ExitReason::Error(format!("decode error: {}", e)),
                         );
                     }
                 };
 
-                let result = <$server as Call<$msg>>::call(server, msg, from).await;
-                let reply: $crate::gen_server::v2::Reply<_> = result.into();
-                $crate::gen_server::v2::dispatch::reply_to_raw(reply)
+                let result = <$server as HandleCall<$msg>>::handle_call(server, msg, from).await;
+                let reply: $crate::gen_server::Reply<_> = result.into();
+                $crate::gen_server::dispatch::reply_to_raw(reply)
             })
         }
     };
 }
 
-/// Macro to create a dispatch function for a Cast handler.
+/// Macro to create a dispatch function for a HandleCast handler.
 #[macro_export]
 macro_rules! cast_dispatch_fn {
     ($server:ty, $msg:ty) => {
         |server: &mut $server, payload: &[u8]| {
             Box::pin(async move {
-                use $crate::gen_server::v2::Cast;
+                use $crate::gen_server::HandleCast;
                 use $crate::message::Message;
 
                 let msg = match <$msg>::decode_local(payload) {
                     Ok(m) => m,
                     Err(e) => {
-                        return $crate::gen_server::v2::Status::Stop(
-                            $crate::core::ExitReason::Error(format!("decode error: {}", e)),
-                        );
+                        return $crate::gen_server::Status::Stop($crate::core::ExitReason::Error(
+                            format!("decode error: {}", e),
+                        ));
                     }
                 };
 
-                let result = <$server as Cast<$msg>>::cast(server, msg).await;
+                let result = <$server as HandleCast<$msg>>::handle_cast(server, msg).await;
                 result.into()
             })
         }
     };
 }
 
-/// Macro to create a dispatch function for an Info handler.
+/// Macro to create a dispatch function for a HandleInfo handler.
 #[macro_export]
 macro_rules! info_dispatch_fn {
     ($server:ty, $msg:ty) => {
         |server: &mut $server, payload: &[u8]| {
             Box::pin(async move {
-                use $crate::gen_server::v2::Info;
+                use $crate::gen_server::HandleInfo;
                 use $crate::message::Message;
 
                 let msg = match <$msg>::decode_local(payload) {
                     Ok(m) => m,
                     Err(e) => {
-                        return $crate::gen_server::v2::Status::Stop(
-                            $crate::core::ExitReason::Error(format!("decode error: {}", e)),
-                        );
+                        return $crate::gen_server::Status::Stop($crate::core::ExitReason::Error(
+                            format!("decode error: {}", e),
+                        ));
                     }
                 };
 
-                let result = <$server as Info<$msg>>::info(server, msg).await;
+                let result = <$server as HandleInfo<$msg>>::handle_info(server, msg).await;
                 result.into()
             })
         }
@@ -509,21 +548,22 @@ macro_rules! info_dispatch_fn {
 /// ```
 ///
 /// With this macro, you don't need to implement `handle_call_raw` or `handle_cast_raw`
-/// manually. Just implement `GenServer::init` and your `Call<M>`, `Cast<M>`, `Info<M>` handlers.
+/// manually. Just implement `GenServer::init` and your `HandleCall<M>`, `HandleCast<M>`,
+/// `HandleInfo<M>` handlers.
 ///
 /// **Note:** Consider using the `#[call]`, `#[cast]`, `#[info]` attribute macros instead,
 /// which eliminate the need for this macro entirely.
 #[macro_export]
 macro_rules! register_handlers {
     ($server:ty {
-        $(calls: [$($call_msg:ty),* $(,)?],)?
-        $(casts: [$($cast_msg:ty),* $(,)?],)?
-        $(infos: [$($info_msg:ty),* $(,)?],)?
+        $(calls: [$($call_msg:ty),* $(,)?] $(,)?)?
+        $(casts: [$($cast_msg:ty),* $(,)?] $(,)?)?
+        $(infos: [$($info_msg:ty),* $(,)?] $(,)?)?
     }) => {
         // Implement HasHandlers for legacy compatibility
-        impl $crate::gen_server::v2::HasHandlers for $server {
-            fn registry() -> &'static $crate::gen_server::v2::dispatch::HandlerRegistry<Self> {
-                use $crate::gen_server::v2::dispatch::HandlerRegistry;
+        impl $crate::gen_server::HasHandlers for $server {
+            fn registry() -> &'static $crate::gen_server::dispatch::HandlerRegistry<Self> {
+                use $crate::gen_server::dispatch::HandlerRegistry;
                 use $crate::message::Message;
                 use std::sync::OnceLock;
 
@@ -535,7 +575,7 @@ macro_rules! register_handlers {
                     $($(
                         registry.register_call(
                             <$call_msg>::tag(),
-                            $crate::call_dispatch_fn!($server, $call_msg, <$server as $crate::gen_server::v2::Call<$call_msg>>::Reply)
+                            $crate::call_dispatch_fn!($server, $call_msg, <$server as $crate::gen_server::HandleCall<$call_msg>>::Reply)
                         );
                     )*)?
 
@@ -560,19 +600,19 @@ macro_rules! register_handlers {
             fn handle_call_dispatch(
                 server: &mut Self,
                 payload: Vec<u8>,
-                from: $crate::gen_server::v2::From,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::v2::RawReply> + Send + '_>> {
+                from: $crate::gen_server::From,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::RawReply> + Send + '_>> {
                 Box::pin(async move {
                     use $crate::message::decode_tag;
                     let (tag, msg_payload) = match decode_tag(&payload) {
                         Ok((t, p)) => (t, p),
                         Err(_) => {
-                            return $crate::gen_server::v2::RawReply::StopNoReply(
+                            return $crate::gen_server::RawReply::StopNoReply(
                                 $crate::core::ExitReason::Error("decode error".into())
                             );
                         }
                     };
-                    <Self as $crate::gen_server::v2::HasHandlers>::registry()
+                    <Self as $crate::gen_server::HasHandlers>::registry()
                         .dispatch_call(server, tag, msg_payload, from)
                         .await
                 })
@@ -581,18 +621,18 @@ macro_rules! register_handlers {
             fn handle_cast_dispatch(
                 server: &mut Self,
                 payload: Vec<u8>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::v2::Status> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::Status> + Send + '_>> {
                 Box::pin(async move {
                     use $crate::message::decode_tag;
                     let (tag, msg_payload) = match decode_tag(&payload) {
                         Ok((t, p)) => (t, p),
                         Err(_) => {
-                            return $crate::gen_server::v2::Status::Stop(
+                            return $crate::gen_server::Status::Stop(
                                 $crate::core::ExitReason::Error("decode error".into())
                             );
                         }
                     };
-                    <Self as $crate::gen_server::v2::HasHandlers>::registry()
+                    <Self as $crate::gen_server::HasHandlers>::registry()
                         .dispatch_cast(server, tag, msg_payload)
                         .await
                 })
@@ -601,17 +641,35 @@ macro_rules! register_handlers {
             fn handle_info_dispatch(
                 server: &mut Self,
                 payload: Vec<u8>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::v2::Status> + Send + '_>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::Status> + Send + '_>> {
                 Box::pin(async move {
                     use $crate::message::decode_tag;
                     let (tag, msg_payload) = match decode_tag(&payload) {
                         Ok((t, p)) => (t, p),
                         Err(_) => {
-                            return $crate::gen_server::v2::Status::Ok;
+                            return $crate::gen_server::Status::Ok;
                         }
                     };
-                    <Self as $crate::gen_server::v2::HasHandlers>::registry()
+                    <Self as $crate::gen_server::HasHandlers>::registry()
                         .dispatch_info(server, tag, msg_payload)
+                        .await
+                })
+            }
+
+            fn handle_continue_dispatch(
+                server: &mut Self,
+                payload: Vec<u8>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::gen_server::Status> + Send + '_>> {
+                Box::pin(async move {
+                    use $crate::message::decode_tag;
+                    let (tag, msg_payload) = match decode_tag(&payload) {
+                        Ok((t, p)) => (t, p),
+                        Err(_) => {
+                            return $crate::gen_server::Status::Ok;
+                        }
+                    };
+                    <Self as $crate::gen_server::HasHandlers>::registry()
+                        .dispatch_continue(server, tag, msg_payload)
                         .await
                 })
             }
@@ -623,25 +681,25 @@ macro_rules! register_handlers {
             pub async fn _gen_server_handle_call_raw(
                 &mut self,
                 payload: Vec<u8>,
-                from: $crate::gen_server::v2::From,
-            ) -> $crate::gen_server::v2::RawReply {
-                <Self as $crate::gen_server::v2::HasHandlers>::handle_call_dispatch(self, payload, from).await
+                from: $crate::gen_server::From,
+            ) -> $crate::gen_server::RawReply {
+                <Self as $crate::gen_server::HasHandlers>::handle_call_dispatch(self, payload, from).await
             }
 
             /// Handle a raw cast message using the registered handlers.
             pub async fn _gen_server_handle_cast_raw(
                 &mut self,
                 payload: Vec<u8>,
-            ) -> $crate::gen_server::v2::Status {
-                <Self as $crate::gen_server::v2::HasHandlers>::handle_cast_dispatch(self, payload).await
+            ) -> $crate::gen_server::Status {
+                <Self as $crate::gen_server::HasHandlers>::handle_cast_dispatch(self, payload).await
             }
 
             /// Handle a raw info message using the registered handlers.
             pub async fn _gen_server_handle_info_raw(
                 &mut self,
                 payload: Vec<u8>,
-            ) -> $crate::gen_server::v2::Status {
-                <Self as $crate::gen_server::v2::HasHandlers>::handle_info_dispatch(self, payload).await
+            ) -> $crate::gen_server::Status {
+                <Self as $crate::gen_server::HasHandlers>::handle_info_dispatch(self, payload).await
             }
         }
     };

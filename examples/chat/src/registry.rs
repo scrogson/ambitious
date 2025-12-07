@@ -1,16 +1,16 @@
-//! Room registry implementation using GenServer v2 API.
+//! Room registry implementation.
 //!
 //! The registry provides room lookups across the cluster.
 //! Rooms are registered globally when users join via Channels,
 //! making them visible to all nodes.
 //!
-//! In v2, the struct IS the process state. `init` constructs it,
+//! The struct IS the process state. `init` constructs it,
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::RoomInfo;
-use ambitious::{Message, Pid, call};
 use ambitious::dist::global;
-use ambitious::gen_server::v2::*;
+use ambitious::gen_server::*;
+use ambitious::{Message, Pid, call};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -108,11 +108,11 @@ impl GenServer for Registry {
 // =============================================================================
 
 #[call]
-impl Call<GetRoom> for Registry {
+impl HandleCall<GetRoom> for Registry {
     type Reply = RoomResult;
     type Output = Reply<RoomResult>;
 
-    async fn call(&mut self, request: GetRoom, _from: From) -> Reply<RoomResult> {
+    async fn handle_call(&mut self, request: GetRoom, _from: From) -> Reply<RoomResult> {
         let name = request.0;
 
         // Check local cache first
@@ -133,11 +133,11 @@ impl Call<GetRoom> for Registry {
 }
 
 #[call]
-impl Call<ListRooms> for Registry {
+impl HandleCall<ListRooms> for Registry {
     type Reply = RoomList;
     type Output = Reply<RoomList>;
 
-    async fn call(&mut self, _request: ListRooms, _from: From) -> Reply<RoomList> {
+    async fn handle_call(&mut self, _request: ListRooms, _from: From) -> Reply<RoomList> {
         // Get all globally registered rooms
         let global_rooms = global::registered();
         let room_names: Vec<String> = global_rooms

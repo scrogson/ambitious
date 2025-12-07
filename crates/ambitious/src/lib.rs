@@ -34,54 +34,46 @@
 //! # GenServer Example
 //!
 //! ```ignore
-//! use ambitious::prelude::*;
-//! use ambitious::gen_server::{async_trait, GenServer, InitResult, CallResult, CastResult, InfoResult, ContinueResult, From, ContinueArg};
-//! use serde::{Serialize, Deserialize};
+//! use ambitious::gen_server::*;
+//! use ambitious::{call, cast, info, Message};
 //!
-//! struct Counter;
-//!
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
-//! enum CounterCall {
-//!     Get,
-//!     Increment,
+//! // The struct IS the process state
+//! struct Counter {
+//!     count: i64,
 //! }
 //!
-//! #[async_trait]
+//! // Messages
+//! #[derive(Message)]
+//! struct Get;
+//!
+//! #[derive(Message)]
+//! struct Increment;
+//!
 //! impl GenServer for Counter {
-//!     type State = i64;
-//!     type InitArg = i64;
-//!     type Call = CounterCall;
-//!     type Cast = ();
+//!     type Args = i64;
+//!
+//!     async fn init(initial: i64) -> Init<Self> {
+//!         Init::Ok(Counter { count: initial })
+//!     }
+//! }
+//!
+//! #[call]
+//! impl HandleCall<Get> for Counter {
 //!     type Reply = i64;
+//!     type Output = Reply<i64>;
 //!
-//!     async fn init(initial: i64) -> InitResult<i64> {
-//!         InitResult::Ok(initial)
+//!     async fn handle_call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
+//!         Reply::Ok(self.count)
 //!     }
+//! }
 //!
-//!     async fn handle_call(
-//!         request: CounterCall,
-//!         _from: From,
-//!         state: &mut i64,
-//!     ) -> CallResult<i64, i64> {
-//!         match request {
-//!             CounterCall::Get => CallResult::Reply(*state, *state),
-//!             CounterCall::Increment => {
-//!                 *state += 1;
-//!                 CallResult::Reply(*state, *state)
-//!             }
-//!         }
-//!     }
+//! #[cast]
+//! impl HandleCast<Increment> for Counter {
+//!     type Output = Status;
 //!
-//!     async fn handle_cast(_msg: (), state: &mut i64) -> CastResult<i64> {
-//!         CastResult::NoReply(*state)
-//!     }
-//!
-//!     async fn handle_info(_msg: RawTerm, state: &mut i64) -> InfoResult<i64> {
-//!         InfoResult::NoReply(*state)
-//!     }
-//!
-//!     async fn handle_continue(_arg: ContinueArg, state: &mut i64) -> ContinueResult<i64> {
-//!         ContinueResult::NoReply(*state)
+//!     async fn handle_cast(&mut self, _msg: Increment) -> Status {
+//!         self.count += 1;
+//!         Status::Ok
 //!     }
 //! }
 //! ```
@@ -204,7 +196,10 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use ambitious_macros::{GenServerImpl, Message, ambitious_process, call, cast, channel, handle_in, info, main, self_pid, test};
+pub use ambitious_macros::{
+    GenServerImpl, Message, ambitious_process, call, cast, channel, handle_in, info, main,
+    self_pid, test,
+};
 
 // Re-export linkme for use by macros
 pub use linkme;
@@ -225,8 +220,8 @@ pub mod prelude {
 
     // GenServer essentials
     pub use crate::gen_server::{
-        CallResult, CastResult, ContinueArg, ContinueResult, From, GenServer, InfoResult,
-        InitResult, NameResolver, ServerRef,
+        From, GenServer, HandleCall, HandleCast, HandleContinue, HandleInfo, HasHandlers, Init,
+        Reply, Status,
     };
 
     // Supervisor essentials
@@ -291,7 +286,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_gen_server_integration() {
-        use crate::gen_server::async_trait;
+        use crate::core::DecodeError;
+        use crate::gen_server::{
+            From, GenServer, HandleCall, HasHandlers, Init, RawReply, Reply, Status, async_trait,
+            call, start,
+        };
+        use crate::message::{Message, encode_with_tag};
         use serde::{Deserialize, Serialize};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -299,70 +299,76 @@ mod tests {
 
         struct TestServer;
 
+        // Message type with manual Message impl
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        enum TestCall {
-            Ping,
+        struct Ping;
+
+        impl Message for Ping {
+            fn tag() -> &'static str {
+                "Ping"
+            }
+            fn encode_local(&self) -> Vec<u8> {
+                encode_with_tag(Self::tag(), &[])
+            }
+            fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
+                Ok(Ping)
+            }
+            fn encode_remote(&self) -> Vec<u8> {
+                self.encode_local()
+            }
+            fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+                Self::decode_local(bytes)
+            }
         }
+
+        // Register handlers
+        crate::register_handlers!(TestServer { calls: [Ping] });
 
         #[async_trait]
         impl GenServer for TestServer {
-            type State = ();
-            type InitArg = ();
-            type Call = TestCall;
-            type Cast = ();
+            type Args = ();
+
+            async fn init(_: ()) -> Init<Self> {
+                Init::Ok(TestServer)
+            }
+
+            async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
+                <Self as HasHandlers>::handle_call_dispatch(self, payload, from).await
+            }
+
+            async fn handle_cast_raw(&mut self, payload: Vec<u8>) -> Status {
+                <Self as HasHandlers>::handle_cast_dispatch(self, payload).await
+            }
+
+            async fn handle_info_raw(&mut self, payload: Vec<u8>) -> Status {
+                <Self as HasHandlers>::handle_info_dispatch(self, payload).await
+            }
+        }
+
+        #[async_trait]
+        impl HandleCall<Ping> for TestServer {
             type Reply = String;
+            type Output = Reply<String>;
 
-            async fn init(_: ()) -> InitResult<()> {
-                InitResult::Ok(())
-            }
-
-            async fn handle_call(
-                request: TestCall,
-                _from: From,
-                state: &mut (),
-            ) -> CallResult<(), String> {
-                match request {
-                    TestCall::Ping => {
-                        let _ = state;
-                        CallResult::Reply("pong".to_string(), ())
-                    }
-                }
-            }
-
-            async fn handle_cast(_: (), state: &mut ()) -> CastResult<()> {
-                let _ = state;
-                CastResult::NoReply(())
-            }
-
-            async fn handle_info(_: RawTerm, state: &mut ()) -> InfoResult<()> {
-                let _ = state;
-                InfoResult::NoReply(())
-            }
-
-            async fn handle_continue(_: ContinueArg, state: &mut ()) -> ContinueResult<()> {
-                let _ = state;
-                ContinueResult::NoReply(())
+            async fn handle_call(&mut self, _msg: Ping, _from: From) -> Reply<String> {
+                Reply::Ok("pong".to_string())
             }
         }
 
         crate::init();
         let handle = crate::handle();
 
-        // Start the server
-        let server_pid = crate::gen_server::start::<TestServer>(()).await.unwrap();
-
         // We need to call from within a process since `call` requires task-local context
         let test_passed = Arc::new(AtomicBool::new(false));
         let test_passed_clone = test_passed.clone();
 
         handle.spawn(move || async move {
-            let reply: String = crate::gen_server::call::<TestServer>(
-                server_pid,
-                TestCall::Ping,
-                Duration::from_secs(5),
-            )
-            .await
-            .unwrap();
+            // Start the server
+            let server_pid = start::<TestServer>(()).await.unwrap();
+
+            let reply: String = call(server_pid, Ping, Duration::from_secs(5))
+                .await
+                .unwrap();
 
             if reply == "pong" {
                 test_passed_clone.store(true, Ordering::SeqCst);

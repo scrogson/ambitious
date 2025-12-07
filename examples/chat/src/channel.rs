@@ -9,16 +9,16 @@
 use crate::protocol::HistoryMessage;
 use crate::room::{GetHistory, History};
 use crate::room_supervisor;
-use ambitious::channel::{
-    broadcast_from, push, Channel, ChannelReply, HandleIn, HandleResult, JoinError,
-    JoinResult, RawHandleResult, ReplyStatus, Socket, TerminateReason,
-};
-use ambitious::gen_server::v2 as gen_server;
-use ambitious::{channel, handle_in};
-use ambitious::presence::{Presence, PresenceMessage};
-use ambitious::pubsub::PubSub;
 use ambitious::Message;
 use ambitious::RawTerm;
+use ambitious::channel::{
+    Channel, ChannelReply, HandleIn, HandleResult, JoinError, JoinResult, RawHandleResult,
+    ReplyStatus, Socket, TerminateReason, broadcast_from, push,
+};
+use ambitious::gen_server;
+use ambitious::presence::{Presence, PresenceMessage};
+use ambitious::pubsub::PubSub;
+use ambitious::{channel, handle_in};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -173,9 +173,14 @@ impl Channel for RoomChannel {
             nick: payload.nick.clone(),
             status: "online".to_string(),
         };
-        if let Err(e) =
-            Presence::track_pid(PRESENCE_NAME, topic, &presence_key, socket.pid, &presence_meta)
-                .await
+        if let Err(e) = Presence::track_pid(
+            PRESENCE_NAME,
+            topic,
+            &presence_key,
+            socket.pid,
+            &presence_meta,
+        )
+        .await
         {
             tracing::warn!(error = %e, "Failed to track presence");
         }
@@ -453,11 +458,7 @@ impl HandleIn<NewMsg> for RoomChannel {
 impl HandleIn<UpdateNick> for RoomChannel {
     type Reply = NickError;
 
-    async fn handle_in(
-        &mut self,
-        msg: UpdateNick,
-        _socket: &Socket,
-    ) -> HandleResult<NickError> {
+    async fn handle_in(&mut self, msg: UpdateNick, _socket: &Socket) -> HandleResult<NickError> {
         if msg.nick.is_empty() || msg.nick.len() > 32 {
             return HandleResult::Reply {
                 status: ReplyStatus::Error,

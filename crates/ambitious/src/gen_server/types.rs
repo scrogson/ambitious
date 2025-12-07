@@ -1,370 +1,178 @@
-//! GenServer types and result enums.
+//! GenServer result types.
 //!
-//! These types mirror Elixir's GenServer return values.
+//! Clean, minimal enums for GenServer callbacks.
 
-use crate::core::{DecodeError, ExitReason, Pid, Ref, Term};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use crate::core::ExitReason;
 use std::time::Duration;
 
-/// A handle identifying a pending call that needs a reply.
+/// Result from `GenServer::init`.
 ///
-/// This is passed to `handle_call` and can be used to send
-/// deferred replies via `GenServer::reply`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct From {
-    /// The PID of the calling process.
-    pub caller: Pid,
-    /// The unique reference for this call.
-    pub reference: Ref,
-}
-
-impl From {
-    /// Creates a new From handle.
-    pub fn new(caller: Pid, reference: Ref) -> Self {
-        Self { caller, reference }
-    }
-}
-
-/// Continue argument for `handle_continue` callback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContinueArg(pub Vec<u8>);
-
-impl ContinueArg {
-    /// Creates a new continue argument from serializable data.
-    pub fn new<T: Term>(data: &T) -> Self {
-        Self(data.try_encode().unwrap_or_default())
-    }
-
-    /// Decodes the continue argument into the expected type.
-    pub fn decode<T: Term>(&self) -> Result<T, DecodeError> {
-        T::decode(&self.0)
-    }
-
-    /// Attempts to decode the continue argument, returning None on failure.
-    pub fn try_decode<T: Term>(&self) -> Option<T> {
-        T::decode(&self.0).ok()
-    }
-}
-
-/// Result of the `init` callback.
+/// Determines how the process starts (or doesn't).
 #[derive(Debug)]
-pub enum InitResult<S> {
-    /// Initialization succeeded with the given state.
+pub enum Init<S> {
+    /// Process starts with this state.
     Ok(S),
-    /// Initialization succeeded; a timeout message will be sent.
-    OkTimeout(S, Duration),
-    /// Initialization succeeded; process should hibernate.
-    OkHibernate(S),
-    /// Initialization succeeded; `handle_continue` will be called.
-    OkContinue(S, ContinueArg),
-    /// Initialization ignored; process will exit normally.
+    /// Process starts, then immediately triggers `handle_continue`.
+    Continue(S, Vec<u8>),
+    /// Process starts, then receives a timeout message after the duration.
+    Timeout(S, Duration),
+    /// Don't start the process. Not an error, just skip.
+    /// Useful for conditional process creation.
     Ignore,
-    /// Initialization failed; process will exit with the given reason.
+    /// Failed to start. Process terminates immediately.
     Stop(ExitReason),
 }
 
-impl<S> InitResult<S> {
-    /// Creates a successful init result.
+impl<S> Init<S> {
+    /// Create an `Ok` result.
     pub fn ok(state: S) -> Self {
-        InitResult::Ok(state)
+        Init::Ok(state)
     }
 
-    /// Creates a successful init result with a timeout.
-    pub fn ok_timeout(state: S, timeout: Duration) -> Self {
-        InitResult::OkTimeout(state, timeout)
+    /// Create a `Continue` result with serialized continue argument.
+    pub fn cont(state: S, arg: Vec<u8>) -> Self {
+        Init::Continue(state, arg)
     }
 
-    /// Creates an init result that triggers handle_continue.
-    pub fn ok_continue<T: Term>(state: S, arg: &T) -> Self {
-        InitResult::OkContinue(state, ContinueArg::new(arg))
+    /// Create a `Timeout` result.
+    pub fn timeout(state: S, duration: Duration) -> Self {
+        Init::Timeout(state, duration)
     }
 
-    /// Creates an init result that stops the server.
-    pub fn stop(reason: ExitReason) -> Self {
-        InitResult::Stop(reason)
-    }
-
-    /// Creates an ignored init result.
+    /// Create an `Ignore` result.
     pub fn ignore() -> Self {
-        InitResult::Ignore
+        Init::Ignore
+    }
+
+    /// Create a `Stop` result.
+    pub fn stop(reason: ExitReason) -> Self {
+        Init::Stop(reason)
     }
 }
 
-/// Result of the `handle_call` callback.
+/// Result from `Call::call`.
+///
+/// Must either reply to the caller or explicitly defer the reply.
 #[derive(Debug)]
-pub enum CallResult<S, R> {
-    /// Reply to the caller and continue with new state.
-    Reply(R, S),
-    /// Reply to the caller, set timeout, continue with new state.
-    ReplyTimeout(R, S, Duration),
-    /// Reply and trigger `handle_continue`.
-    ReplyContinue(R, S, ContinueArg),
-    /// Don't reply yet (caller will wait); continue with new state.
-    NoReply(S),
-    /// Don't reply yet; set timeout.
-    NoReplyTimeout(S, Duration),
-    /// Don't reply yet; trigger `handle_continue`.
-    NoReplyContinue(S, ContinueArg),
-    /// Reply and stop the server.
-    Stop(ExitReason, R, S),
-    /// Stop the server without replying.
-    StopNoReply(ExitReason, S),
+pub enum Reply<T> {
+    /// Send reply to caller, continue running.
+    Ok(T),
+    /// Send reply, then trigger `handle_continue`.
+    Continue(T, Vec<u8>),
+    /// Send reply, then set timeout for next message.
+    Timeout(T, Duration),
+    /// Don't reply yet. Must call `GenServer::reply` later.
+    /// Caller remains blocked until reply is sent.
+    NoReply,
+    /// Stop the process after sending reply.
+    Stop(ExitReason, T),
+    /// Stop the process without sending reply.
+    /// Caller will receive an error.
+    StopNoReply(ExitReason),
 }
 
-impl<S, R> CallResult<S, R> {
-    /// Creates a reply result.
-    pub fn reply(reply: R, state: S) -> Self {
-        CallResult::Reply(reply, state)
+impl<T> Reply<T> {
+    /// Create an `Ok` reply.
+    pub fn ok(value: T) -> Self {
+        Reply::Ok(value)
     }
 
-    /// Creates a reply result with a timeout.
-    pub fn reply_timeout(reply: R, state: S, timeout: Duration) -> Self {
-        CallResult::ReplyTimeout(reply, state, timeout)
+    /// Create a `Continue` reply.
+    pub fn cont(value: T, arg: Vec<u8>) -> Self {
+        Reply::Continue(value, arg)
     }
 
-    /// Creates a reply result that triggers handle_continue.
-    pub fn reply_continue<T: Term>(reply: R, state: S, arg: &T) -> Self {
-        CallResult::ReplyContinue(reply, state, ContinueArg::new(arg))
+    /// Create a `Timeout` reply.
+    pub fn timeout(value: T, duration: Duration) -> Self {
+        Reply::Timeout(value, duration)
     }
 
-    /// Creates a no-reply result.
-    pub fn noreply(state: S) -> Self {
-        CallResult::NoReply(state)
+    /// Create a `NoReply`.
+    pub fn noreply() -> Self {
+        Reply::NoReply
     }
 
-    /// Creates a no-reply result with a timeout.
-    pub fn noreply_timeout(state: S, timeout: Duration) -> Self {
-        CallResult::NoReplyTimeout(state, timeout)
+    /// Create a `Stop` reply.
+    pub fn stop(reason: ExitReason, value: T) -> Self {
+        Reply::Stop(reason, value)
     }
 
-    /// Creates a stop result with a reply.
-    pub fn stop(reason: ExitReason, reply: R, state: S) -> Self {
-        CallResult::Stop(reason, reply, state)
+    /// Create a `StopNoReply`.
+    pub fn stop_noreply(reason: ExitReason) -> Self {
+        Reply::StopNoReply(reason)
     }
 
-    /// Creates a stop result without a reply.
-    pub fn stop_noreply(reason: ExitReason, state: S) -> Self {
-        CallResult::StopNoReply(reason, state)
-    }
-}
-
-/// Result of the `handle_cast` callback.
-#[derive(Debug)]
-pub enum CastResult<S> {
-    /// Continue with the new state.
-    NoReply(S),
-    /// Continue with new state and set a timeout.
-    NoReplyTimeout(S, Duration),
-    /// Continue and trigger `handle_continue`.
-    NoReplyContinue(S, ContinueArg),
-    /// Stop the server.
-    Stop(ExitReason, S),
-}
-
-impl<S> CastResult<S> {
-    /// Creates a no-reply result.
-    pub fn noreply(state: S) -> Self {
-        CastResult::NoReply(state)
-    }
-
-    /// Creates a no-reply result with a timeout.
-    pub fn noreply_timeout(state: S, timeout: Duration) -> Self {
-        CastResult::NoReplyTimeout(state, timeout)
-    }
-
-    /// Creates a no-reply result that triggers handle_continue.
-    pub fn noreply_continue<T: Term>(state: S, arg: &T) -> Self {
-        CastResult::NoReplyContinue(state, ContinueArg::new(arg))
-    }
-
-    /// Creates a stop result.
-    pub fn stop(reason: ExitReason, state: S) -> Self {
-        CastResult::Stop(reason, state)
+    /// Create a `StopNoReply` from an error message.
+    pub fn error(msg: impl Into<String>) -> Self {
+        Reply::StopNoReply(ExitReason::Error(msg.into()))
     }
 }
 
-/// Result of the `handle_info` callback.
-pub type InfoResult<S> = CastResult<S>;
-
-/// Result of the `handle_continue` callback.
-pub type ContinueResult<S> = CastResult<S>;
-
-/// Trait for custom name resolution with Term-based keys.
+/// Convert a `Result<Reply<T>, E>` into a `Reply<T>`.
 ///
-/// Implement this trait to use custom registries with `ServerRef::Via`.
-/// This is similar to Elixir's `{:via, module, term}` tuple pattern.
-///
-/// Keys are stored as serialized bytes, allowing any `Term` type to be used
-/// as a registry key (strings, tuples, structs, etc.) - just like Erlang.
-///
-/// # Example
-///
-/// ```ignore
-/// use ambitious_gen_server::NameResolver;
-/// use ambitious::registry::Registry;
-///
-/// // Registry implements NameResolver automatically
-/// let room_registry = Registry::new_unique("rooms");
-///
-/// // Use it with ServerRef::via() - key can be any Term!
-/// gen_server::call::<Room>(
-///     ServerRef::via(room_registry, "room:lobby"),  // String key
-///     RoomCall::GetInfo,
-///     timeout
-/// ).await;
-///
-/// // Tuple key like Elixir's {:room, "lobby"}
-/// gen_server::call::<Room>(
-///     ServerRef::via(room_registry, ("room", "lobby")),
-///     RoomCall::GetInfo,
-///     timeout
-/// ).await;
-/// ```
-pub trait NameResolver: Send + Sync {
-    /// Resolves a serialized key to a PID.
-    ///
-    /// The key is the serialized bytes of a Term.
-    /// Returns `Some(pid)` if the key is registered, `None` otherwise.
-    fn whereis_term(&self, key: &[u8]) -> Option<Pid>;
-
-    /// Registers a process under a serialized key.
-    ///
-    /// The key is the serialized bytes of a Term.
-    /// Returns `true` if registration succeeded, `false` if the key was already taken.
-    fn register_term(&self, key: &[u8], pid: Pid) -> bool;
-
-    /// Unregisters a serialized key.
-    fn unregister_term(&self, key: &[u8]);
-}
-
-/// A reference to a GenServer.
-///
-/// Can be a PID, a registered name, or a custom registry lookup.
-///
-/// # Examples
-///
-/// ```ignore
-/// use ambitious_gen_server::{ServerRef, gen_server};
-///
-/// // Direct PID
-/// gen_server::call::<MyServer>(pid, request, timeout).await;
-///
-/// // Registered name (uses global process registry)
-/// gen_server::call::<MyServer>("my_server", request, timeout).await;
-///
-/// // Via custom registry with string key
-/// gen_server::call::<MyServer>(
-///     ServerRef::via(my_registry, "my_key"),
-///     request,
-///     timeout
-/// ).await;
-///
-/// // Via custom registry with tuple key (like Elixir's {:via, Registry, {reg, {:room, id}}})
-/// gen_server::call::<MyServer>(
-///     ServerRef::via(my_registry, ("room", room_id)),
-///     request,
-///     timeout
-/// ).await;
-/// ```
-#[derive(Clone)]
-pub enum ServerRef {
-    /// A direct process identifier.
-    Pid(Pid),
-    /// A registered name (uses the global process registry).
-    Name(String),
-    /// A custom registry lookup (similar to Elixir's `{:via, module, term}`).
-    Via {
-        /// The custom registry implementing `NameResolver`.
-        registry: Arc<dyn NameResolver>,
-        /// The serialized key bytes (any Term can be used as a key).
-        key: Vec<u8>,
-    },
-}
-
-impl std::fmt::Debug for ServerRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ServerRef::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
-            ServerRef::Name(name) => f.debug_tuple("Name").field(name).finish(),
-            ServerRef::Via { key, .. } => f
-                .debug_struct("Via")
-                .field("key_bytes", &key.len())
-                .finish_non_exhaustive(),
+/// Errors are converted to `Reply::StopNoReply` with the error message.
+/// This enables the `?` operator in handlers that return `Result<Reply<T>, E>`.
+impl<T, E: std::fmt::Display> From<Result<Reply<T>, E>> for Reply<T> {
+    fn from(result: Result<Reply<T>, E>) -> Self {
+        match result {
+            Result::Ok(reply) => reply,
+            Err(e) => Reply::StopNoReply(ExitReason::Error(e.to_string())),
         }
     }
 }
 
-impl ServerRef {
-    /// Creates a `ServerRef` that uses a custom registry for name resolution.
-    ///
-    /// This is equivalent to Elixir's `{:via, Registry, {registry, key}}` tuple.
-    /// The key can be any type that implements `Term` (Serialize + DeserializeOwned),
-    /// just like how Erlang registries accept any term as a key.
-    ///
-    /// # Arguments
-    ///
-    /// * `registry` - A registry implementing `NameResolver`
-    /// * `key` - Any Term to use as the registry key
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let registry = Registry::new_unique("rooms");
-    ///
-    /// // String key
-    /// let server_ref = ServerRef::via(registry.clone(), "room:lobby");
-    ///
-    /// // Tuple key (like Elixir's {:room, "lobby"})
-    /// let server_ref = ServerRef::via(registry.clone(), ("room", "lobby"));
-    ///
-    /// // Struct key
-    /// #[derive(Serialize, Deserialize)]
-    /// struct RoomKey { name: String, shard: u32 }
-    /// let server_ref = ServerRef::via(registry, RoomKey { name: "lobby".into(), shard: 1 });
-    /// ```
-    pub fn via<R, K>(registry: Arc<R>, key: K) -> Self
-    where
-        R: NameResolver + 'static,
-        K: crate::core::Term,
-    {
-        ServerRef::Via {
-            registry,
-            key: key.encode(),
+/// Result from `Cast::cast` and `Info::info`.
+///
+/// No reply is possible - these are fire-and-forget operations.
+#[derive(Debug, Default)]
+pub enum Status {
+    /// Continue running normally.
+    #[default]
+    Ok,
+    /// Trigger `handle_continue` with the given argument.
+    Continue(Vec<u8>),
+    /// Set timeout - receive timeout message after duration.
+    Timeout(Duration),
+    /// Stop the process.
+    Stop(ExitReason),
+}
+
+impl Status {
+    /// Create an `Ok` status.
+    pub fn ok() -> Self {
+        Status::Ok
+    }
+
+    /// Create a `Continue` status.
+    pub fn cont(arg: Vec<u8>) -> Self {
+        Status::Continue(arg)
+    }
+
+    /// Create a `Timeout` status.
+    pub fn timeout(duration: Duration) -> Self {
+        Status::Timeout(duration)
+    }
+
+    /// Create a `Stop` status.
+    pub fn stop(reason: ExitReason) -> Self {
+        Status::Stop(reason)
+    }
+
+    /// Create a `Stop` status from an error message.
+    pub fn error(msg: impl Into<String>) -> Self {
+        Status::Stop(ExitReason::Error(msg.into()))
+    }
+}
+
+/// Convert a `Result<Status, E>` into a `Status`.
+///
+/// Errors are converted to `Status::Stop` with the error message.
+/// This enables the `?` operator in handlers that return `Result<Status, E>`.
+impl<E: std::fmt::Display> From<Result<Status, E>> for Status {
+    fn from(result: Result<Status, E>) -> Self {
+        match result {
+            Result::Ok(status) => status,
+            Err(e) => Status::Stop(ExitReason::Error(e.to_string())),
         }
-    }
-
-    /// Resolves this `ServerRef` to a `Pid`.
-    ///
-    /// For `Pid` variants, returns the PID directly.
-    /// For `Name` variants, looks up in the global process registry.
-    /// For `Via` variants, uses the custom registry's `whereis_term` method.
-    pub fn resolve(&self) -> Option<Pid> {
-        match self {
-            ServerRef::Pid(pid) => Some(*pid),
-            ServerRef::Name(name) => {
-                let handle = crate::process::global::handle();
-                handle.registry().whereis(name)
-            }
-            ServerRef::Via { registry, key } => registry.whereis_term(key),
-        }
-    }
-}
-
-impl std::convert::From<Pid> for ServerRef {
-    fn from(pid: Pid) -> Self {
-        ServerRef::Pid(pid)
-    }
-}
-
-impl std::convert::From<&str> for ServerRef {
-    fn from(name: &str) -> Self {
-        ServerRef::Name(name.to_string())
-    }
-}
-
-impl std::convert::From<String> for ServerRef {
-    fn from(name: String) -> Self {
-        ServerRef::Name(name)
     }
 }
