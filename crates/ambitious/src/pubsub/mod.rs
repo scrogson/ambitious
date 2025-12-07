@@ -47,5 +47,11 @@
 //! not once per subscriber.
 
 mod server;
+pub mod server_v3;
 
 pub use server::{PubSub, PubSubConfig};
+// v3 exports - will eventually replace the above
+pub use server_v3::{
+    PubSub as PubSubV3, PubSubCall, PubSubCast, PubSubConfig as PubSubConfigV3, PubSubInfo,
+    PubSubReply,
+};

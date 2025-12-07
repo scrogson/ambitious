@@ -66,6 +66,7 @@
 
 mod crdt;
 mod server;
+pub mod server_v3;
 mod types;
 
 pub use crdt::{
@@ -73,3 +74,8 @@ pub use crdt::{
 };
 pub use server::{Presence, PresenceConfig};
 pub use types::{PresenceDiff, PresenceMessage, PresenceMeta, PresenceRef, PresenceState};
+// v3 exports - will eventually replace the above
+pub use server_v3::{
+    Presence as PresenceV3, PresenceCall, PresenceCast, PresenceConfig as PresenceConfigV3,
+    PresenceInfo, PresenceReply,
+};
