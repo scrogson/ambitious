@@ -1,10 +1,11 @@
 //! GenServer v2 server loop and start functions.
 
+use super::dispatch;
 use super::protocol::{self, From, Message as ProtocolMessage};
 use super::traits::GenServer;
 use super::types::{Init, Status};
 use crate::core::{ExitReason, Pid, Ref, Term};
-use crate::message::Message;
+use crate::message::{self, Message};
 use crate::process::global;
 use std::time::Duration;
 
@@ -33,12 +34,20 @@ pub enum Error {
 
 /// Start a GenServer process (not linked to caller).
 ///
+/// Handlers can be registered using either:
+/// - `#[call]`, `#[cast]`, `#[info]` attribute macros (recommended)
+/// - `register_handlers!` macro (legacy)
+///
 /// Returns the Pid of the new process, or an error if init fails.
 pub async fn start<G: GenServer>(args: G::Args) -> Result<Pid, Error> {
     start_impl::<G>(args, false).await
 }
 
 /// Start a GenServer process linked to the caller.
+///
+/// Handlers can be registered using either:
+/// - `#[call]`, `#[cast]`, `#[info]` attribute macros (recommended)
+/// - `register_handlers!` macro (legacy)
 ///
 /// Returns the Pid of the new process, or an error if init fails.
 /// If the GenServer crashes, the caller will also crash (unless trapping exits).
@@ -132,6 +141,10 @@ async fn gen_server_main<G: GenServer>(
 /// The main message loop for a GenServer.
 ///
 /// Receives messages and dispatches to appropriate handlers.
+///
+/// Dispatch order:
+/// 1. Try global registry (for `#[call]`/`#[cast]`/`#[info]` macros)
+/// 2. Fall back to `GenServer::handle_call_raw` etc (for `register_handlers!` macro)
 async fn gen_server_loop<G: GenServer>(mut server: G) {
     loop {
         // Receive next message
@@ -149,7 +162,18 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
             Ok(m) => m,
             Err(_) => {
                 // Not a protocol message - treat as info
-                let status = server.handle_info_raw(raw_msg).await;
+                // Try global registry first, then fall back to handle_info_raw
+                let status = if let Ok((tag, payload)) = message::decode_tag(&raw_msg) {
+                    if let Some(status) = dispatch::dispatch_info(&mut server, tag, payload).await {
+                        status
+                    } else {
+                        // No handler in global registry, try handle_info_raw
+                        server.handle_info_raw(raw_msg).await
+                    }
+                } else {
+                    // Can't decode tag, try handle_info_raw directly
+                    server.handle_info_raw(raw_msg).await
+                };
                 if let Some(reason) = handle_status(status) {
                     server.terminate(reason).await;
                     return;
@@ -161,7 +185,19 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
         // Dispatch based on message type
         match msg {
             ProtocolMessage::Call { from, payload } => {
-                let reply_result = server.handle_call_raw(payload, from.clone()).await;
+                // Try global registry first, then fall back to handle_call_raw
+                let reply_result = if let Ok((tag, msg_payload)) = message::decode_tag(&payload) {
+                    if let Some(reply) =
+                        dispatch::dispatch_call(&mut server, tag, msg_payload, from.clone()).await
+                    {
+                        reply
+                    } else {
+                        // No handler in global registry, try handle_call_raw
+                        server.handle_call_raw(payload, from.clone()).await
+                    }
+                } else {
+                    RawReply::StopNoReply(ExitReason::Error("decode error".into()))
+                };
                 match reply_result {
                     RawReply::Ok(reply_bytes) => {
                         send_reply(&from, reply_bytes);
@@ -191,7 +227,19 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
                 }
             }
             ProtocolMessage::Cast { payload } => {
-                let status = server.handle_cast_raw(payload).await;
+                // Try global registry first, then fall back to handle_cast_raw
+                let status = if let Ok((tag, msg_payload)) = message::decode_tag(&payload) {
+                    if let Some(status) =
+                        dispatch::dispatch_cast(&mut server, tag, msg_payload).await
+                    {
+                        status
+                    } else {
+                        // No handler in global registry, try handle_cast_raw
+                        server.handle_cast_raw(payload).await
+                    }
+                } else {
+                    Status::Stop(ExitReason::Error("decode error".into()))
+                };
                 if let Some(reason) = handle_status(status) {
                     server.terminate(reason).await;
                     return;

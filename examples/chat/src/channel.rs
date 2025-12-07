@@ -4,7 +4,7 @@
 //! including Phoenix-style Presence tracking for real-time user lists.
 
 use crate::protocol::HistoryMessage;
-use crate::room::{RoomCall, RoomReply};
+use crate::room::{GetHistory, History};
 use crate::room_supervisor;
 use ambitious::RawTerm;
 use ambitious::channel::{
@@ -263,13 +263,12 @@ impl Channel for RoomChannel {
 
                     // Push history directly (not via another self-message to avoid loop)
                     if let Some(room_pid) = room_supervisor::get_room(&socket.assigns.room_name)
-                        && let Ok(RoomReply::History(messages)) =
-                            gen_server::call::<RoomCall, RoomReply>(
-                                room_pid,
-                                RoomCall::GetHistory,
-                                Duration::from_secs(5),
-                            )
-                            .await
+                        && let Ok(History(messages)) = gen_server::call::<GetHistory, History>(
+                            room_pid,
+                            GetHistory,
+                            Duration::from_secs(5),
+                        )
+                        .await
                         && !messages.is_empty()
                     {
                         tracing::info!(

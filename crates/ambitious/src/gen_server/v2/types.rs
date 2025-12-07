@@ -101,6 +101,24 @@ impl<T> Reply<T> {
     pub fn stop_noreply(reason: ExitReason) -> Self {
         Reply::StopNoReply(reason)
     }
+
+    /// Create a `StopNoReply` from an error message.
+    pub fn error(msg: impl Into<String>) -> Self {
+        Reply::StopNoReply(ExitReason::Error(msg.into()))
+    }
+}
+
+/// Convert a `Result<Reply<T>, E>` into a `Reply<T>`.
+///
+/// Errors are converted to `Reply::StopNoReply` with the error message.
+/// This enables the `?` operator in handlers that return `Result<Reply<T>, E>`.
+impl<T, E: std::fmt::Display> From<Result<Reply<T>, E>> for Reply<T> {
+    fn from(result: Result<Reply<T>, E>) -> Self {
+        match result {
+            Result::Ok(reply) => reply,
+            Err(e) => Reply::StopNoReply(ExitReason::Error(e.to_string())),
+        }
+    }
 }
 
 /// Result from `Cast::cast` and `Info::info`.
@@ -138,5 +156,23 @@ impl Status {
     /// Create a `Stop` status.
     pub fn stop(reason: ExitReason) -> Self {
         Status::Stop(reason)
+    }
+
+    /// Create a `Stop` status from an error message.
+    pub fn error(msg: impl Into<String>) -> Self {
+        Status::Stop(ExitReason::Error(msg.into()))
+    }
+}
+
+/// Convert a `Result<Status, E>` into a `Status`.
+///
+/// Errors are converted to `Status::Stop` with the error message.
+/// This enables the `?` operator in handlers that return `Result<Status, E>`.
+impl<E: std::fmt::Display> From<Result<Status, E>> for Status {
+    fn from(result: Result<Status, E>) -> Self {
+        match result {
+            Result::Ok(status) => status,
+            Err(e) => Status::Stop(ExitReason::Error(e.to_string())),
+        }
     }
 }

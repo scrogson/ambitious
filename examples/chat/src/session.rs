@@ -8,7 +8,7 @@
 use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
 use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
-use crate::room::RoomCast;
+use crate::room::StoreMessage;
 use crate::room_supervisor;
 use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
 use ambitious::gen_server::v2 as gen_server;
@@ -412,7 +412,7 @@ impl Session {
         if let Some(room_pid) = room_supervisor::get_room(&room) {
             gen_server::cast(
                 room_pid,
-                RoomCast::StoreMessage {
+                StoreMessage {
                     from: nick.clone(),
                     text: text.clone(),
                 },

@@ -52,6 +52,7 @@
 //! }
 //! ```
 
+pub mod dispatch;
 mod protocol;
 mod server;
 mod traits;
@@ -59,14 +60,17 @@ mod types;
 
 pub use protocol::From;
 pub use server::{Error, RawReply, call, call_raw, cast, cast_raw, reply, start, start_link, stop};
-pub use traits::{Call, Cast, GenServer, Info, async_trait};
+pub use traits::{Call, Cast, GenServer, HasHandlers, Info, async_trait};
 pub use types::{Init, Reply, Status};
+
+// Re-export macros
+pub use crate::register_handlers;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{DecodeError, ExitReason};
-    use crate::message::{Message, decode_payload, decode_tag, encode_payload, encode_with_tag};
+    use crate::core::DecodeError;
+    use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
@@ -157,6 +161,12 @@ mod tests {
         }
     }
 
+    // Register handlers for automatic dispatch
+    register_handlers!(Counter {
+        calls: [Get, Add],
+        casts: [Increment],
+    });
+
     #[async_trait]
     impl GenServer for Counter {
         type Args = CounterArgs;
@@ -168,64 +178,24 @@ mod tests {
             })
         }
 
+        // Override to use HasHandlers dispatch
         async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
-            // Decode the tag to determine message type
-            let (tag, msg_payload) = match decode_tag(&payload) {
-                Ok((t, p)) => (t, p),
-                Err(_) => {
-                    return RawReply::StopNoReply(ExitReason::Error("decode error".into()));
-                }
-            };
-
-            // Dispatch based on tag
-            match tag {
-                "Get" => {
-                    let result = self.call(Get, from).await;
-                    reply_to_raw(result)
-                }
-                "Add" => {
-                    if let Ok(msg) = Add::decode_local(msg_payload) {
-                        let result = self.call(msg, from).await;
-                        reply_to_raw(result)
-                    } else {
-                        RawReply::StopNoReply(ExitReason::Error("decode error".into()))
-                    }
-                }
-                _ => RawReply::StopNoReply(ExitReason::Error(format!("unknown call: {}", tag))),
-            }
+            <Self as HasHandlers>::handle_call_dispatch(self, payload, from).await
         }
 
         async fn handle_cast_raw(&mut self, payload: Vec<u8>) -> Status {
-            // Decode the tag to determine message type
-            let (tag, _msg_payload) = match decode_tag(&payload) {
-                Ok((t, p)) => (t, p),
-                Err(_) => {
-                    return Status::Stop(ExitReason::Error("decode error".into()));
-                }
-            };
-
-            match tag {
-                "Increment" => self.cast(Increment).await,
-                _ => Status::Ok, // Ignore unknown casts
-            }
+            <Self as HasHandlers>::handle_cast_dispatch(self, payload).await
         }
-    }
 
-    // Helper to convert Reply<T> to RawReply
-    fn reply_to_raw<T: Message>(reply: Reply<T>) -> RawReply {
-        match reply {
-            Reply::Ok(v) => RawReply::Ok(v.encode_local()),
-            Reply::Continue(v, arg) => RawReply::Continue(v.encode_local(), arg),
-            Reply::Timeout(v, d) => RawReply::Timeout(v.encode_local(), d),
-            Reply::NoReply => RawReply::NoReply,
-            Reply::Stop(r, v) => RawReply::Stop(r, v.encode_local()),
-            Reply::StopNoReply(r) => RawReply::StopNoReply(r),
+        async fn handle_info_raw(&mut self, payload: Vec<u8>) -> Status {
+            <Self as HasHandlers>::handle_info_dispatch(self, payload).await
         }
     }
 
     #[async_trait]
     impl Call<Get> for Counter {
         type Reply = i64;
+        type Output = Reply<i64>;
 
         async fn call(&mut self, _msg: Get, _from: From) -> Reply<i64> {
             Reply::Ok(self.count)
@@ -235,6 +205,7 @@ mod tests {
     #[async_trait]
     impl Call<Add> for Counter {
         type Reply = i64;
+        type Output = Reply<i64>;
 
         async fn call(&mut self, msg: Add, _from: From) -> Reply<i64> {
             self.count += msg.0;
@@ -244,6 +215,8 @@ mod tests {
 
     #[async_trait]
     impl Cast<Increment> for Counter {
+        type Output = Status;
+
         async fn cast(&mut self, _msg: Increment) -> Status {
             self.count += 1;
             Status::Ok

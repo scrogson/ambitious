@@ -8,12 +8,9 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::RoomInfo;
-use ambitious::Pid;
-use ambitious::core::DecodeError;
+use ambitious::{Message, Pid, call};
 use ambitious::dist::global;
 use ambitious::gen_server::v2::*;
-use ambitious::message::{Message, decode_payload, decode_tag, encode_payload, encode_with_tag};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -23,69 +20,25 @@ pub struct Registry {
     rooms: HashMap<String, Pid>,
 }
 
-/// Call requests to Registry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegistryCall {
-    /// Get a room by name.
-    GetRoom(String),
-    /// List all rooms with info.
-    ListRooms,
-}
+// =============================================================================
+// Call Messages
+// =============================================================================
 
-impl Message for RegistryCall {
-    fn tag() -> &'static str {
-        "RegistryCall"
-    }
+/// Request to get a room by name.
+#[derive(Debug, Clone, Message)]
+pub struct GetRoom(pub String);
 
-    fn encode_local(&self) -> Vec<u8> {
-        let payload = encode_payload(self);
-        encode_with_tag(Self::tag(), &payload)
-    }
+/// Response with room PID (None if not found).
+#[derive(Debug, Clone, Message)]
+pub struct RoomResult(pub Option<Pid>);
 
-    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
-        decode_payload(bytes)
-    }
+/// Request to list all rooms.
+#[derive(Debug, Clone, Message)]
+pub struct ListRooms;
 
-    fn encode_remote(&self) -> Vec<u8> {
-        self.encode_local()
-    }
-
-    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_local(bytes)
-    }
-}
-
-/// Reply messages from Registry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegistryReply {
-    /// Room PID (None if not found).
-    Room(Option<Pid>),
-    /// List of room info.
-    Rooms(Vec<RoomInfo>),
-}
-
-impl Message for RegistryReply {
-    fn tag() -> &'static str {
-        "RegistryReply"
-    }
-
-    fn encode_local(&self) -> Vec<u8> {
-        let payload = encode_payload(self);
-        encode_with_tag(Self::tag(), &payload)
-    }
-
-    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
-        decode_payload(bytes)
-    }
-
-    fn encode_remote(&self) -> Vec<u8> {
-        self.encode_local()
-    }
-
-    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_local(bytes)
-    }
-}
+/// Response with list of room info.
+#[derive(Debug, Clone, Message)]
+pub struct RoomList(pub Vec<RoomInfo>);
 
 // =============================================================================
 // Client API
@@ -103,35 +56,40 @@ impl Registry {
     /// Get a room by name.
     #[allow(dead_code)]
     pub async fn get_room(name: &str) -> Option<Pid> {
-        match Self::do_call(RegistryCall::GetRoom(name.to_string())).await? {
-            RegistryReply::Room(pid) => pid,
-            _ => None,
-        }
-    }
-
-    /// List all rooms.
-    pub async fn list_rooms() -> Vec<RoomInfo> {
-        match Self::do_call(RegistryCall::ListRooms).await {
-            Some(RegistryReply::Rooms(rooms)) => rooms,
-            _ => vec![],
-        }
-    }
-
-    /// Internal: make a call to the registry.
-    async fn do_call(request: RegistryCall) -> Option<RegistryReply> {
         let registry_pid = ambitious::whereis(Self::NAME)?;
-
-        match call::<RegistryCall, RegistryReply>(registry_pid, request, Duration::from_secs(5))
-            .await
+        match call::<GetRoom, RoomResult>(
+            registry_pid,
+            GetRoom(name.to_string()),
+            Duration::from_secs(5),
+        )
+        .await
         {
-            Ok(reply) => Some(reply),
+            Ok(RoomResult(pid)) => pid,
             Err(e) => {
                 tracing::error!(error = ?e, "Registry call failed");
                 None
             }
         }
     }
+
+    /// List all rooms.
+    pub async fn list_rooms() -> Vec<RoomInfo> {
+        let Some(registry_pid) = ambitious::whereis(Self::NAME) else {
+            return vec![];
+        };
+        match call::<ListRooms, RoomList>(registry_pid, ListRooms, Duration::from_secs(5)).await {
+            Ok(RoomList(rooms)) => rooms,
+            Err(e) => {
+                tracing::error!(error = ?e, "Registry call failed");
+                vec![]
+            }
+        }
+    }
 }
+
+// =============================================================================
+// GenServer Implementation
+// =============================================================================
 
 #[async_trait]
 impl GenServer for Registry {
@@ -143,91 +101,63 @@ impl GenServer for Registry {
             rooms: HashMap::new(),
         })
     }
-
-    async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
-        // Decode the tag to determine message type
-        let (tag, msg_payload) = match decode_tag(&payload) {
-            Ok((t, p)) => (t, p),
-            Err(_) => {
-                return RawReply::StopNoReply(ambitious::core::ExitReason::Error(
-                    "decode error".into(),
-                ));
-            }
-        };
-
-        match tag {
-            "RegistryCall" => {
-                if let Ok(msg) = RegistryCall::decode_local(msg_payload) {
-                    let result = self.call(msg, from).await;
-                    reply_to_raw(result)
-                } else {
-                    RawReply::StopNoReply(ambitious::core::ExitReason::Error("decode error".into()))
-                }
-            }
-            _ => RawReply::StopNoReply(ambitious::core::ExitReason::Error(format!(
-                "unknown call: {}",
-                tag
-            ))),
-        }
-    }
 }
 
-// Helper to convert Reply<T> to RawReply
-fn reply_to_raw<T: Message>(reply: Reply<T>) -> RawReply {
-    match reply {
-        Reply::Ok(v) => RawReply::Ok(v.encode_local()),
-        Reply::Continue(v, arg) => RawReply::Continue(v.encode_local(), arg),
-        Reply::Timeout(v, d) => RawReply::Timeout(v.encode_local(), d),
-        Reply::NoReply => RawReply::NoReply,
-        Reply::Stop(r, v) => RawReply::Stop(r, v.encode_local()),
-        Reply::StopNoReply(r) => RawReply::StopNoReply(r),
-    }
-}
+// =============================================================================
+// Call Handlers
+// =============================================================================
 
+#[call]
 #[async_trait]
-impl Call<RegistryCall> for Registry {
-    type Reply = RegistryReply;
+impl Call<GetRoom> for Registry {
+    type Reply = RoomResult;
+    type Output = Reply<RoomResult>;
 
-    async fn call(&mut self, request: RegistryCall, _from: From) -> Reply<RegistryReply> {
-        match request {
-            RegistryCall::GetRoom(name) => {
-                // Check local cache first
-                let mut pid = self.rooms.get(&name).copied();
+    async fn call(&mut self, request: GetRoom, _from: From) -> Reply<RoomResult> {
+        let name = request.0;
 
-                // If not in cache, check global registry
-                if pid.is_none() {
-                    let global_name = format!("room:{}", name);
-                    if let Some(global_pid) = global::whereis(&global_name) {
-                        // Cache it locally
-                        self.rooms.insert(name, global_pid);
-                        pid = Some(global_pid);
-                    }
-                }
+        // Check local cache first
+        let mut pid = self.rooms.get(&name).copied();
 
-                Reply::Ok(RegistryReply::Room(pid))
-            }
-
-            RegistryCall::ListRooms => {
-                // Get all globally registered rooms
-                let global_rooms = global::registered();
-                let room_names: Vec<String> = global_rooms
-                    .into_iter()
-                    .filter_map(|name| {
-                        // Global room names are "room:<name>"
-                        name.strip_prefix("room:").map(|s| s.to_string())
-                    })
-                    .collect();
-
-                let infos: Vec<RoomInfo> = room_names
-                    .iter()
-                    .map(|name| RoomInfo {
-                        name: name.clone(),
-                        user_count: 0,
-                    })
-                    .collect();
-
-                Reply::Ok(RegistryReply::Rooms(infos))
+        // If not in cache, check global registry
+        if pid.is_none() {
+            let global_name = format!("room:{}", name);
+            if let Some(global_pid) = global::whereis(&global_name) {
+                // Cache it locally
+                self.rooms.insert(name, global_pid);
+                pid = Some(global_pid);
             }
         }
+
+        Reply::Ok(RoomResult(pid))
+    }
+}
+
+#[call]
+#[async_trait]
+impl Call<ListRooms> for Registry {
+    type Reply = RoomList;
+    type Output = Reply<RoomList>;
+
+    async fn call(&mut self, _request: ListRooms, _from: From) -> Reply<RoomList> {
+        // Get all globally registered rooms
+        let global_rooms = global::registered();
+        let room_names: Vec<String> = global_rooms
+            .into_iter()
+            .filter_map(|name| {
+                // Global room names are "room:<name>"
+                name.strip_prefix("room:").map(|s| s.to_string())
+            })
+            .collect();
+
+        let infos: Vec<RoomInfo> = room_names
+            .iter()
+            .map(|name| RoomInfo {
+                name: name.clone(),
+                user_count: 0,
+            })
+            .collect();
+
+        Reply::Ok(RoomList(infos))
     }
 }

@@ -24,6 +24,7 @@ parking_lot = "0.12"
 async-trait = "0.1"
 once_cell = "1"
 tracing = "0.1"
+linkme = "0.3"
 
 # Distribution
 quinn = "0.11"
