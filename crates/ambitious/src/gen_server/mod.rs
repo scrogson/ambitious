@@ -89,6 +89,12 @@ mod server;
 mod traits;
 mod types;
 
+/// GenServer v3 - Enum-based message dispatch with OTP envelope compatibility.
+///
+/// This is a new design that uses associated enum types instead of per-message traits,
+/// making it easier to create custom behaviors and enabling BEAM compatibility.
+pub mod v3;
+
 pub use async_trait::async_trait;
 pub use protocol::From;
 pub use server::{Error, RawReply, call, call_raw, cast, cast_raw, reply, start, start_link, stop};
