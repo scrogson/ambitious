@@ -47,8 +47,8 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, ItemFn, ItemImpl, Type, parse_macro_input};
+use quote::quote;
+use syn::{Data, DeriveInput, Fields, ItemFn, parse_macro_input};
 
 /// Derive macro for GenServer implementation helpers.
 ///
@@ -496,131 +496,6 @@ fn get_message_tag(input: &DeriveInput) -> Option<String> {
     None
 }
 
-// Note: GenServer now uses the enum-based pattern which doesn't require
-// attribute macros. See `ambitious::gen_server` for the new API.
-
-/// Generate a unique static name from server and message types.
-fn handler_static_name(prefix: &str, server: &Type, msg: &Type) -> syn::Ident {
-    // Convert types to strings and sanitize for use as identifier
-    let server_str = quote!(#server)
-        .to_string()
-        .replace([' ', ':', '<', '>', ','], "_");
-    let msg_str = quote!(#msg)
-        .to_string()
-        .replace([' ', ':', '<', '>', ','], "_");
-    format_ident!("__{}_{}_{}", prefix, server_str, msg_str)
-}
-
-// =============================================================================
-// Channel v2 Handler Registration Macros
-// =============================================================================
-
-/// Extract the Channel type and Message type from `impl HandleIn<M> for C`.
-fn extract_handle_in_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
-    let channel_type = (*impl_block.self_ty).clone();
-    let trait_path = impl_block.trait_.as_ref()?.1.clone();
-    let last_segment = trait_path.segments.last()?;
-    if last_segment.ident != "HandleIn" {
-        return None;
-    }
-
-    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
-        && let Some(syn::GenericArgument::Type(msg_type)) = args.args.first()
-    {
-        return Some((channel_type, msg_type.clone()));
-    }
-
-    None
-}
-
-/// Attribute macro for Channel HandleIn handler registration.
-///
-/// Apply this to an `impl HandleIn<M> for C` block to automatically register
-/// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
-///
-/// The attribute takes an event name as argument that maps to the incoming event string.
-///
-/// # Example
-///
-/// ```ignore
-/// use ambitious::channel::v2::*;
-/// use ambitious::Message;
-///
-/// #[derive(Message)]
-/// struct NewMsg { text: String }
-///
-/// #[handle_in("new_msg")]
-/// impl HandleIn<NewMsg> for RoomChannel {
-///     type Reply = MessageBroadcast;
-///
-///     async fn handle_in(&mut self, msg: NewMsg, socket: &Socket) -> HandleResult<MessageBroadcast> {
-///         HandleResult::Broadcast {
-///             event: "new_msg".to_string(),
-///             payload: MessageBroadcast { from: self.nick.clone(), text: msg.text },
-///         }
-///     }
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn handle_in(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let impl_block = parse_macro_input!(item as ItemImpl);
-
-    // Parse the event name from the attribute (e.g., "new_msg")
-    let event_name: syn::LitStr = match syn::parse(attr) {
-        Ok(lit) => lit,
-        Err(_) => {
-            return syn::Error::new_spanned(
-                &impl_block,
-                "#[handle_in] requires an event name, e.g., #[handle_in(\"new_msg\")]",
-            )
-            .to_compile_error()
-            .into();
-        }
-    };
-
-    let Some((channel_type, msg_type)) = extract_handle_in_types(&impl_block) else {
-        return syn::Error::new_spanned(
-            &impl_block,
-            "#[handle_in] can only be applied to `impl HandleIn<M> for C` blocks",
-        )
-        .to_compile_error()
-        .into();
-    };
-
-    let static_name = handler_static_name("CHANNEL_IN", &channel_type, &msg_type);
-
-    let expanded = quote! {
-        #[::ambitious::channel::async_trait]
-        #impl_block
-
-        #[::ambitious::linkme::distributed_slice(::ambitious::channel::dispatch::HANDLE_IN_HANDLERS)]
-        #[linkme(crate = ::ambitious::linkme)]
-        static #static_name: ::ambitious::channel::dispatch::HandleInEntry = ::ambitious::channel::dispatch::HandleInEntry {
-            channel_type_id: || ::std::any::TypeId::of::<#channel_type>(),
-            event_name: || #event_name,
-            dispatch: |channel_any, payload, socket| {
-                Box::pin(async move {
-                    use ::ambitious::channel::HandleIn;
-                    use ::ambitious::message::Message;
-
-                    let channel = channel_any.downcast_mut::<#channel_type>()
-                        .expect("channel type mismatch in handle_in dispatch");
-
-                    let msg = match <#msg_type>::decode_local(payload) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            return ::ambitious::channel::RawHandleResult::Stop {
-                                reason: format!("decode error: {}", e),
-                            };
-                        }
-                    };
-
-                    let result = <#channel_type as HandleIn<#msg_type>>::handle_in(channel, msg, socket).await;
-                    ::ambitious::channel::handle_result_to_raw(result)
-                })
-            },
-        };
-    };
-
-    TokenStream::from(expanded)
-}
+// Note: Both GenServer and Channel now use the enum-based pattern which doesn't
+// require attribute macros. See `ambitious::gen_server` and `ambitious::channel`
+// for the new APIs.

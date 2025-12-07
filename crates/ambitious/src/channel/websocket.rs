@@ -223,7 +223,7 @@ impl<C: Channel> Default for JsonChannelHandler<C> {
 #[async_trait]
 impl<C: Channel> ChannelHandler for JsonChannelHandler<C>
 where
-    C::JoinPayload: DeserializeOwned,
+    C::Join: DeserializeOwned,
 {
     fn topic_pattern(&self) -> &'static str {
         C::TOPIC_PATTERN
@@ -240,7 +240,7 @@ where
         socket: Socket,
     ) -> Result<(Box<dyn ChannelInstance>, Option<Vec<u8>>), JoinError> {
         // Parse JSON payload
-        let join_payload: C::JoinPayload = serde_json::from_slice(payload)
+        let join_payload: C::Join = serde_json::from_slice(payload)
             .map_err(|e| JoinError::new(format!("invalid payload: {}", e)))?;
 
         match C::join(topic, join_payload, &socket).await {
@@ -320,7 +320,7 @@ impl WebSocketEndpoint {
     pub fn channel<C>(mut self) -> Self
     where
         C: Channel,
-        C::JoinPayload: DeserializeOwned,
+        C::Join: DeserializeOwned,
     {
         self.handlers.push(Arc::new(JsonChannelHandler::<C>::new()));
         self

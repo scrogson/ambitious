@@ -3,32 +3,35 @@
 //! The lobby channel provides system-level operations like listing rooms.
 //! Clients join "lobby:main" to access these features.
 
-use ambitious::channel::{
-    Channel, HandleIn, HandleResult, JoinResult, ReplyStatus, Socket, async_trait,
-};
-use ambitious::{Message, handle_in};
+use ambitious::Message;
+use ambitious::channel::{Channel, HandleResult, JoinResult, ReplyStatus, Socket, async_trait};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::RoomInfo;
 use crate::registry::Registry;
 
 /// Payload sent when joining the lobby.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobbyJoinPayload {
+#[derive(Debug, Clone, Message)]
+pub struct LobbyJoin {
     /// Optional nickname.
-    #[serde(default)]
     pub nick: Option<String>,
 }
 
-/// Request to list available rooms.
-#[derive(Debug, Clone, Message)]
-pub struct ListRooms;
+/// All incoming events for the lobby channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
+pub enum LobbyIn {
+    /// Request to list available rooms.
+    ListRooms,
+}
 
-/// Response containing the list of rooms.
-#[derive(Debug, Clone, Message)]
-pub struct RoomList {
-    /// List of available rooms.
-    pub rooms: Vec<RoomInfo>,
+/// All outgoing events for the lobby channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
+pub enum LobbyOut {
+    /// Response containing the list of rooms.
+    RoomList {
+        /// List of available rooms.
+        rooms: Vec<RoomInfo>,
+    },
 }
 
 /// The lobby channel - struct IS the state.
@@ -40,26 +43,33 @@ pub struct LobbyChannel {
 
 #[async_trait]
 impl Channel for LobbyChannel {
-    type JoinPayload = LobbyJoinPayload;
+    type Join = LobbyJoin;
+    type In = LobbyIn;
+    type Out = LobbyOut;
+    type Info = ();
     const TOPIC_PATTERN: &'static str = "lobby:*";
 
-    async fn join(_topic: &str, payload: Self::JoinPayload, _socket: &Socket) -> JoinResult<Self> {
+    async fn join(_topic: &str, payload: LobbyJoin, _socket: &Socket) -> JoinResult<Self> {
         tracing::info!(nick = ?payload.nick, "Client joining lobby");
         JoinResult::Ok(LobbyChannel { nick: payload.nick })
     }
-}
 
-#[handle_in("list_rooms")]
-impl HandleIn<ListRooms> for LobbyChannel {
-    type Reply = RoomList;
+    async fn handle_in(
+        &mut self,
+        _event: &str,
+        msg: LobbyIn,
+        _socket: &Socket,
+    ) -> HandleResult<LobbyOut> {
+        match msg {
+            LobbyIn::ListRooms => {
+                let rooms = Registry::list_rooms().await;
+                tracing::debug!(room_count = rooms.len(), "Sending room list");
 
-    async fn handle_in(&mut self, _msg: ListRooms, _socket: &Socket) -> HandleResult<RoomList> {
-        let rooms = Registry::list_rooms().await;
-        tracing::debug!(room_count = rooms.len(), "Sending room list");
-
-        HandleResult::Reply {
-            status: ReplyStatus::Ok,
-            payload: RoomList { rooms },
+                HandleResult::Reply {
+                    status: ReplyStatus::Ok,
+                    payload: LobbyOut::RoomList { rooms },
+                }
+            }
         }
     }
 }

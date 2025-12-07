@@ -12,11 +12,10 @@ use crate::room_supervisor;
 use ambitious::Message;
 use ambitious::RawTerm;
 use ambitious::channel::{
-    Channel, ChannelReply, HandleIn, HandleResult, JoinError, JoinResult, RawHandleResult,
-    ReplyStatus, Socket, TerminateReason, async_trait, broadcast_from, push,
+    Channel, ChannelReply, HandleResult, JoinError, JoinResult, RawHandleResult, ReplyStatus,
+    Socket, TerminateReason, async_trait, broadcast_from, push,
 };
 use ambitious::gen_server::call;
-use ambitious::handle_in;
 use ambitious::message::{Message as MessageTrait, decode_tag};
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
@@ -29,43 +28,45 @@ const PRESENCE_NAME: &str = "chat_presence";
 const PUBSUB_NAME: &str = "chat_pubsub";
 
 /// Payload sent when joining a room.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JoinPayload {
+#[derive(Debug, Clone, Message)]
+pub struct RoomJoin {
     /// User's nickname.
     pub nick: String,
 }
 
-/// Message to send a new chat message.
-#[derive(Debug, Clone, Message)]
-pub struct NewMsg {
-    /// Message text.
-    pub text: String,
+/// All incoming events for the room channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
+pub enum RoomIn {
+    /// Send a new chat message.
+    NewMsg {
+        /// Message text.
+        text: String,
+    },
+    /// Update nickname.
+    UpdateNick {
+        /// New nickname.
+        nick: String,
+    },
 }
 
-/// Broadcast payload for new messages.
-#[derive(Debug, Clone, Message)]
-pub struct MessageBroadcast {
-    /// Who sent the message.
-    pub from: String,
-    /// Message text.
-    pub text: String,
+/// All outgoing events for the room channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
+pub enum RoomOut {
+    /// Broadcast payload for new messages.
+    MessageBroadcast {
+        /// Who sent the message.
+        from: String,
+        /// Message text.
+        text: String,
+    },
+    /// Reply for nick update errors.
+    NickError {
+        /// Error message.
+        error: String,
+    },
 }
 
-/// Message to update nickname.
-#[derive(Debug, Clone, Message)]
-pub struct UpdateNick {
-    /// New nickname.
-    pub nick: String,
-}
-
-/// Reply for nick update errors.
-#[derive(Debug, Clone, Message)]
-pub struct NickError {
-    /// Error message.
-    pub error: String,
-}
-
-/// Events broadcast to room members.
+/// Events broadcast to room members (used for push/broadcast).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoomOutEvent {
     /// A user joined the room.
@@ -98,7 +99,7 @@ pub struct UserPresenceMeta {
 /// These are sent to the channel's own process (via send to socket.pid)
 /// and handled in handle_info. They are NOT broadcast messages.
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
-enum ChannelInfo {
+pub enum ChannelInfo {
     /// Trigger after-join logic (broadcast user joined, push history).
     AfterJoin,
     /// Trigger presence state push (delayed to allow sync).
@@ -117,10 +118,13 @@ pub struct RoomChannel {
 
 #[async_trait]
 impl Channel for RoomChannel {
-    type JoinPayload = JoinPayload;
+    type Join = RoomJoin;
+    type In = RoomIn;
+    type Out = RoomOut;
+    type Info = ChannelInfo;
     const TOPIC_PATTERN: &'static str = "room:*";
 
-    async fn join(topic: &str, payload: Self::JoinPayload, socket: &Socket) -> JoinResult<Self> {
+    async fn join(topic: &str, payload: RoomJoin, socket: &Socket) -> JoinResult<Self> {
         // Extract room name from topic
         let room_name = match topic.strip_prefix("room:") {
             Some(name) if !name.is_empty() => name.to_string(),
@@ -176,117 +180,162 @@ impl Channel for RoomChannel {
         })
     }
 
+    async fn handle_in(
+        &mut self,
+        _event: &str,
+        msg: RoomIn,
+        _socket: &Socket,
+    ) -> HandleResult<RoomOut> {
+        match msg {
+            RoomIn::NewMsg { text } => {
+                tracing::debug!(
+                    room = %self.room_name,
+                    from = %self.nick,
+                    text = %text,
+                    "Broadcasting message"
+                );
+
+                HandleResult::Broadcast {
+                    event: "new_msg".to_string(),
+                    payload: RoomOut::MessageBroadcast {
+                        from: self.nick.clone(),
+                        text,
+                    },
+                }
+            }
+            RoomIn::UpdateNick { nick } => {
+                if nick.is_empty() || nick.len() > 32 {
+                    return HandleResult::Reply {
+                        status: ReplyStatus::Error,
+                        payload: RoomOut::NickError {
+                            error: "nickname must be 1-32 characters".to_string(),
+                        },
+                    };
+                }
+
+                self.nick = nick;
+                HandleResult::NoReply
+            }
+        }
+    }
+
+    async fn handle_info(&mut self, msg: ChannelInfo, socket: &Socket) -> HandleResult<RoomOut> {
+        match msg {
+            ChannelInfo::AfterJoin => {
+                tracing::info!(
+                    room = %self.room_name,
+                    nick = %self.nick,
+                    socket_pid = ?socket.pid,
+                    "AfterJoin triggered - this socket will receive history"
+                );
+
+                // Broadcast UserJoined to notify others (not ourselves)
+                broadcast_from(
+                    socket,
+                    "user_joined",
+                    &RoomOutEvent::UserJoined {
+                        nick: self.nick.clone(),
+                    },
+                );
+
+                // Push history directly (not via another self-message to avoid loop)
+                if let Some(room_pid) = room_supervisor::get_room(&self.room_name)
+                    && let Ok(RoomReply::History(messages)) = call::<Room, RoomReply>(
+                        room_pid,
+                        RoomCall::GetHistory,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    && !messages.is_empty()
+                {
+                    tracing::info!(
+                        room = %self.room_name,
+                        nick = %self.nick,
+                        socket_pid = ?socket.pid,
+                        message_count = messages.len(),
+                        "PUSHING HISTORY to socket"
+                    );
+                    push(socket, "history", &RoomOutEvent::History { messages });
+                }
+
+                // Schedule a delayed message to push presence state
+                // This gives time for presence sync responses to arrive from other nodes
+                let pid = socket.pid;
+                ambitious::spawn(move || async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let _ = ambitious::send(pid, &ChannelInfo::PushPresenceState);
+                });
+
+                HandleResult::NoReply
+            }
+            ChannelInfo::PushPresenceState => {
+                // Get current presence state and push to joining user
+                let topic = format!("room:{}", self.room_name);
+                let presences = match Presence::list(PRESENCE_NAME, &topic).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to get presence list");
+                        std::collections::HashMap::new()
+                    }
+                };
+                let mut users: Vec<String> = presences
+                    .values()
+                    .flat_map(|state| {
+                        state
+                            .metas
+                            .iter()
+                            .filter_map(|meta| meta.decode::<UserPresenceMeta>().map(|m| m.nick))
+                    })
+                    .collect();
+
+                // Always include self in the user list
+                if !users.contains(&self.nick) {
+                    users.push(self.nick.clone());
+                }
+
+                tracing::debug!(
+                    room = %self.room_name,
+                    user_count = users.len(),
+                    users = ?users,
+                    "Pushing presence state to user"
+                );
+                push(
+                    socket,
+                    "presence_state",
+                    &RoomOutEvent::PresenceState { users },
+                );
+
+                HandleResult::NoReply
+            }
+            ChannelInfo::PresenceSyncRequest { from_pid: _ } => {
+                // Someone is asking who's here - respond with our nick
+                tracing::debug!(
+                    room = %self.room_name,
+                    nick = %self.nick,
+                    "Responding to presence sync request"
+                );
+
+                broadcast_from(
+                    socket,
+                    "presence_sync_response",
+                    &RoomOutEvent::PresenceSyncResponse {
+                        nick: self.nick.clone(),
+                    },
+                );
+
+                HandleResult::NoReply
+            }
+        }
+    }
+
     async fn handle_info_raw(&mut self, msg: RawTerm, socket: &Socket) -> RawHandleResult {
         // First check if this is a ChannelInfo message by checking the tag
         if let Ok((tag, payload)) = decode_tag(msg.as_bytes())
             && tag == <ChannelInfo as MessageTrait>::TAG
             && let Ok(info) = <ChannelInfo as MessageTrait>::decode_local(payload)
         {
-            match info {
-                ChannelInfo::AfterJoin => {
-                    tracing::info!(
-                        room = %self.room_name,
-                        nick = %self.nick,
-                        socket_pid = ?socket.pid,
-                        "AfterJoin triggered - this socket will receive history"
-                    );
-
-                    // Broadcast UserJoined to notify others (not ourselves)
-                    broadcast_from(
-                        socket,
-                        "user_joined",
-                        &RoomOutEvent::UserJoined {
-                            nick: self.nick.clone(),
-                        },
-                    );
-
-                    // Push history directly (not via another self-message to avoid loop)
-                    if let Some(room_pid) = room_supervisor::get_room(&self.room_name)
-                        && let Ok(RoomReply::History(messages)) = call::<Room, RoomReply>(
-                            room_pid,
-                            RoomCall::GetHistory,
-                            Duration::from_secs(5),
-                        )
-                        .await
-                        && !messages.is_empty()
-                    {
-                        tracing::info!(
-                            room = %self.room_name,
-                            nick = %self.nick,
-                            socket_pid = ?socket.pid,
-                            message_count = messages.len(),
-                            "PUSHING HISTORY to socket"
-                        );
-                        push(socket, "history", &RoomOutEvent::History { messages });
-                    }
-
-                    // Schedule a delayed message to push presence state
-                    // This gives time for presence sync responses to arrive from other nodes
-                    let pid = socket.pid;
-                    ambitious::spawn(move || async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let _ = ambitious::send(pid, &ChannelInfo::PushPresenceState);
-                    });
-
-                    return RawHandleResult::NoReply;
-                }
-                ChannelInfo::PushPresenceState => {
-                    // Get current presence state and push to joining user
-                    let topic = format!("room:{}", self.room_name);
-                    let presences = match Presence::list(PRESENCE_NAME, &topic).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to get presence list");
-                            std::collections::HashMap::new()
-                        }
-                    };
-                    let mut users: Vec<String> = presences
-                        .values()
-                        .flat_map(|state| {
-                            state.metas.iter().filter_map(|meta| {
-                                meta.decode::<UserPresenceMeta>().map(|m| m.nick)
-                            })
-                        })
-                        .collect();
-
-                    // Always include self in the user list
-                    if !users.contains(&self.nick) {
-                        users.push(self.nick.clone());
-                    }
-
-                    tracing::debug!(
-                        room = %self.room_name,
-                        user_count = users.len(),
-                        users = ?users,
-                        "Pushing presence state to user"
-                    );
-                    push(
-                        socket,
-                        "presence_state",
-                        &RoomOutEvent::PresenceState { users },
-                    );
-
-                    return RawHandleResult::NoReply;
-                }
-                ChannelInfo::PresenceSyncRequest { from_pid: _ } => {
-                    // Someone is asking who's here - respond with our nick
-                    tracing::debug!(
-                        room = %self.room_name,
-                        nick = %self.nick,
-                        "Responding to presence sync request"
-                    );
-
-                    broadcast_from(
-                        socket,
-                        "presence_sync_response",
-                        &RoomOutEvent::PresenceSyncResponse {
-                            nick: self.nick.clone(),
-                        },
-                    );
-
-                    return RawHandleResult::NoReply;
-                }
-            }
+            let result = self.handle_info(info, socket).await;
+            return ambitious::channel::handle_result_to_raw(result);
         }
 
         // Try to decode as ChannelReply (broadcast from another user via pg)
@@ -397,51 +446,6 @@ impl Channel for RoomChannel {
         if let Err(e) = PubSub::unsubscribe_pid(PUBSUB_NAME, &presence_topic, socket.pid).await {
             tracing::warn!(error = %e, "Failed to unsubscribe from presence updates");
         }
-    }
-}
-
-// =============================================================================
-// Typed Event Handlers
-// =============================================================================
-
-#[handle_in("new_msg")]
-impl HandleIn<NewMsg> for RoomChannel {
-    type Reply = MessageBroadcast;
-
-    async fn handle_in(&mut self, msg: NewMsg, _socket: &Socket) -> HandleResult<MessageBroadcast> {
-        tracing::debug!(
-            room = %self.room_name,
-            from = %self.nick,
-            text = %msg.text,
-            "Broadcasting message"
-        );
-
-        HandleResult::Broadcast {
-            event: "new_msg".to_string(),
-            payload: MessageBroadcast {
-                from: self.nick.clone(),
-                text: msg.text,
-            },
-        }
-    }
-}
-
-#[handle_in("update_nick")]
-impl HandleIn<UpdateNick> for RoomChannel {
-    type Reply = NickError;
-
-    async fn handle_in(&mut self, msg: UpdateNick, _socket: &Socket) -> HandleResult<NickError> {
-        if msg.nick.is_empty() || msg.nick.len() > 32 {
-            return HandleResult::Reply {
-                status: ReplyStatus::Error,
-                payload: NickError {
-                    error: "nickname must be 1-32 characters".to_string(),
-                },
-            };
-        }
-
-        self.nick = msg.nick;
-        HandleResult::NoReply
     }
 }
 

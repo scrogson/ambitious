@@ -5,7 +5,7 @@
 //! - Sends events back to the client
 //! - Uses ChannelServer for room management
 
-use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
+use crate::channel::{RoomChannel, RoomJoin, RoomOutEvent};
 use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
 use crate::room::{Room, RoomCast};
@@ -337,7 +337,7 @@ impl Session {
         }
 
         // Create join payload
-        let join_payload = JoinPayload { nick: nick.clone() };
+        let join_payload = RoomJoin { nick: nick.clone() };
         let payload_bytes = join_payload.encode();
 
         // Join via channel server

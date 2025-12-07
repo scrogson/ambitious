@@ -2,13 +2,14 @@
 //!
 //! Channels provide Phoenix-style real-time communication with:
 //! - `&mut self` style handlers (struct IS the channel state)
-//! - Typed message handlers (`HandleIn<M>`)
+//! - Enum-based message dispatch (like GenServer)
 //! - Topic-based routing with wildcard patterns
 
 use crate::core::{Pid, RawTerm};
 use crate::dist::pg;
+use crate::message::Message as MessageTrait;
 pub use async_trait::async_trait;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -262,7 +263,7 @@ pub enum TerminateReason {
 /// # Example
 ///
 /// ```ignore
-/// use ambitious::channel::{Channel, Socket, JoinResult, HandleResult, ReplyStatus};
+/// use ambitious::channel::{Channel, Socket, JoinResult, HandleResult, ReplyStatus, async_trait};
 /// use ambitious::Message;
 /// use serde::{Deserialize, Serialize};
 ///
@@ -270,45 +271,59 @@ pub enum TerminateReason {
 ///     nick: Option<String>,
 /// }
 ///
-/// #[derive(Serialize, Deserialize)]
-/// pub struct JoinPayload {
+/// // Join payload
+/// #[derive(Debug, Clone, Serialize, Deserialize, Message)]
+/// pub struct LobbyJoin {
 ///     nick: Option<String>,
 /// }
 ///
-/// #[derive(Message)]
-/// pub struct ListRooms;
+/// // All incoming events in one enum
+/// #[derive(Debug, Clone, Serialize, Deserialize, Message)]
+/// pub enum LobbyIn {
+///     ListRooms,
+/// }
 ///
-/// #[derive(Message)]
-/// pub struct RoomList {
-///     rooms: Vec<String>,
+/// // All outgoing events in one enum
+/// #[derive(Debug, Clone, Serialize, Deserialize, Message)]
+/// pub enum LobbyOut {
+///     RoomList { rooms: Vec<String> },
 /// }
 ///
 /// #[async_trait]
 /// impl Channel for LobbyChannel {
-///     type JoinPayload = JoinPayload;
+///     type Join = LobbyJoin;
+///     type In = LobbyIn;
+///     type Out = LobbyOut;
+///     type Info = ();
 ///     const TOPIC_PATTERN: &'static str = "lobby:*";
 ///
-///     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
+///     async fn join(_topic: &str, payload: LobbyJoin, _socket: &Socket) -> JoinResult<Self> {
 ///         JoinResult::Ok(Self { nick: payload.nick })
 ///     }
-/// }
 ///
-/// #[handle_in("list_rooms")]
-/// impl HandleIn<ListRooms> for LobbyChannel {
-///     type Reply = RoomList;
-///
-///     async fn handle_in(&mut self, _msg: ListRooms, _socket: &Socket) -> HandleResult<RoomList> {
-///         HandleResult::Reply {
-///             status: ReplyStatus::Ok,
-///             payload: RoomList { rooms: vec!["lobby".into()] },
+///     async fn handle_in(&mut self, event: &str, msg: LobbyIn, _socket: &Socket) -> HandleResult<LobbyOut> {
+///         match msg {
+///             LobbyIn::ListRooms => HandleResult::Reply {
+///                 status: ReplyStatus::Ok,
+///                 payload: LobbyOut::RoomList { rooms: vec!["lobby".into()] },
+///             },
 ///         }
 ///     }
 /// }
 /// ```
 #[async_trait]
 pub trait Channel: Sized + Send + Sync + 'static {
-    /// The payload type for join requests.
-    type JoinPayload: DeserializeOwned + Send;
+    /// The join payload type.
+    type Join: MessageTrait;
+
+    /// Enum of all incoming event types.
+    type In: MessageTrait;
+
+    /// Enum of all outgoing event/reply types.
+    type Out: Serialize + Send + 'static;
+
+    /// Enum of info message types (messages from other processes).
+    type Info: MessageTrait;
 
     /// The topic pattern this channel handles (e.g., "room:*").
     ///
@@ -319,53 +334,64 @@ pub trait Channel: Sized + Send + Sync + 'static {
     ///
     /// This constructs the channel state. Return `JoinResult::Ok(self)`
     /// to allow the join, or `JoinResult::Error` to deny.
-    async fn join(topic: &str, payload: Self::JoinPayload, socket: &Socket) -> JoinResult<Self>;
+    async fn join(topic: &str, payload: Self::Join, socket: &Socket) -> JoinResult<Self>;
 
     /// Called when the channel is terminating.
     ///
     /// Override this for cleanup logic.
     async fn terminate(&mut self, _reason: TerminateReason, _socket: &Socket) {}
 
-    /// Handle a raw incoming event.
+    /// Handle an incoming event from a client.
     ///
-    /// The default implementation uses the global dispatch registry
-    /// populated by `#[handle_in]` macros.
+    /// The `event` parameter is the event name string from the client.
+    /// The `msg` parameter is the decoded message.
+    async fn handle_in(
+        &mut self,
+        event: &str,
+        msg: Self::In,
+        socket: &Socket,
+    ) -> HandleResult<Self::Out>;
+
+    /// Handle an info message from another process.
+    ///
+    /// Override this to handle messages sent to the channel's process.
+    async fn handle_info(&mut self, _msg: Self::Info, _socket: &Socket) -> HandleResult<Self::Out> {
+        HandleResult::NoReply
+    }
+
+    /// Handle a raw incoming event (for transport layer).
+    ///
+    /// Default implementation decodes the message and calls `handle_in`.
     async fn handle_in_raw(
         &mut self,
         event: &str,
         payload: &[u8],
         socket: &Socket,
     ) -> RawHandleResult {
-        // Try global dispatch registry
-        if let Some(result) = dispatch::dispatch_handle_in(self, event, payload, socket).await {
-            return result;
+        match Self::In::decode_local(payload) {
+            Ok(msg) => {
+                let result = self.handle_in(event, msg, socket).await;
+                handle_result_to_raw(result)
+            }
+            Err(e) => {
+                tracing::warn!(event = %event, error = %e, "Failed to decode channel message");
+                RawHandleResult::NoReply
+            }
         }
-        RawHandleResult::NoReply
     }
 
-    /// Handle a raw info message.
+    /// Handle a raw info message (for transport layer).
     ///
-    /// Override this to handle messages from other processes.
-    async fn handle_info_raw(&mut self, _msg: RawTerm, _socket: &Socket) -> RawHandleResult {
-        RawHandleResult::NoReply
+    /// Default implementation decodes the message and calls `handle_info`.
+    async fn handle_info_raw(&mut self, msg: RawTerm, socket: &Socket) -> RawHandleResult {
+        match Self::Info::decode_local(msg.as_bytes()) {
+            Ok(info) => {
+                let result = self.handle_info(info, socket).await;
+                handle_result_to_raw(result)
+            }
+            Err(_) => RawHandleResult::NoReply,
+        }
     }
-}
-
-// ============================================================================
-// Typed Handler Traits
-// ============================================================================
-
-/// Handler for incoming client events.
-///
-/// Implement this trait to handle a specific event type.
-/// Use the `#[handle_in("event_name")]` attribute macro to register handlers.
-#[async_trait]
-pub trait HandleIn<M: Send + 'static>: Channel {
-    /// The reply/broadcast payload type.
-    type Reply: Serialize + Send + 'static;
-
-    /// Handle the incoming event.
-    async fn handle_in(&mut self, msg: M, socket: &Socket) -> HandleResult<Self::Reply>;
 }
 
 // ============================================================================
@@ -488,101 +514,6 @@ fn uuid_simple() -> String {
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
 
     format!("{:x}-{:x}", timestamp, count)
-}
-
-// ============================================================================
-// Dispatch Module
-// ============================================================================
-
-pub mod dispatch {
-    //! Automatic message dispatch for Channels using linkme.
-
-    use super::{Channel, RawHandleResult, Socket};
-    use linkme::distributed_slice;
-    use std::any::{Any, TypeId};
-    use std::collections::HashMap;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::OnceLock;
-
-    /// Type-erased async dispatch function for HandleIn handlers.
-    pub type AnyHandleInDispatchFn =
-        for<'a> fn(
-            &'a mut (dyn Any + Send),
-            &'a [u8],
-            &'a Socket,
-        ) -> Pin<Box<dyn Future<Output = RawHandleResult> + Send + 'a>>;
-
-    /// A registered HandleIn handler entry.
-    pub struct HandleInEntry {
-        /// Returns the TypeId of the Channel this handler is for.
-        pub channel_type_id: fn() -> TypeId,
-        /// Returns the event name this handler responds to.
-        pub event_name: fn() -> &'static str,
-        /// The dispatch function.
-        pub dispatch: AnyHandleInDispatchFn,
-    }
-
-    unsafe impl Send for HandleInEntry {}
-    unsafe impl Sync for HandleInEntry {}
-
-    /// Distributed slice for HandleIn handlers, populated at link time.
-    #[distributed_slice]
-    pub static HANDLE_IN_HANDLERS: [HandleInEntry];
-
-    /// Key for looking up handlers: (ChannelTypeId, EventName)
-    type HandlerKey = (TypeId, &'static str);
-
-    /// Global registry of all handlers, built lazily from distributed slices.
-    struct GlobalRegistry {
-        handle_in: HashMap<HandlerKey, AnyHandleInDispatchFn>,
-    }
-
-    impl GlobalRegistry {
-        fn build() -> Self {
-            let mut handle_in = HashMap::new();
-
-            for entry in HANDLE_IN_HANDLERS {
-                let key = ((entry.channel_type_id)(), (entry.event_name)());
-                handle_in.insert(key, entry.dispatch);
-            }
-
-            GlobalRegistry { handle_in }
-        }
-    }
-
-    static GLOBAL_REGISTRY: OnceLock<GlobalRegistry> = OnceLock::new();
-
-    fn global_registry() -> &'static GlobalRegistry {
-        GLOBAL_REGISTRY.get_or_init(GlobalRegistry::build)
-    }
-
-    /// Dispatch a HandleIn event to the appropriate handler.
-    ///
-    /// Returns `Some(result)` if a handler was found, `None` otherwise.
-    pub async fn dispatch_handle_in<C: Channel + Send + 'static>(
-        channel: &mut C,
-        event: &str,
-        payload: &[u8],
-        socket: &Socket,
-    ) -> Option<RawHandleResult> {
-        let registry = global_registry();
-        let type_id = TypeId::of::<C>();
-
-        let dispatch = registry.handle_in.iter().find_map(|((tid, ev), dispatch)| {
-            if *tid == type_id && *ev == event {
-                Some(*dispatch)
-            } else {
-                None
-            }
-        });
-
-        if let Some(dispatch) = dispatch {
-            Some(dispatch(channel as &mut (dyn Any + Send), payload, socket).await)
-        } else {
-            None
-        }
-    }
 }
 
 // ============================================================================
@@ -769,7 +700,7 @@ impl<C: Channel> ChannelHandler for TypedChannelHandler<C> {
         payload: &[u8],
         socket: Socket,
     ) -> Result<(Box<dyn ChannelInstance>, Option<Vec<u8>>), JoinError> {
-        let join_payload: C::JoinPayload = postcard::from_bytes(payload)
+        let join_payload: C::Join = C::Join::decode_local(payload)
             .map_err(|e| JoinError::new(format!("invalid payload: {}", e)))?;
 
         match C::join(topic, join_payload, &socket).await {
