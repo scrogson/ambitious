@@ -1,7 +1,7 @@
 //! DynamicSupervisor implementation.
 //!
 //! A DynamicSupervisor starts with no children and children are started
-//! dynamically via [`start_child`]. Unlike regular supervisors, there is
+//! dynamically via `start_child`. Unlike regular supervisors, there is
 //! no ordering between children, and children are identified by PID rather
 //! than by ID.
 //!

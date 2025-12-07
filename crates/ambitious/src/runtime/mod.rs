@@ -4,10 +4,10 @@
 //!
 //! This crate provides the core runtime components:
 //!
-//! - [`ProcessRegistry`] - Concurrent registry mapping PIDs to process handles
-//! - [`Mailbox`] - Message queue for process communication
-//! - [`ProcessHandle`] - Handle for interacting with a running process
-//! - [`Context`] - Process execution context with access to runtime services
+//! - `ProcessRegistry` - Concurrent registry mapping PIDs to process handles
+//! - `Mailbox` - Message queue for process communication
+//! - `ProcessHandle` - Handle for interacting with a running process
+//! - `Context` - Process execution context with access to runtime services
 
 #![deny(warnings)]
 #![deny(missing_docs)]

@@ -3,20 +3,12 @@
 //! The lobby channel provides system-level operations like listing rooms.
 //! Clients join "lobby:main" to access these features.
 
-use ambitious::RawTerm;
-use ambitious::channel::{Channel, HandleResult, JoinResult, Socket};
-use async_trait::async_trait;
+use ambitious::channel::{Channel, HandleIn, HandleResult, JoinResult, ReplyStatus, Socket};
+use ambitious::{channel, handle_in, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::RoomInfo;
 use crate::registry::Registry;
-
-/// Custom state stored in the lobby socket's assigns.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobbyAssigns {
-    /// Optional nickname (not required for lobby).
-    pub nick: Option<String>,
-}
 
 /// Payload sent when joining the lobby.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,80 +18,50 @@ pub struct LobbyJoinPayload {
     pub nick: Option<String>,
 }
 
-/// Events sent from client to server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LobbyInEvent {
-    /// Request the list of rooms.
-    ListRooms,
-}
+/// Request to list available rooms.
+#[derive(Debug, Clone, Message)]
+pub struct ListRooms;
 
-/// Events sent from server to client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LobbyOutEvent {
+/// Response containing the list of rooms.
+#[derive(Debug, Clone, Message)]
+pub struct RoomList {
     /// List of available rooms.
-    RoomList { rooms: Vec<RoomInfo> },
+    pub rooms: Vec<RoomInfo>,
 }
 
-/// The lobby channel handler.
-pub struct LobbyChannel;
+/// The lobby channel - struct IS the state.
+pub struct LobbyChannel {
+    /// Optional nickname (not required for lobby).
+    #[allow(dead_code)]
+    nick: Option<String>,
+}
 
-#[async_trait]
+#[channel(topic = "lobby:*")]
 impl Channel for LobbyChannel {
-    type Assigns = LobbyAssigns;
     type JoinPayload = LobbyJoinPayload;
-    type InEvent = LobbyInEvent;
-    type OutEvent = LobbyOutEvent;
-
-    fn topic_pattern() -> &'static str {
-        "lobby:*"
-    }
 
     async fn join(
         _topic: &str,
         payload: Self::JoinPayload,
-        socket: Socket<()>,
-    ) -> JoinResult<Self::Assigns> {
+        _socket: &Socket,
+    ) -> JoinResult<Self> {
         tracing::info!(nick = ?payload.nick, "Client joining lobby");
-
-        let assigns = LobbyAssigns { nick: payload.nick };
-        JoinResult::Ok(socket.assign(assigns))
+        JoinResult::Ok(LobbyChannel { nick: payload.nick })
     }
+}
 
-    async fn handle_in(
-        event: &str,
-        payload: Self::InEvent,
-        _socket: &mut Socket<Self::Assigns>,
-    ) -> HandleResult<Self::OutEvent> {
-        match (event, payload) {
-            ("list_rooms", LobbyInEvent::ListRooms) => {
-                let rooms = Registry::list_rooms().await;
-                tracing::debug!(room_count = rooms.len(), "Sending room list");
+#[handle_in("list_rooms")]
+impl HandleIn<ListRooms> for LobbyChannel {
+    type Reply = RoomList;
 
-                // Return a typed reply with the room list
-                HandleResult::Reply {
-                    status: ambitious::channel::ReplyStatus::Ok,
-                    payload: LobbyOutEvent::RoomList { rooms },
-                }
-            }
-            _ => {
-                tracing::warn!(event = %event, "Unknown lobby event");
-                HandleResult::NoReply
-            }
+    async fn handle_in(&mut self, _msg: ListRooms, _socket: &Socket) -> HandleResult<RoomList> {
+        let rooms = Registry::list_rooms().await;
+        tracing::debug!(room_count = rooms.len(), "Sending room list");
+
+        HandleResult::Reply {
+            status: ReplyStatus::Ok,
+            payload: RoomList { rooms },
         }
-    }
-
-    async fn handle_info(
-        _msg: RawTerm,
-        _socket: &mut Socket<Self::Assigns>,
-    ) -> HandleResult<Self::OutEvent> {
-        HandleResult::NoReply
-    }
-
-    async fn terminate(
-        _reason: ambitious::channel::TerminateReason,
-        _socket: &Socket<Self::Assigns>,
-    ) {
-        tracing::debug!("Client leaving lobby");
     }
 }
 

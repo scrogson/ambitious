@@ -60,7 +60,7 @@ mod types;
 /// and children are added dynamically via `start_child`. It only supports
 /// the one-for-one strategy.
 ///
-/// See [`dynamic_supervisor`] module for details.
+/// See the `dynamic_supervisor` module for details.
 pub mod dynamic_supervisor;
 
 pub use core::{

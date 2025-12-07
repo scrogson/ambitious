@@ -777,3 +777,230 @@ pub fn info(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+// =============================================================================
+// Channel v2 Handler Registration Macros
+// =============================================================================
+
+/// Extract the Channel type and Message type from `impl HandleIn<M> for C`.
+fn extract_handle_in_types(impl_block: &ItemImpl) -> Option<(Type, Type)> {
+    let channel_type = (*impl_block.self_ty).clone();
+    let trait_path = impl_block.trait_.as_ref()?.1.clone();
+    let last_segment = trait_path.segments.last()?;
+    if last_segment.ident != "HandleIn" {
+        return None;
+    }
+
+    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+        if let Some(syn::GenericArgument::Type(msg_type)) = args.args.first() {
+            return Some((channel_type, msg_type.clone()));
+        }
+    }
+
+    None
+}
+
+
+/// Attribute macro for Channel HandleIn handler registration.
+///
+/// Apply this to an `impl HandleIn<M> for C` block to automatically register
+/// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
+///
+/// The attribute takes an event name as argument that maps to the incoming event string.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::channel::v2::*;
+/// use ambitious::Message;
+///
+/// #[derive(Message)]
+/// struct NewMsg { text: String }
+///
+/// #[handle_in("new_msg")]
+/// impl HandleIn<NewMsg> for RoomChannel {
+///     type Reply = MessageBroadcast;
+///
+///     async fn handle_in(&mut self, msg: NewMsg, socket: &Socket) -> HandleResult<MessageBroadcast> {
+///         HandleResult::Broadcast {
+///             event: "new_msg".to_string(),
+///             payload: MessageBroadcast { from: self.nick.clone(), text: msg.text },
+///         }
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn handle_in(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let impl_block = parse_macro_input!(item as ItemImpl);
+
+    // Parse the event name from the attribute (e.g., "new_msg")
+    let event_name: syn::LitStr = match syn::parse(attr) {
+        Ok(lit) => lit,
+        Err(_) => {
+            return syn::Error::new_spanned(
+                &impl_block,
+                "#[handle_in] requires an event name, e.g., #[handle_in(\"new_msg\")]",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let Some((channel_type, msg_type)) = extract_handle_in_types(&impl_block) else {
+        return syn::Error::new_spanned(
+            &impl_block,
+            "#[handle_in] can only be applied to `impl HandleIn<M> for C` blocks",
+        )
+        .to_compile_error()
+        .into();
+    };
+
+    let static_name = handler_static_name("CHANNEL_IN", &channel_type, &msg_type);
+
+    let expanded = quote! {
+        #[::ambitious::channel::async_trait]
+        #impl_block
+
+        #[::ambitious::linkme::distributed_slice(::ambitious::channel::dispatch::HANDLE_IN_HANDLERS)]
+        #[linkme(crate = ::ambitious::linkme)]
+        static #static_name: ::ambitious::channel::dispatch::HandleInEntry = ::ambitious::channel::dispatch::HandleInEntry {
+            channel_type_id: || ::std::any::TypeId::of::<#channel_type>(),
+            event_name: || #event_name,
+            dispatch: |channel_any, payload, socket| {
+                Box::pin(async move {
+                    use ::ambitious::channel::HandleIn;
+                    use ::ambitious::message::Message;
+
+                    let channel = channel_any.downcast_mut::<#channel_type>()
+                        .expect("channel type mismatch in handle_in dispatch");
+
+                    let msg = match <#msg_type>::decode_local(payload) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            return ::ambitious::channel::RawHandleResult::Stop {
+                                reason: format!("decode error: {}", e),
+                            };
+                        }
+                    };
+
+                    let result = <#channel_type as HandleIn<#msg_type>>::handle_in(channel, msg, socket).await;
+                    ::ambitious::channel::handle_result_to_raw(result)
+                })
+            },
+        };
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Attribute macro for Channel trait implementation.
+///
+/// This macro simplifies Channel implementation by:
+/// 1. Automatically implementing `topic_pattern()` from the `topic` attribute
+/// 2. Applying `#[async_trait]` automatically
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::channel::{Channel, JoinResult, Socket};
+///
+/// pub struct LobbyChannel {
+///     nick: Option<String>,
+/// }
+///
+/// #[channel(topic = "lobby:*")]
+/// impl Channel for LobbyChannel {
+///     type JoinPayload = LobbyJoinPayload;
+///
+///     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
+///         JoinResult::Ok(LobbyChannel { nick: payload.nick })
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn channel(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let impl_block = parse_macro_input!(item as ItemImpl);
+
+    // Parse the topic pattern from the attribute
+    let topic_pattern = match parse_channel_attr(attr) {
+        Ok(topic) => topic,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    // Verify this is a Channel impl
+    let is_channel_impl = impl_block.trait_.as_ref().map_or(false, |(_, path, _)| {
+        path.segments.last().map_or(false, |seg| seg.ident == "Channel")
+    });
+
+    if !is_channel_impl {
+        return syn::Error::new_spanned(
+            &impl_block,
+            "#[channel] can only be applied to `impl Channel for T` blocks",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Get the self type (the channel struct)
+    let self_ty = &impl_block.self_ty;
+
+    // Extract existing items, filtering out topic_pattern if present
+    let existing_items: Vec<_> = impl_block
+        .items
+        .iter()
+        .filter(|item| {
+            !matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "topic_pattern")
+        })
+        .collect();
+
+    // Extract the trait path
+    let trait_path = impl_block.trait_.as_ref().map(|(_, path, _)| path);
+
+    // Build generics
+    let generics = &impl_block.generics;
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+
+    let expanded = quote! {
+        #[::ambitious::channel::async_trait]
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            fn topic_pattern() -> &'static str {
+                #topic_pattern
+            }
+
+            #(#existing_items)*
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Parse channel attribute arguments like `topic = "lobby:*"`
+fn parse_channel_attr(attr: TokenStream) -> Result<String, syn::Error> {
+    use syn::parse::Parser;
+
+    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+    let metas = parser.parse(attr)?;
+
+    let mut topic = None;
+
+    for meta in metas {
+        if let syn::Meta::NameValue(nv) = meta {
+            if nv.path.is_ident("topic") {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit_str),
+                    ..
+                }) = nv.value
+                {
+                    topic = Some(lit_str.value());
+                }
+            }
+        }
+    }
+
+    topic.ok_or_else(|| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[channel] requires a topic pattern, e.g., #[channel(topic = \"lobby:*\")]",
+        )
+    })
+}

@@ -396,7 +396,7 @@ impl<G: 'static> Default for HandlerRegistry<G> {
 // Helper Functions
 // =============================================================================
 
-/// Helper to convert a Reply<T> to RawReply.
+/// Helper to convert a `Reply<T>` to `RawReply`.
 ///
 /// This is used by the dispatch code to encode replies.
 pub fn reply_to_raw<T: Message>(reply: super::types::Reply<T>) -> RawReply {

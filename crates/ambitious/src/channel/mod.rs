@@ -5,8 +5,9 @@
 //!
 //! # Architecture
 //!
-//! - **Socket**: Represents a client connection, holds assigns (custom state)
-//! - **Channel**: A topic handler that processes joins, messages, and broadcasts
+//! - **Channel**: The struct IS the channel state
+//! - **Socket**: Connection metadata (PID, topic, join_ref)
+//! - **`HandleIn<M>`**: Typed handler trait for incoming events
 //! - **Topic**: String identifier for routing (supports patterns like `"room:*"`)
 //!
 //! # Transports
@@ -19,48 +20,49 @@
 //! # Example
 //!
 //! ```ignore
-//! use ambitious::channel::{Channel, Socket, JoinResult, HandleResult};
-//! use async_trait::async_trait;
+//! use ambitious::channel::{Channel, Socket, JoinResult, HandleResult, ReplyStatus, async_trait};
+//! use ambitious::{Message, handle_in};
 //! use serde::{Deserialize, Serialize};
 //!
-//! struct RoomChannel;
+//! // The struct IS the channel state
+//! pub struct LobbyChannel {
+//!     nick: Option<String>,
+//! }
+//!
+//! #[derive(Serialize, Deserialize)]
+//! pub struct JoinPayload {
+//!     nick: Option<String>,
+//! }
+//!
+//! #[derive(Message)]
+//! pub struct ListRooms;
+//!
+//! #[derive(Message)]
+//! pub struct RoomList {
+//!     rooms: Vec<String>,
+//! }
 //!
 //! #[async_trait]
-//! impl Channel for RoomChannel {
-//!     type Assigns = RoomAssigns;
-//!     type JoinPayload = JoinRoom;
-//!     type InEvent = RoomEvent;
-//!     type OutEvent = RoomBroadcast;
+//! impl Channel for LobbyChannel {
+//!     type JoinPayload = JoinPayload;
 //!
 //!     fn topic_pattern() -> &'static str {
-//!         "room:*"
+//!         "lobby:*"
 //!     }
 //!
-//!     async fn join(
-//!         topic: &str,
-//!         payload: Self::JoinPayload,
-//!         socket: Socket<Self::Assigns>,
-//!     ) -> JoinResult<Self::Assigns> {
-//!         // Authorize and set up assigns
-//!         let room_id = topic.strip_prefix("room:").unwrap();
-//!         let assigns = RoomAssigns { room_id: room_id.to_string() };
-//!         JoinResult::Ok(socket.assign(assigns))
+//!     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
+//!         JoinResult::Ok(Self { nick: payload.nick })
 //!     }
+//! }
 //!
-//!     async fn handle_in(
-//!         event: &str,
-//!         payload: Self::InEvent,
-//!         socket: &mut Socket<Self::Assigns>,
-//!     ) -> HandleResult<Self::OutEvent> {
-//!         match event {
-//!             "new_msg" => {
-//!                 // Broadcast to all subscribers
-//!                 HandleResult::Broadcast {
-//!                     event: "new_msg".to_string(),
-//!                     payload: RoomBroadcast::Message { text: payload.text },
-//!                 }
-//!             }
-//!             _ => HandleResult::NoReply,
+//! #[handle_in("list_rooms")]
+//! impl HandleIn<ListRooms> for LobbyChannel {
+//!     type Reply = RoomList;
+//!
+//!     async fn handle_in(&mut self, _msg: ListRooms, _socket: &Socket) -> HandleResult<RoomList> {
+//!         HandleResult::Reply {
+//!             status: ReplyStatus::Ok,
+//!             payload: RoomList { rooms: vec!["lobby".into()] },
 //!         }
 //!     }
 //! }

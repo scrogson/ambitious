@@ -4,13 +4,13 @@
 //!
 //! This crate provides the foundational types used throughout the Ambitious ecosystem:
 //!
-//! - [`Atom`] - Interned string for efficient comparison
-//! - [`Pid`] - Process identifier
-//! - [`Ref`] - Unique reference for monitors and timers
-//! - [`ExitReason`] - Process termination reasons
-//! - [`Term`] - Trait for Erlang-like serializable terms (messages, keys, etc.)
-//! - [`SystemMessage`] - Internal system messages (Exit, Down, Timeout)
-//! - [`NodeId`], [`NodeName`], [`NodeInfo`] - Node identity for distribution
+//! - `Atom` - Interned string for efficient comparison
+//! - `Pid` - Process identifier
+//! - `Ref` - Unique reference for monitors and timers
+//! - `ExitReason` - Process termination reasons
+//! - `Term` - Trait for Erlang-like serializable terms (messages, keys, etc.)
+//! - `SystemMessage` - Internal system messages (Exit, Down, Timeout)
+//! - `NodeId`, `NodeName`, `NodeInfo` - Node identity for distribution
 
 #![deny(warnings)]
 #![deny(missing_docs)]

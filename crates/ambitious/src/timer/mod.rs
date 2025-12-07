@@ -2,16 +2,16 @@
 //!
 //! This module provides Erlang-compatible timer functionality:
 //!
-//! - [`send_after`] - Send a message after a delay
-//! - [`send_interval`] - Send a message repeatedly at intervals
-//! - [`apply_after`] - Execute a function after a delay
-//! - [`apply_interval`] - Execute a function repeatedly at intervals
-//! - [`exit_after`] - Send an exit signal after a delay
-//! - [`kill_after`] - Send a kill signal after a delay
-//! - [`cancel`] - Cancel a scheduled timer
-//! - [`read`] - Read remaining time without cancelling
-//! - [`sleep`] - Sleep for a duration
-//! - [`tc`] / [`tc_async`] - Measure execution time
+//! - `send_after` - Send a message after a delay
+//! - `send_interval` - Send a message repeatedly at intervals
+//! - `apply_after` - Execute a function after a delay
+//! - `apply_interval` - Execute a function repeatedly at intervals
+//! - `exit_after` - Send an exit signal after a delay
+//! - `kill_after` - Send a kill signal after a delay
+//! - `cancel` - Cancel a scheduled timer
+//! - `read` - Read remaining time without cancelling
+//! - `sleep` - Sleep for a duration
+//! - `tc` / `tc_async` - Measure execution time
 //!
 //! # Example
 //!

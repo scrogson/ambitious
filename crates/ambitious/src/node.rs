@@ -6,13 +6,13 @@
 //! # Overview
 //!
 //! The Node module provides functions for:
-//! - Checking if the node is part of a distributed system ([`is_alive`])
-//! - Getting the current node's name ([`current`])
-//! - Connecting to and disconnecting from other nodes ([`connect`], [`disconnect`])
-//! - Listing connected nodes ([`list`])
-//! - Pinging nodes to check connectivity ([`ping`])
-//! - Monitoring nodes for disconnection ([`monitor`], [`demonitor`])
-//! - Spawning processes on remote nodes ([`spawn`], [`spawn_link`])
+//! - Checking if the node is part of a distributed system (`is_alive`)
+//! - Getting the current node's name (`current`)
+//! - Connecting to and disconnecting from other nodes (`connect`, `disconnect`)
+//! - Listing connected nodes (`list`)
+//! - Pinging nodes to check connectivity (`ping`)
+//! - Monitoring nodes for disconnection (`monitor`, `demonitor`)
+//! - Spawning processes on remote nodes (`spawn`, `spawn_link`)
 //!
 //! # Example
 //!

@@ -209,7 +209,7 @@ impl Session {
         let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
         for (topic, result) in info_results {
             match result {
-                ambitious::channel::HandleResult::Broadcast { event, payload } => {
+                ambitious::channel::RawHandleResult::Broadcast { event, payload } => {
                     // Channel wants to broadcast to all members
                     let group = format!("channel:{}", topic);
                     let msg = ChannelReply::Push {
@@ -225,7 +225,7 @@ impl Session {
                         }
                     }
                 }
-                ambitious::channel::HandleResult::BroadcastFrom { event, payload } => {
+                ambitious::channel::RawHandleResult::BroadcastFrom { event, payload } => {
                     // Channel wants to broadcast to all members except self
                     let group = format!("channel:{}", topic);
                     let msg = ChannelReply::Push {

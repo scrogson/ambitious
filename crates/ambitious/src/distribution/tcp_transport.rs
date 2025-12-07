@@ -110,7 +110,7 @@ impl TcpTransport {
 /// Wraps a TcpStream with framing and message serialization.
 #[derive(Clone)]
 pub struct TcpConnection {
-    /// The underlying TCP stream, wrapped in Arc<Mutex> for cloning.
+    /// The underlying TCP stream, wrapped in `Arc<Mutex>` for cloning.
     stream: Arc<Mutex<TcpStream>>,
     /// Remote peer address.
     remote_addr: SocketAddr,

@@ -4,13 +4,13 @@
 //!
 //! This crate provides the Process module API, mirroring Elixir's `Process`:
 //!
-//! - Spawning: [`spawn`], [`spawn_link`], [`spawn_monitor`]
-//! - Links: [`link`], [`unlink`]
-//! - Monitors: [`monitor`], [`demonitor`]
-//! - Messaging: [`send`], [`send_after`]
-//! - Exit signals: [`exit`]
-//! - Process info: [`alive`], [`self_pid`]
-//! - Registration: [`register`], [`whereis`], [`unregister`]
+//! - Spawning: `spawn`, `spawn_link`, `spawn_monitor`
+//! - Links: `link`, `unlink`
+//! - Monitors: `monitor`, `demonitor`
+//! - Messaging: `send`, `send_after`
+//! - Exit signals: `exit`
+//! - Process info: `alive`, `self_pid`
+//! - Registration: `register`, `whereis`, `unregister`
 //!
 //! # Example
 //!

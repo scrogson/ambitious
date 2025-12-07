@@ -1,6 +1,6 @@
 //! Process-owned concurrent key-value storage.
 //!
-//! The [`Store`] provides ETS-like functionality for Rust: typed, concurrent
+//! The `Store` provides ETS-like functionality for Rust: typed, concurrent
 //! key-value storage that is owned by a process and automatically cleaned up
 //! when the owner exits.
 //!

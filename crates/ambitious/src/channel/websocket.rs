@@ -32,13 +32,14 @@
 //! ```
 
 use super::{
-    Channel, ChannelHandler, ChannelReply, ChannelServer, DynChannelHandler, HandleResult,
-    JoinError, JoinResult, Socket, TerminateReason,
+    Channel, ChannelHandler, ChannelInstance, ChannelReply, JoinError,
+    RawHandleResult, ReplyStatus, Socket, TerminateReason, TypedChannelHandler,
 };
 use crate::Pid;
+use crate::dist::pg;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -222,7 +223,7 @@ impl<C: Channel> Default for JsonChannelHandler<C> {
 #[async_trait]
 impl<C: Channel> ChannelHandler for JsonChannelHandler<C>
 where
-    C::Assigns: Serialize + DeserializeOwned,
+    C::JoinPayload: DeserializeOwned,
 {
     fn topic_pattern(&self) -> &'static str {
         C::topic_pattern()
@@ -236,218 +237,59 @@ where
         &self,
         topic: &str,
         payload: &[u8],
-        socket: Socket<()>,
-    ) -> Result<(Socket<Vec<u8>>, Option<Vec<u8>>), JoinError> {
+        socket: Socket,
+    ) -> Result<(Box<dyn ChannelInstance>, Option<Vec<u8>>), JoinError> {
+        // Parse JSON payload
         let join_payload: C::JoinPayload = serde_json::from_slice(payload)
             .map_err(|e| JoinError::new(format!("invalid payload: {}", e)))?;
 
-        match C::join(topic, join_payload, socket).await {
-            JoinResult::Ok(typed_socket) => {
-                let assigns_bytes = serde_json::to_vec(&typed_socket.assigns)
-                    .map_err(|e| JoinError::new(format!("failed to serialize assigns: {}", e)))?;
-                let erased_socket = Socket {
-                    pid: typed_socket.pid,
-                    topic: typed_socket.topic,
-                    join_ref: typed_socket.join_ref,
-                    assigns: assigns_bytes,
-                };
-                Ok((erased_socket, None))
+        match C::join(topic, join_payload, &socket).await {
+            super::JoinResult::Ok(channel) => {
+                Ok((Box::new(JsonChannelInstance::new(channel)), None))
             }
-            JoinResult::OkReply(typed_socket, reply) => {
-                let assigns_bytes = serde_json::to_vec(&typed_socket.assigns)
-                    .map_err(|e| JoinError::new(format!("failed to serialize assigns: {}", e)))?;
-                let erased_socket = Socket {
-                    pid: typed_socket.pid,
-                    topic: typed_socket.topic,
-                    join_ref: typed_socket.join_ref,
-                    assigns: assigns_bytes,
-                };
-                Ok((erased_socket, Some(reply)))
+            super::JoinResult::OkReply(channel, reply) => {
+                Ok((Box::new(JsonChannelInstance::new(channel)), Some(reply)))
             }
-            JoinResult::Error(e) => Err(e),
+            super::JoinResult::Error(e) => Err(e),
         }
     }
+}
 
+/// A JSON-aware channel instance wrapper.
+///
+/// This wraps a typed channel instance and handles JSON serialization
+/// for the WebSocket transport.
+struct JsonChannelInstance<C: Channel> {
+    channel: C,
+}
+
+impl<C: Channel> JsonChannelInstance<C> {
+    fn new(channel: C) -> Self {
+        Self { channel }
+    }
+}
+
+#[async_trait]
+impl<C: Channel> ChannelInstance for JsonChannelInstance<C> {
     async fn handle_event(
-        &self,
+        &mut self,
         event: &str,
         payload: &[u8],
-        socket: &mut Socket<Vec<u8>>,
-    ) -> HandleResult<Vec<u8>> {
-        let in_event: C::InEvent = match serde_json::from_slice(payload) {
-            Ok(e) => e,
-            Err(_) => return HandleResult::NoReply,
-        };
-
-        let assigns: C::Assigns = match serde_json::from_slice(&socket.assigns) {
-            Ok(a) => a,
-            Err(_) => return HandleResult::NoReply,
-        };
-
-        let mut typed_socket = Socket {
-            pid: socket.pid,
-            topic: socket.topic.clone(),
-            join_ref: socket.join_ref.clone(),
-            assigns,
-        };
-
-        let result = C::handle_in(event, in_event, &mut typed_socket).await;
-
-        // Update assigns back
-        if let Ok(new_assigns) = serde_json::to_vec(&typed_socket.assigns) {
-            socket.assigns = new_assigns;
-        }
-
-        match result {
-            HandleResult::NoReply => HandleResult::NoReply,
-            // Typed reply - serialize to JSON for WebSocket client
-            HandleResult::Reply { status, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw {
-                    status,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::ReplyRaw { status, payload } => {
-                HandleResult::ReplyRaw { status, payload }
-            }
-            // Use postcard for broadcasts so TUI clients (which use postcard) can read them
-            HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::Broadcast {
-                    event,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::BroadcastFrom { event, payload } => {
-                match postcard::to_allocvec(&payload) {
-                    Ok(bytes) => HandleResult::BroadcastFrom {
-                        event,
-                        payload: bytes,
-                    },
-                    Err(_) => HandleResult::NoReply,
-                }
-            }
-            // Typed push - serialize to JSON for WebSocket client
-            HandleResult::Push { event, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw {
-                    event,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
-            HandleResult::Stop { reason } => HandleResult::Stop { reason },
-        }
-    }
-
-    async fn filter_broadcast(
-        &self,
-        event: &str,
-        payload: &[u8],
-        socket: &Socket<Vec<u8>>,
-    ) -> Option<Vec<u8>> {
-        // Broadcasts use postcard format for consistency with TUI clients
-        let out_event: C::OutEvent = postcard::from_bytes(payload).ok()?;
-        let assigns: C::Assigns = serde_json::from_slice(&socket.assigns).ok()?;
-
-        let typed_socket = Socket {
-            pid: socket.pid,
-            topic: socket.topic.clone(),
-            join_ref: socket.join_ref.clone(),
-            assigns,
-        };
-
-        let filtered = C::handle_out(event, out_event, &typed_socket).await?;
-        // Return postcard format for distribution
-        postcard::to_allocvec(&filtered).ok()
-    }
-
-    async fn handle_terminate(&self, reason: TerminateReason, socket: &Socket<Vec<u8>>) {
-        if let Ok(assigns) = serde_json::from_slice::<C::Assigns>(&socket.assigns) {
-            let typed_socket = Socket {
-                pid: socket.pid,
-                topic: socket.topic.clone(),
-                join_ref: socket.join_ref.clone(),
-                assigns,
-            };
-            C::terminate(reason, &typed_socket).await;
-        }
-    }
-
-    fn transcode_payload(&self, payload: &[u8], format: super::PayloadFormat) -> Option<Vec<u8>> {
-        let out_event: C::OutEvent = postcard::from_bytes(payload).ok()?;
-        match format {
-            super::PayloadFormat::Json => serde_json::to_vec(&out_event).ok(),
-            super::PayloadFormat::Postcard => postcard::to_allocvec(&out_event).ok(),
-        }
+        socket: &Socket,
+    ) -> RawHandleResult {
+        self.channel.handle_in_raw(event, payload, socket).await
     }
 
     async fn handle_info(
-        &self,
+        &mut self,
         msg: crate::core::RawTerm,
-        socket: &mut Socket<Vec<u8>>,
-    ) -> HandleResult<Vec<u8>> {
-        let assigns: C::Assigns = match serde_json::from_slice(&socket.assigns) {
-            Ok(a) => a,
-            Err(_) => return HandleResult::NoReply,
-        };
+        socket: &Socket,
+    ) -> RawHandleResult {
+        self.channel.handle_info_raw(msg, socket).await
+    }
 
-        let mut typed_socket = Socket {
-            pid: socket.pid,
-            topic: socket.topic.clone(),
-            join_ref: socket.join_ref.clone(),
-            assigns,
-        };
-
-        let result = C::handle_info(msg, &mut typed_socket).await;
-
-        // Update assigns back
-        if let Ok(new_assigns) = serde_json::to_vec(&typed_socket.assigns) {
-            socket.assigns = new_assigns;
-        }
-
-        match result {
-            HandleResult::NoReply => HandleResult::NoReply,
-            // Typed reply - serialize to JSON for WebSocket client
-            HandleResult::Reply { status, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::ReplyRaw {
-                    status,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::ReplyRaw { status, payload } => {
-                HandleResult::ReplyRaw { status, payload }
-            }
-            // Use postcard for broadcasts so TUI clients can read them
-            HandleResult::Broadcast { event, payload } => match postcard::to_allocvec(&payload) {
-                Ok(bytes) => HandleResult::Broadcast {
-                    event,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::BroadcastFrom { event, payload } => {
-                match postcard::to_allocvec(&payload) {
-                    Ok(bytes) => HandleResult::BroadcastFrom {
-                        event,
-                        payload: bytes,
-                    },
-                    Err(_) => HandleResult::NoReply,
-                }
-            }
-            // Typed push - serialize to JSON for WebSocket client
-            HandleResult::Push { event, payload } => match serde_json::to_vec(&payload) {
-                Ok(bytes) => HandleResult::PushRaw {
-                    event,
-                    payload: bytes,
-                },
-                Err(_) => HandleResult::NoReply,
-            },
-            HandleResult::PushRaw { event, payload } => HandleResult::PushRaw { event, payload },
-            HandleResult::Stop { reason } => HandleResult::Stop { reason },
-        }
+    async fn terminate(&mut self, reason: TerminateReason, socket: &Socket) {
+        self.channel.terminate(reason, socket).await;
     }
 }
 
@@ -456,7 +298,7 @@ where
 /// The endpoint manages WebSocket connections and routes messages to the
 /// appropriate channel handlers.
 pub struct WebSocketEndpoint {
-    handlers: Vec<DynChannelHandler>,
+    handlers: Vec<Arc<dyn ChannelHandler + Send + Sync>>,
     config: WebSocketConfig,
 }
 
@@ -475,16 +317,29 @@ impl WebSocketEndpoint {
         self
     }
 
-    /// Register a channel handler.
+    /// Register a channel handler using JSON serialization.
     ///
     /// The channel will use JSON serialization for payloads, which is
     /// required for the Phoenix Channels V2 protocol.
     pub fn channel<C>(mut self) -> Self
     where
         C: Channel,
-        C::Assigns: Serialize + DeserializeOwned,
+        C::JoinPayload: DeserializeOwned,
     {
-        self.handlers.push(Arc::new(JsonChannelHandler::<C>::new()));
+        self.handlers
+            .push(Arc::new(JsonChannelHandler::<C>::new()));
+        self
+    }
+
+    /// Register a channel handler using postcard (binary) serialization.
+    ///
+    /// Use this for channels that communicate with non-WebSocket clients.
+    pub fn channel_postcard<C>(mut self) -> Self
+    where
+        C: Channel,
+    {
+        self.handlers
+            .push(Arc::new(TypedChannelHandler::<C>::new()));
         self
     }
 
@@ -511,7 +366,7 @@ impl WebSocketEndpoint {
     }
 
     /// Get the registered handlers.
-    pub fn handlers(&self) -> &[DynChannelHandler] {
+    pub fn handlers(&self) -> &[Arc<dyn ChannelHandler + Send + Sync>] {
         &self.handlers
     }
 }
@@ -522,24 +377,133 @@ impl Default for WebSocketEndpoint {
     }
 }
 
+/// Active channel connection in WebSocket session.
+struct WsChannelConnection {
+    socket: Socket,
+    instance: Box<dyn ChannelInstance>,
+    join_ref: Option<String>,
+}
+
 /// WebSocket session state.
 struct WsSession {
-    /// Channel server for handling channel operations.
-    channels: ChannelServer,
-    /// Joined topics with their join_refs.
-    joined: HashMap<String, String>,
+    /// Process ID for this session.
+    pid: Pid,
+    /// Registered channel handlers.
+    handlers: Vec<Arc<dyn ChannelHandler + Send + Sync>>,
+    /// Active channel connections: topic -> connection.
+    channels: HashMap<String, WsChannelConnection>,
 }
 
 impl WsSession {
-    fn new(pid: Pid, handlers: Vec<DynChannelHandler>) -> Self {
-        let mut channels = ChannelServer::new(pid);
-        for handler in handlers {
-            channels.add_dyn_handler(handler);
+    fn new(pid: Pid, handlers: Vec<Arc<dyn ChannelHandler + Send + Sync>>) -> Self {
+        Self {
+            pid,
+            handlers,
+            channels: HashMap::new(),
+        }
+    }
+
+    fn find_handler(&self, topic: &str) -> Option<&Arc<dyn ChannelHandler + Send + Sync>> {
+        self.handlers.iter().find(|h| h.matches(topic))
+    }
+
+    async fn handle_join(
+        &mut self,
+        topic: String,
+        payload: Vec<u8>,
+        join_ref: Option<String>,
+    ) -> Result<Option<Vec<u8>>, JoinError> {
+        // Check if already joined
+        if self.channels.contains_key(&topic) {
+            return Err(JoinError::new("already joined"));
         }
 
-        Self {
-            channels,
-            joined: HashMap::new(),
+        // Find handler
+        let handler = self
+            .find_handler(&topic)
+            .ok_or_else(|| JoinError::new(format!("no handler for topic: {}", topic)))?
+            .clone();
+
+        // Create socket
+        let socket = Socket::new(self.pid, &topic);
+
+        // Call join
+        let (instance, reply_payload) = handler.handle_join(&topic, &payload, socket.clone()).await?;
+
+        // Subscribe to topic via pg
+        let group = format!("channel:{}", topic);
+        pg::join(&group, self.pid);
+
+        // Store the channel connection
+        self.channels.insert(
+            topic,
+            WsChannelConnection {
+                socket,
+                instance,
+                join_ref,
+            },
+        );
+
+        Ok(reply_payload)
+    }
+
+    async fn handle_event(
+        &mut self,
+        topic: &str,
+        event: &str,
+        payload: Vec<u8>,
+    ) -> Option<RawHandleResult> {
+        let conn = self.channels.get_mut(topic)?;
+        Some(conn.instance.handle_event(event, &payload, &conn.socket).await)
+    }
+
+    async fn handle_leave(&mut self, topic: &str) {
+        if let Some(mut conn) = self.channels.remove(topic) {
+            conn.instance
+                .terminate(TerminateReason::Left, &conn.socket)
+                .await;
+
+            // Unsubscribe from pg
+            let group = format!("channel:{}", topic);
+            pg::leave(&group, self.pid);
+        }
+    }
+
+    async fn handle_info_all(&mut self, msg: crate::core::RawTerm) -> Vec<(String, RawHandleResult)> {
+        let mut results = Vec::new();
+        let topics: Vec<String> = self.channels.keys().cloned().collect();
+
+        for topic in topics {
+            if let Some(conn) = self.channels.get_mut(&topic) {
+                let result = conn
+                    .instance
+                    .handle_info(msg.clone(), &conn.socket)
+                    .await;
+                results.push((topic, result));
+            }
+        }
+
+        results
+    }
+
+    fn is_joined(&self, topic: &str) -> bool {
+        self.channels.contains_key(topic)
+    }
+
+    fn get_join_ref(&self, topic: &str) -> Option<String> {
+        self.channels.get(topic).and_then(|c| c.join_ref.clone())
+    }
+
+    async fn terminate(&mut self) {
+        let topics: Vec<String> = self.channels.keys().cloned().collect();
+        for topic in topics {
+            if let Some(mut conn) = self.channels.remove(&topic) {
+                conn.instance
+                    .terminate(TerminateReason::Closed, &conn.socket)
+                    .await;
+                let group = format!("channel:{}", topic);
+                pg::leave(&group, self.pid);
+            }
         }
     }
 }
@@ -572,10 +536,9 @@ async fn handle_connection(
                     if let Ok(channel_reply) = postcard::from_bytes::<ChannelReply>(&msg_bytes) {
                         if let ChannelReply::Push { topic, event, payload } = channel_reply {
                             // Also dispatch to handle_info so channel can respond to presence sync, etc.
-                            // Clone the bytes before moving them
-                            let info_results = session.channels.handle_info_any(msg_bytes.clone().into()).await;
+                            let info_results = session.handle_info_all(msg_bytes.clone().into()).await;
                             for (info_topic, result) in info_results {
-                                if let HandleResult::Broadcast { event: bc_event, payload: bc_payload } = result {
+                                if let RawHandleResult::Broadcast { event: bc_event, payload: bc_payload } = result {
                                     let group = format!("channel:{}", info_topic);
                                     let msg = ChannelReply::Push {
                                         topic: info_topic.clone(),
@@ -583,7 +546,7 @@ async fn handle_connection(
                                         payload: bc_payload,
                                     };
                                     if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                                        let members = crate::dist::pg::get_members(&group);
+                                        let members = pg::get_members(&group);
                                         for member_pid in members {
                                             let _ = crate::send_raw(member_pid, bytes.clone());
                                         }
@@ -591,15 +554,13 @@ async fn handle_connection(
                                 }
                             }
 
-                            // Convert the payload from postcard to JSON using the handler
-                            // Broadcasts use postcard internally for consistency with TUI clients
-                            let json_payload: Value = session.channels
-                                .transcode_payload(&topic, &payload, crate::channel::PayloadFormat::Json)
-                                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                                .unwrap_or(json!({}));
+                            // Convert the payload from postcard to JSON
+                            // Try to parse as JSON, or create a wrapper
+                            let json_payload: Value = serde_json::from_slice(&payload)
+                                .unwrap_or_else(|_| json!({ "data": payload }));
 
                             let phx_msg = PhxMessage::push(
-                                session.joined.get(&topic).cloned(),
+                                session.get_join_ref(&topic),
                                 topic,
                                 event,
                                 json_payload,
@@ -613,12 +574,10 @@ async fn handle_connection(
                         }
                     } else {
                         // Not a ChannelReply - dispatch to handle_info for all joined channels
-                        // Note: Presence messages are now handled by the Presence GenServer
-                        // and will be received via PubSub subscriptions
-                        let results = session.channels.handle_info_any(msg_bytes.into()).await;
+                        let results = session.handle_info_all(msg_bytes.into()).await;
                         for (topic, result) in results {
                             // Handle any broadcasts from handle_info
-                            if let HandleResult::Broadcast { event, payload } = result {
+                            if let RawHandleResult::Broadcast { event, payload } = result {
                                 // Broadcast to pg group
                                 let group = format!("channel:{}", topic);
                                 let msg = ChannelReply::Push {
@@ -627,7 +586,7 @@ async fn handle_connection(
                                     payload: payload.clone(),
                                 };
                                 if let Ok(bytes) = postcard::to_allocvec(&msg) {
-                                    let members = crate::dist::pg::get_members(&group);
+                                    let members = pg::get_members(&group);
                                     for member_pid in members {
                                         let _ = crate::send_raw(member_pid, bytes.clone());
                                     }
@@ -696,7 +655,7 @@ async fn handle_connection(
     }
 
     // Clean up
-    session.channels.terminate(TerminateReason::Closed).await;
+    session.terminate().await;
 
     tracing::info!(%addr, "WebSocket disconnected");
     Ok(())
@@ -742,21 +701,13 @@ async fn handle_join(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage
         }
     };
 
-    let msg_ref = msg.msg_ref.clone().unwrap_or_default();
-    let reply = session
-        .channels
-        .handle_join(msg.topic.clone(), payload_bytes, msg_ref)
-        .await;
-
-    match reply {
-        ChannelReply::JoinOk { payload, .. } => {
-            // Store join_ref for this topic
-            if let Some(ref join_ref) = msg.join_ref {
-                session.joined.insert(msg.topic.clone(), join_ref.clone());
-            }
-
+    match session
+        .handle_join(msg.topic.clone(), payload_bytes, msg.join_ref.clone())
+        .await
+    {
+        Ok(reply_payload) => {
             // Parse reply payload if present
-            let response = payload
+            let response = reply_payload
                 .and_then(|p| serde_json::from_slice(&p).ok())
                 .unwrap_or(json!({}));
 
@@ -767,15 +718,14 @@ async fn handle_join(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage
                 response,
             ));
         }
-        ChannelReply::JoinError { reason, .. } => {
+        Err(e) => {
             replies.push(PhxMessage::error_reply(
                 msg.join_ref,
                 msg.msg_ref,
                 msg.topic,
-                reason,
+                e.reason,
             ));
         }
-        _ => {}
     }
 
     replies
@@ -783,8 +733,7 @@ async fn handle_join(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage
 
 /// Handle phx_leave event.
 async fn handle_leave(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage> {
-    session.channels.handle_leave(msg.topic.clone()).await;
-    session.joined.remove(&msg.topic);
+    session.handle_leave(&msg.topic).await;
 
     vec![PhxMessage::ok_reply(
         None,
@@ -799,7 +748,7 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
     let mut replies = Vec::new();
 
     // Check if joined
-    if !session.channels.is_joined(&msg.topic) {
+    if !session.is_joined(&msg.topic) {
         return vec![PhxMessage::error_reply(
             None,
             msg.msg_ref,
@@ -813,7 +762,7 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
         Ok(b) => b,
         Err(_) => {
             return vec![PhxMessage::error_reply(
-                session.joined.get(&msg.topic).cloned(),
+                session.get_join_ref(&msg.topic),
                 msg.msg_ref,
                 msg.topic,
                 "invalid payload",
@@ -821,48 +770,102 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
         }
     };
 
-    let msg_ref = msg.msg_ref.clone().unwrap_or_default();
     let result = session
-        .channels
-        .handle_event(msg.topic.clone(), msg.event.clone(), payload_bytes, msg_ref)
+        .handle_event(&msg.topic, &msg.event, payload_bytes)
         .await;
 
-    if let Some(channel_reply) = result {
-        match channel_reply {
-            ChannelReply::Reply {
-                status, payload, ..
-            } => {
-                let response: Value = serde_json::from_slice(&payload).unwrap_or(json!({}));
-                replies.push(PhxMessage::reply(
-                    session.joined.get(&msg.topic).cloned(),
+    if let Some(raw_result) = result {
+        match raw_result {
+            RawHandleResult::NoReply => {
+                // Send ok reply for events that don't have explicit replies
+                replies.push(PhxMessage::ok_reply(
+                    session.get_join_ref(&msg.topic),
                     msg.msg_ref,
                     msg.topic,
-                    &status,
+                    json!({}),
+                ));
+            }
+            RawHandleResult::Reply { status, payload } => {
+                let response: Value = serde_json::from_slice(&payload).unwrap_or(json!({}));
+                let status_str = match status {
+                    ReplyStatus::Ok => "ok",
+                    ReplyStatus::Error => "error",
+                };
+                replies.push(PhxMessage::reply(
+                    session.get_join_ref(&msg.topic),
+                    msg.msg_ref,
+                    msg.topic,
+                    status_str,
                     response,
                 ));
             }
-            ChannelReply::Push {
-                topic,
-                event,
-                payload,
-            } => {
+            RawHandleResult::Push { event, payload } => {
                 let response: Value = serde_json::from_slice(&payload).unwrap_or(json!({}));
                 replies.push(PhxMessage::push(
-                    session.joined.get(&topic).cloned(),
-                    topic,
+                    session.get_join_ref(&msg.topic),
+                    msg.topic,
                     event,
                     response,
                 ));
             }
-            _ => {}
+            RawHandleResult::Broadcast { event, payload } => {
+                // Broadcast to pg group
+                let group = format!("channel:{}", msg.topic);
+                let channel_msg = ChannelReply::Push {
+                    topic: msg.topic.clone(),
+                    event,
+                    payload,
+                };
+                if let Ok(bytes) = postcard::to_allocvec(&channel_msg) {
+                    let members = pg::get_members(&group);
+                    for member_pid in members {
+                        let _ = crate::send_raw(member_pid, bytes.clone());
+                    }
+                }
+                // Send ok reply
+                replies.push(PhxMessage::ok_reply(
+                    session.get_join_ref(&msg.topic),
+                    msg.msg_ref,
+                    msg.topic,
+                    json!({}),
+                ));
+            }
+            RawHandleResult::BroadcastFrom { event, payload } => {
+                // Broadcast to pg group except sender
+                let group = format!("channel:{}", msg.topic);
+                let channel_msg = ChannelReply::Push {
+                    topic: msg.topic.clone(),
+                    event,
+                    payload,
+                };
+                if let Ok(bytes) = postcard::to_allocvec(&channel_msg) {
+                    let members = pg::get_members(&group);
+                    for member_pid in members {
+                        if member_pid != session.pid {
+                            let _ = crate::send_raw(member_pid, bytes.clone());
+                        }
+                    }
+                }
+                // Send ok reply
+                replies.push(PhxMessage::ok_reply(
+                    session.get_join_ref(&msg.topic),
+                    msg.msg_ref,
+                    msg.topic,
+                    json!({}),
+                ));
+            }
+            RawHandleResult::Stop { reason } => {
+                session.handle_leave(&msg.topic).await;
+                tracing::debug!(reason = %reason, "Channel stopped");
+            }
         }
     } else {
-        // Send ok reply for events that don't have explicit replies
-        replies.push(PhxMessage::ok_reply(
-            session.joined.get(&msg.topic).cloned(),
+        // No result - not joined or handler not found
+        replies.push(PhxMessage::error_reply(
+            session.get_join_ref(&msg.topic),
             msg.msg_ref,
             msg.topic,
-            json!({}),
+            "handler error",
         ));
     }
 
@@ -874,7 +877,8 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
 /// Use this when you want your channel to work with JSON payloads
 /// instead of postcard-serialized bytes.
 pub mod json_payload {
-    use serde::{Serialize, de::DeserializeOwned};
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
     use serde_json::Value;
 
     /// Serialize a payload to JSON bytes.
