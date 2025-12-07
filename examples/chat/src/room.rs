@@ -80,7 +80,6 @@ impl GenServer for Room {
 // =============================================================================
 
 #[call]
-#[async_trait]
 impl Call<GetHistory> for Room {
     type Reply = History;
     type Output = Reply<History>;
@@ -96,7 +95,6 @@ impl Call<GetHistory> for Room {
 // =============================================================================
 
 #[cast]
-#[async_trait]
 impl Cast<StoreMessage> for Room {
     type Output = Status;
 

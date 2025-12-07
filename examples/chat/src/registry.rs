@@ -108,7 +108,6 @@ impl GenServer for Registry {
 // =============================================================================
 
 #[call]
-#[async_trait]
 impl Call<GetRoom> for Registry {
     type Reply = RoomResult;
     type Output = Reply<RoomResult>;
@@ -134,7 +133,6 @@ impl Call<GetRoom> for Registry {
 }
 
 #[call]
-#[async_trait]
 impl Call<ListRooms> for Registry {
     type Reply = RoomList;
     type Output = Reply<RoomList>;

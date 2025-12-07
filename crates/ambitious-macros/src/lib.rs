@@ -566,7 +566,7 @@ fn handler_static_name(prefix: &str, server: &Type, msg: &Type) -> syn::Ident {
 /// Attribute macro for Call handler registration.
 ///
 /// Apply this to an `impl Call<M> for G` block to automatically register
-/// the handler for dispatch.
+/// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
@@ -599,6 +599,7 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("CALL", &server_type, &msg_type);
 
     let expanded = quote! {
+        #[::ambitious::gen_server::v2::async_trait]
         #impl_block
 
         #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::CALL_HANDLERS)]
@@ -638,7 +639,7 @@ pub fn call(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Attribute macro for Cast handler registration.
 ///
 /// Apply this to an `impl Cast<M> for G` block to automatically register
-/// the handler for dispatch.
+/// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
@@ -671,6 +672,7 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("CAST", &server_type, &msg_type);
 
     let expanded = quote! {
+        #[::ambitious::gen_server::v2::async_trait]
         #impl_block
 
         #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::CAST_HANDLERS)]
@@ -708,7 +710,7 @@ pub fn cast(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Attribute macro for Info handler registration.
 ///
 /// Apply this to an `impl Info<M> for G` block to automatically register
-/// the handler for dispatch.
+/// the handler for dispatch. This macro also applies `#[async_trait]` automatically.
 ///
 /// # Example
 ///
@@ -741,6 +743,7 @@ pub fn info(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let static_name = handler_static_name("INFO", &server_type, &msg_type);
 
     let expanded = quote! {
+        #[::ambitious::gen_server::v2::async_trait]
         #impl_block
 
         #[::ambitious::linkme::distributed_slice(::ambitious::gen_server::v2::dispatch::INFO_HANDLERS)]
