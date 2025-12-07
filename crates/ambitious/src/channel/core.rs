@@ -85,9 +85,23 @@ pub fn broadcast_from<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
         if let Ok(bytes) = postcard::to_allocvec(&msg) {
             let group = format!("channel:{}", socket.topic);
             let members = pg::get_members(&group);
+            tracing::debug!(
+                topic = %socket.topic,
+                event = %event,
+                sender = ?socket.pid,
+                member_count = members.len(),
+                members = ?members,
+                "broadcast_from: sending to pg group members"
+            );
             for pid in members {
                 if pid != socket.pid {
-                    let _ = crate::send_raw(pid, bytes.clone());
+                    let result = crate::send_raw(pid, bytes.clone());
+                    tracing::debug!(
+                        to = ?pid,
+                        success = result.is_ok(),
+                        error = ?result.err(),
+                        "broadcast_from: sent to member"
+                    );
                 }
             }
         }

@@ -137,8 +137,11 @@ pub fn send_after<M: Term>(delay: Duration, pid: Pid, msg: &M) -> TimerResult {
                 // Cancelled - do nothing
             }
             _ = tokio::time::sleep(delay) => {
-                // Timer fired - send message
-                let _ = crate::runtime::send_raw(pid, data);
+                // Timer fired - send message via global runtime registry
+                // (not task-local since this runs outside process context)
+                if let Some(handle) = crate::process::global::try_handle() {
+                    let _ = handle.registry().send_raw(pid, data);
+                }
             }
         }
         // Clean up registry
@@ -194,8 +197,14 @@ pub fn send_interval<M: Term>(interval: Duration, pid: Pid, msg: &M) -> TimerRes
                     return;
                 }
                 _ = ticker.tick() => {
-                    // Try to send; if it fails, target is dead
-                    if crate::runtime::send_raw(pid, data.clone()).is_err() {
+                    // Try to send via global runtime registry; if it fails, target is dead
+                    // (not task-local since this runs outside process context)
+                    let send_result = if let Some(handle) = crate::process::global::try_handle() {
+                        handle.registry().send_raw(pid, data.clone())
+                    } else {
+                        Err(crate::runtime::SendError::ProcessNotFound(pid))
+                    };
+                    if send_result.is_err() {
                         timers().remove(&ref_copy);
                         return;
                     }
@@ -355,8 +364,12 @@ pub fn exit_after(delay: Duration, pid: Pid, reason: ExitReason) -> TimerResult 
                 // Cancelled
             }
             _ = tokio::time::sleep(delay) => {
-                // Timer fired - send exit signal
-                crate::runtime::exit(pid, reason);
+                // Timer fired - terminate the process via global runtime registry
+                // (not task-local since this runs outside process context)
+                if let Some(handle) = crate::process::global::try_handle()
+                    && let Some(process_handle) = handle.registry().get(pid) {
+                        process_handle.mark_terminated(reason);
+                    }
             }
         }
         timers().remove(&ref_copy);

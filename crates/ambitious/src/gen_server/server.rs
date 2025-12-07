@@ -319,7 +319,10 @@ fn schedule_timeout(duration: Duration) {
     let timeout_msg = protocol::encode_timeout();
     tokio::spawn(async move {
         tokio::time::sleep(duration).await;
-        let _ = crate::send_raw(pid, timeout_msg);
+        // Use global runtime registry since this runs outside process context
+        if let Some(handle) = crate::process::global::try_handle() {
+            let _ = handle.registry().send_raw(pid, timeout_msg);
+        }
     });
 }
 
@@ -328,7 +331,10 @@ fn schedule_continue(arg: &[u8]) {
     let pid = crate::current_pid();
     let continue_msg = protocol::encode_continue(arg);
     tokio::spawn(async move {
-        let _ = crate::send_raw(pid, continue_msg);
+        // Use global runtime registry since this runs outside process context
+        if let Some(handle) = crate::process::global::try_handle() {
+            let _ = handle.registry().send_raw(pid, continue_msg);
+        }
     });
 }
 

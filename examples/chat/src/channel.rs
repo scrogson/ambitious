@@ -172,7 +172,8 @@ impl Channel for RoomChannel {
         tracing::debug!(topic = %presence_topic, "Subscribed to presence updates");
 
         // Send ourselves an :after_join message to trigger presence sync and history push
-        let _ = ambitious::send(socket.pid, &ChannelInfo::AfterJoin);
+        // Use send_raw with encode_local() to include the message tag that handle_info_raw expects
+        let _ = ambitious::send_raw(socket.pid, ChannelInfo::AfterJoin.encode_local());
 
         JoinResult::Ok(RoomChannel {
             nick: payload.nick,

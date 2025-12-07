@@ -157,5 +157,3 @@ pub trait GenServer: Sized + Send + 'static {
         Status::Ok
     }
 }
-
-// Note: Message impl for () is already provided in crate::message
