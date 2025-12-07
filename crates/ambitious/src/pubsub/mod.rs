@@ -46,12 +46,9 @@
 //! This design minimizes network traffic - each message crosses the network once per node,
 //! not once per subscriber.
 
-mod server;
-pub mod server_v3;
+mod server_v3;
 
-pub use server::{PubSub, PubSubConfig};
-// v3 exports - will eventually replace the above
+// v3 is now the primary implementation
 pub use server_v3::{
-    PubSub as PubSubV3, PubSubCall, PubSubCast, PubSubConfig as PubSubConfigV3, PubSubInfo,
-    PubSubReply,
+    PubSub, PubSubCall, PubSubCast, PubSubConfig, PubSubInfo, PubSubReply,
 };

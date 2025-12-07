@@ -197,11 +197,10 @@ pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
 pub use ambitious_macros::{
-    GenServerImpl, Message, ambitious_process, call, cast, channel, handle_in, info, main,
-    self_pid, test,
+    GenServerImpl, Message, ambitious_process, channel, handle_in, main, self_pid, test,
 };
 
-// Re-export linkme for use by macros
+// Re-export linkme for use by Channel macros
 pub use linkme;
 
 /// Prelude module for convenient imports.
@@ -218,10 +217,9 @@ pub mod prelude {
     pub use crate::process::{Runtime, RuntimeHandle};
     pub use crate::runtime::Context;
 
-    // GenServer essentials
-    pub use crate::gen_server::{
-        From, GenServer, HandleCall, HandleCast, HandleContinue, HandleInfo, HasHandlers, Init,
-        Reply, Status,
+    // GenServer essentials (v3 enum-based pattern)
+    pub use crate::gen_server::v3::{
+        call, cast, start, start_link, Error, From, GenServer, Init, Reply, Status,
     };
 
     // Supervisor essentials
@@ -287,11 +285,11 @@ mod tests {
     #[tokio::test]
     async fn test_gen_server_integration() {
         use crate::core::DecodeError;
-        use crate::gen_server::{
-            From, GenServer, HandleCall, HasHandlers, Init, RawReply, Reply, Status, async_trait,
+        use crate::gen_server::v3::{
+            From, GenServer, Init, Reply, Status, async_trait,
             call, start,
         };
-        use crate::message::{Message, encode_with_tag};
+        use crate::message::{Message, encode_with_tag, encode_payload, decode_payload};
         use serde::{Deserialize, Serialize};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -299,19 +297,22 @@ mod tests {
 
         struct TestServer;
 
-        // Message type with manual Message impl
+        // Call message enum for v3 pattern
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        struct Ping;
+        enum TestCall {
+            Ping,
+        }
 
-        impl Message for Ping {
+        impl Message for TestCall {
             fn tag() -> &'static str {
-                "Ping"
+                "TestCall"
             }
             fn encode_local(&self) -> Vec<u8> {
-                encode_with_tag(Self::tag(), &[])
+                let payload = encode_payload(self);
+                encode_with_tag(Self::tag(), &payload)
             }
-            fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
-                Ok(Ping)
+            fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+                decode_payload(bytes)
             }
             fn encode_remote(&self) -> Vec<u8> {
                 self.encode_local()
@@ -321,37 +322,54 @@ mod tests {
             }
         }
 
-        // Register handlers
-        crate::register_handlers!(TestServer { calls: [Ping] });
+        // Reply type
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct TestReply(String);
+
+        impl Message for TestReply {
+            fn tag() -> &'static str {
+                "TestReply"
+            }
+            fn encode_local(&self) -> Vec<u8> {
+                let payload = encode_payload(&self.0);
+                encode_with_tag(Self::tag(), &payload)
+            }
+            fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+                let inner = decode_payload(bytes)?;
+                Ok(TestReply(inner))
+            }
+            fn encode_remote(&self) -> Vec<u8> {
+                self.encode_local()
+            }
+            fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+                Self::decode_local(bytes)
+            }
+        }
 
         #[async_trait]
         impl GenServer for TestServer {
             type Args = ();
+            type Call = TestCall;
+            type Cast = ();
+            type Info = ();
+            type Reply = TestReply;
 
             async fn init(_: ()) -> Init<Self> {
                 Init::Ok(TestServer)
             }
 
-            async fn handle_call_raw(&mut self, payload: Vec<u8>, from: From) -> RawReply {
-                <Self as HasHandlers>::handle_call_dispatch(self, payload, from).await
+            async fn handle_call(&mut self, msg: TestCall, _from: From) -> Reply<TestReply> {
+                match msg {
+                    TestCall::Ping => Reply::Ok(TestReply("pong".to_string())),
+                }
             }
 
-            async fn handle_cast_raw(&mut self, payload: Vec<u8>) -> Status {
-                <Self as HasHandlers>::handle_cast_dispatch(self, payload).await
+            async fn handle_cast(&mut self, _msg: ()) -> Status {
+                Status::Ok
             }
 
-            async fn handle_info_raw(&mut self, payload: Vec<u8>) -> Status {
-                <Self as HasHandlers>::handle_info_dispatch(self, payload).await
-            }
-        }
-
-        #[async_trait]
-        impl HandleCall<Ping> for TestServer {
-            type Reply = String;
-            type Output = Reply<String>;
-
-            async fn handle_call(&mut self, _msg: Ping, _from: From) -> Reply<String> {
-                Reply::Ok("pong".to_string())
+            async fn handle_info(&mut self, _msg: ()) -> Status {
+                Status::Ok
             }
         }
 
@@ -366,11 +384,11 @@ mod tests {
             // Start the server
             let server_pid = start::<TestServer>(()).await.unwrap();
 
-            let reply: String = call(server_pid, Ping, Duration::from_secs(5))
+            let reply: TestReply = call::<TestServer, _>(server_pid, TestCall::Ping, Duration::from_secs(5))
                 .await
                 .unwrap();
 
-            if reply == "pong" {
+            if reply.0 == "pong" {
                 test_passed_clone.store(true, Ordering::SeqCst);
             }
         });
