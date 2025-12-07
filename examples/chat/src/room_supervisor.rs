@@ -7,7 +7,7 @@
 use crate::room::{Room, RoomInit};
 use ambitious::Pid;
 use ambitious::dist::global;
-use ambitious::gen_server;
+use ambitious::gen_server::v3::start as gen_server_start;
 use ambitious::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
 use ambitious::supervisor::{ChildSpec, RestartType, StartChildError, StartError};
 use std::sync::OnceLock;
@@ -92,7 +92,7 @@ async fn start_room(name: String) -> Result<Pid, StartChildError> {
     let spec = ChildSpec::new(format!("room:{}", name), move || {
         let room_name = name.clone();
         async move {
-            gen_server::start::<Room>(RoomInit { name: room_name })
+            gen_server_start::<Room>(RoomInit { name: room_name })
                 .await
                 .map_err(|e| StartChildError::Failed(e.to_string()))
         }

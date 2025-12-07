@@ -7,7 +7,7 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::HistoryMessage;
-use crate::room::{GetHistory, History};
+use crate::room::{Room, RoomCall, RoomReply};
 use crate::room_supervisor;
 use ambitious::Message;
 use ambitious::RawTerm;
@@ -15,7 +15,7 @@ use ambitious::channel::{
     Channel, ChannelReply, HandleIn, HandleResult, JoinError, JoinResult, RawHandleResult,
     ReplyStatus, Socket, TerminateReason, broadcast_from, push,
 };
-use ambitious::gen_server;
+use ambitious::gen_server::v3::call;
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
 use ambitious::{channel, handle_in};
@@ -227,9 +227,9 @@ impl Channel for RoomChannel {
 
                     // Push history directly (not via another self-message to avoid loop)
                     if let Some(room_pid) = room_supervisor::get_room(&self.room_name)
-                        && let Ok(History(messages)) = gen_server::call::<GetHistory, History>(
+                        && let Ok(RoomReply::History(messages)) = call::<Room, RoomReply>(
                             room_pid,
-                            GetHistory,
+                            RoomCall::GetHistory,
                             Duration::from_secs(5),
                         )
                         .await

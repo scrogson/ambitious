@@ -8,10 +8,10 @@
 use crate::channel::{JoinPayload, RoomChannel, RoomOutEvent};
 use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
-use crate::room::StoreMessage;
+use crate::room::{Room, RoomCast};
 use crate::room_supervisor;
 use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
-use ambitious::gen_server;
+use ambitious::gen_server::v3::cast;
 use ambitious::{Pid, RawTerm, Term};
 use std::sync::Arc;
 use std::time::Duration;
@@ -410,9 +410,9 @@ impl Session {
 
         // Store message in room history
         if let Some(room_pid) = room_supervisor::get_room(&room) {
-            gen_server::cast(
+            cast::<Room>(
                 room_pid,
-                StoreMessage {
+                RoomCast::StoreMessage {
                     from: nick.clone(),
                     text: text.clone(),
                 },

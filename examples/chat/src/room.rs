@@ -1,4 +1,4 @@
-//! Chat room GenServer implementation.
+//! Chat room GenServer implementation using v3 enum-based dispatch.
 //!
 //! Each room is a GenServer that stores message history and is registered globally.
 //! When users join a room, they fetch history directly from the room.
@@ -7,11 +7,14 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::HistoryMessage;
-use ambitious::gen_server::*;
-use ambitious::{Message, call, cast};
+use ambitious::gen_server::v3::{
+    async_trait, call, cast, start, From, GenServer, Init, Reply, Status,
+};
+use ambitious::message::Message;
+use ambitious::core::{DecodeError, Pid};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Maximum number of messages to keep in history.
 const MAX_HISTORY: usize = 50;
@@ -26,7 +29,6 @@ pub struct Room {
 }
 
 /// Initialization argument for Room.
-/// Note: This still needs Serialize/Deserialize since it's not a Message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomInit {
     /// Room name.
@@ -34,28 +36,104 @@ pub struct RoomInit {
 }
 
 // =============================================================================
-// Call Messages
+// Call Message Enum
 // =============================================================================
 
-/// Request to get message history.
-#[derive(Debug, Clone, Message)]
-pub struct GetHistory;
+/// All call (request/response) messages for Room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoomCall {
+    /// Request to get message history.
+    GetHistory,
+}
 
-/// Response containing message history.
-#[derive(Debug, Clone, Message)]
-pub struct History(pub Vec<HistoryMessage>);
+impl Message for RoomCall {
+    fn tag() -> &'static str {
+        "RoomCall"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        ambitious::message::encode_with_tag(
+            Self::tag(),
+            &ambitious::message::encode_payload(self),
+        )
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        ambitious::message::decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
 
 // =============================================================================
-// Cast Messages
+// Cast Message Enum
 // =============================================================================
 
-/// Store a new message in the room history.
-#[derive(Debug, Clone, Message)]
-pub struct StoreMessage {
-    /// Who sent the message.
-    pub from: String,
-    /// Message text.
-    pub text: String,
+/// All cast (fire-and-forget) messages for Room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoomCast {
+    /// Store a new message in the room history.
+    StoreMessage {
+        /// Who sent the message.
+        from: String,
+        /// Message text.
+        text: String,
+    },
+}
+
+impl Message for RoomCast {
+    fn tag() -> &'static str {
+        "RoomCast"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        ambitious::message::encode_with_tag(
+            Self::tag(),
+            &ambitious::message::encode_payload(self),
+        )
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        ambitious::message::decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
+
+// =============================================================================
+// Reply Type
+// =============================================================================
+
+/// Reply type for Room calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoomReply {
+    /// Message history.
+    History(Vec<HistoryMessage>),
+}
+
+impl Message for RoomReply {
+    fn tag() -> &'static str {
+        "RoomReply"
+    }
+    fn encode_local(&self) -> Vec<u8> {
+        ambitious::message::encode_with_tag(
+            Self::tag(),
+            &ambitious::message::encode_payload(self),
+        )
+    }
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        ambitious::message::decode_payload(bytes)
+    }
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
 }
 
 // =============================================================================
@@ -65,6 +143,10 @@ pub struct StoreMessage {
 #[async_trait]
 impl GenServer for Room {
     type Args = RoomInit;
+    type Call = RoomCall;
+    type Cast = RoomCast;
+    type Info = ();
+    type Reply = RoomReply;
 
     async fn init(arg: RoomInit) -> Init<Self> {
         tracing::info!(room = %arg.name, "Room created");
@@ -73,50 +155,82 @@ impl GenServer for Room {
             history: VecDeque::new(),
         })
     }
-}
 
-// =============================================================================
-// Call Handlers
-// =============================================================================
+    async fn handle_call(&mut self, msg: RoomCall, _from: From) -> Reply<RoomReply> {
+        match msg {
+            RoomCall::GetHistory => {
+                let history: Vec<HistoryMessage> = self.history.iter().cloned().collect();
+                Reply::Ok(RoomReply::History(history))
+            }
+        }
+    }
 
-#[call]
-impl HandleCall<GetHistory> for Room {
-    type Reply = History;
-    type Output = Reply<History>;
+    async fn handle_cast(&mut self, msg: RoomCast) -> Status {
+        match msg {
+            RoomCast::StoreMessage { from, text } => {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
 
-    async fn handle_call(&mut self, _request: GetHistory, _from: From) -> Reply<History> {
-        let history: Vec<HistoryMessage> = self.history.iter().cloned().collect();
-        Reply::Ok(History(history))
+                let history_msg = HistoryMessage {
+                    from,
+                    text,
+                    timestamp,
+                };
+
+                self.history.push_back(history_msg);
+
+                // Trim if too long
+                while self.history.len() > MAX_HISTORY {
+                    self.history.pop_front();
+                }
+
+                Status::Ok
+            }
+        }
+    }
+
+    async fn handle_info(&mut self, _msg: ()) -> Status {
+        Status::Ok
     }
 }
 
 // =============================================================================
-// Cast Handlers
+// Public API (unused in favor of direct v3 API, but kept for reference)
 // =============================================================================
 
-#[cast]
-impl HandleCast<StoreMessage> for Room {
-    type Output = Status;
+#[allow(dead_code)]
+impl Room {
+    /// Start a new Room GenServer.
+    pub async fn start_room(name: String) -> Result<Pid, ambitious::gen_server::v3::Error> {
+        start::<Room>(RoomInit { name }).await
+    }
 
-    async fn handle_cast(&mut self, msg: StoreMessage) -> Status {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let history_msg = HistoryMessage {
-            from: msg.from,
-            text: msg.text,
-            timestamp,
-        };
-
-        self.history.push_back(history_msg);
-
-        // Trim if too long
-        while self.history.len() > MAX_HISTORY {
-            self.history.pop_front();
+    /// Get message history from a room.
+    pub async fn get_history(room_pid: Pid) -> Result<Vec<HistoryMessage>, String> {
+        match call::<Room, RoomReply>(room_pid, RoomCall::GetHistory, Duration::from_secs(5)).await
+        {
+            Ok(RoomReply::History(history)) => Ok(history),
+            Err(e) => Err(format!("get_history failed: {:?}", e)),
         }
+    }
 
-        Status::Ok
+    /// Store a message in the room history.
+    pub fn store_message(room_pid: Pid, from: String, text: String) {
+        cast::<Room>(room_pid, RoomCast::StoreMessage { from, text });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_room_init() {
+        let init = RoomInit {
+            name: "test".to_string(),
+        };
+        assert_eq!(init.name, "test");
     }
 }
