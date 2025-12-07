@@ -11,12 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct PresenceRef(String);
 
 impl Message for PresenceRef {
-    fn tag() -> &'static str {
-        "PresenceRef"
-    }
+    const TAG: &'static str = "PresenceRef";
 
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
 
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {

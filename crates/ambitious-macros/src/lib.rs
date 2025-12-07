@@ -314,7 +314,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
                 // No serde needed - nothing to serialize
                 (
                     quote! {
-                        ::ambitious::message::encode_with_tag(Self::tag(), &[])
+                        ::ambitious::message::encode_with_tag(Self::TAG, &[])
                     },
                     quote! {
                         let _ = bytes;
@@ -329,7 +329,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
                 (
                     quote! {
                         let payload = ::ambitious::message::encode_payload(&self.0);
-                        ::ambitious::message::encode_with_tag(Self::tag(), &payload)
+                        ::ambitious::message::encode_with_tag(Self::TAG, &payload)
                     },
                     quote! {
                         let inner: #field_ty = ::ambitious::message::decode_payload(bytes)?;
@@ -380,7 +380,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
                 (
                     quote! {
                         let payload = ::ambitious::message::encode_payload(&(#(&self.#field_names),*));
-                        ::ambitious::message::encode_with_tag(Self::tag(), &payload)
+                        ::ambitious::message::encode_with_tag(Self::TAG, &payload)
                     },
                     quote! {
                         let (#(#field_names),*): (#(#field_types),*) = ::ambitious::message::decode_payload(bytes)?;
@@ -418,12 +418,19 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
             }
         },
         Data::Enum(_) => {
-            return syn::Error::new_spanned(
-                input,
-                "Message derive does not support enums yet. Use separate structs for each message type.",
+            // Enum: requires Serialize + Deserialize to already be derived
+            // Uses encode_payload/decode_payload for the entire enum
+            (
+                quote! {
+                    let payload = ::ambitious::message::encode_payload(self);
+                    ::ambitious::message::encode_with_tag(Self::TAG, &payload)
+                },
+                quote! {
+                    ::ambitious::message::decode_payload(bytes)
+                },
+                // No serde impl needed - user must derive Serialize/Deserialize
+                quote! {},
             )
-            .to_compile_error()
-            .into();
         }
         Data::Union(_) => {
             return syn::Error::new_spanned(input, "Message derive does not support unions")
@@ -436,9 +443,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
         #serde_impl
 
         impl #impl_generics ::ambitious::message::Message for #name #ty_generics #where_clause {
-            fn tag() -> &'static str {
-                #tag
-            }
+            const TAG: &'static str = #tag;
 
             fn encode_local(&self) -> Vec<u8> {
                 #encode_body
@@ -618,116 +623,4 @@ pub fn handle_in(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
-}
-
-/// Attribute macro for Channel trait implementation.
-///
-/// This macro simplifies Channel implementation by:
-/// 1. Automatically implementing `topic_pattern()` from the `topic` attribute
-/// 2. Applying `#[async_trait]` automatically
-///
-/// # Example
-///
-/// ```ignore
-/// use ambitious::channel::{Channel, JoinResult, Socket};
-///
-/// pub struct LobbyChannel {
-///     nick: Option<String>,
-/// }
-///
-/// #[channel(topic = "lobby:*")]
-/// impl Channel for LobbyChannel {
-///     type JoinPayload = LobbyJoinPayload;
-///
-///     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
-///         JoinResult::Ok(LobbyChannel { nick: payload.nick })
-///     }
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn channel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let impl_block = parse_macro_input!(item as ItemImpl);
-
-    // Parse the topic pattern from the attribute
-    let topic_pattern = match parse_channel_attr(attr) {
-        Ok(topic) => topic,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    // Verify this is a Channel impl
-    let is_channel_impl = impl_block.trait_.as_ref().is_some_and(|(_, path, _)| {
-        path.segments
-            .last()
-            .is_some_and(|seg| seg.ident == "Channel")
-    });
-
-    if !is_channel_impl {
-        return syn::Error::new_spanned(
-            &impl_block,
-            "#[channel] can only be applied to `impl Channel for T` blocks",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    // Get the self type (the channel struct)
-    let self_ty = &impl_block.self_ty;
-
-    // Extract existing items, filtering out topic_pattern if present
-    let existing_items: Vec<_> = impl_block
-        .items
-        .iter()
-        .filter(|item| {
-            !matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "topic_pattern")
-        })
-        .collect();
-
-    // Extract the trait path
-    let trait_path = impl_block.trait_.as_ref().map(|(_, path, _)| path);
-
-    // Build generics
-    let generics = &impl_block.generics;
-    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
-
-    let expanded = quote! {
-        #[::ambitious::channel::async_trait]
-        impl #impl_generics #trait_path for #self_ty #where_clause {
-            fn topic_pattern() -> &'static str {
-                #topic_pattern
-            }
-
-            #(#existing_items)*
-        }
-    };
-
-    TokenStream::from(expanded)
-}
-
-/// Parse channel attribute arguments like `topic = "lobby:*"`
-fn parse_channel_attr(attr: TokenStream) -> Result<String, syn::Error> {
-    use syn::parse::Parser;
-
-    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
-    let metas = parser.parse(attr)?;
-
-    let mut topic = None;
-
-    for meta in metas {
-        if let syn::Meta::NameValue(nv) = meta
-            && nv.path.is_ident("topic")
-            && let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(lit_str),
-                ..
-            }) = nv.value
-        {
-            topic = Some(lit_str.value());
-        }
-    }
-
-    topic.ok_or_else(|| {
-        syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[channel] requires a topic pattern, e.g., #[channel(topic = \"lobby:*\")]",
-        )
-    })
 }

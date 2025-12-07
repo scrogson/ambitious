@@ -226,11 +226,11 @@ where
     C::JoinPayload: DeserializeOwned,
 {
     fn topic_pattern(&self) -> &'static str {
-        C::topic_pattern()
+        C::TOPIC_PATTERN
     }
 
     fn matches(&self, topic: &str) -> bool {
-        super::topic_matches(C::topic_pattern(), topic)
+        super::topic_matches(C::TOPIC_PATTERN, topic)
     }
 
     async fn handle_join(

@@ -7,9 +7,9 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::HistoryMessage;
-use ambitious::core::{DecodeError, Pid};
+use ambitious::Message;
+use ambitious::core::Pid;
 use ambitious::gen_server::{From, GenServer, Init, Reply, Status, async_trait, call, cast, start};
-use ambitious::message::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,28 +38,10 @@ pub struct RoomInit {
 // =============================================================================
 
 /// All call (request/response) messages for Room.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub enum RoomCall {
     /// Request to get message history.
     GetHistory,
-}
-
-impl Message for RoomCall {
-    fn tag() -> &'static str {
-        "RoomCall"
-    }
-    fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
-    }
-    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
-        ambitious::message::decode_payload(bytes)
-    }
-    fn encode_remote(&self) -> Vec<u8> {
-        self.encode_local()
-    }
-    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_local(bytes)
-    }
 }
 
 // =============================================================================
@@ -67,7 +49,7 @@ impl Message for RoomCall {
 // =============================================================================
 
 /// All cast (fire-and-forget) messages for Room.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub enum RoomCast {
     /// Store a new message in the room history.
     StoreMessage {
@@ -78,51 +60,15 @@ pub enum RoomCast {
     },
 }
 
-impl Message for RoomCast {
-    fn tag() -> &'static str {
-        "RoomCast"
-    }
-    fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
-    }
-    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
-        ambitious::message::decode_payload(bytes)
-    }
-    fn encode_remote(&self) -> Vec<u8> {
-        self.encode_local()
-    }
-    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_local(bytes)
-    }
-}
-
 // =============================================================================
 // Reply Type
 // =============================================================================
 
 /// Reply type for Room calls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub enum RoomReply {
     /// Message history.
     History(Vec<HistoryMessage>),
-}
-
-impl Message for RoomReply {
-    fn tag() -> &'static str {
-        "RoomReply"
-    }
-    fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
-    }
-    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
-        ambitious::message::decode_payload(bytes)
-    }
-    fn encode_remote(&self) -> Vec<u8> {
-        self.encode_local()
-    }
-    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_local(bytes)
-    }
 }
 
 // =============================================================================

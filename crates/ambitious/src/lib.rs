@@ -197,7 +197,7 @@ pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
 pub use ambitious_macros::{
-    GenServerImpl, Message, ambitious_process, channel, handle_in, main, self_pid, test,
+    GenServerImpl, Message, ambitious_process, handle_in, main, self_pid, test,
 };
 
 // Re-export linkme for use by Channel macros
@@ -301,12 +301,11 @@ mod tests {
         }
 
         impl Message for TestCall {
-            fn tag() -> &'static str {
-                "TestCall"
-            }
+            const TAG: &'static str = "TestCall";
+
             fn encode_local(&self) -> Vec<u8> {
                 let payload = encode_payload(self);
-                encode_with_tag(Self::tag(), &payload)
+                encode_with_tag(Self::TAG, &payload)
             }
             fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
                 decode_payload(bytes)
@@ -324,12 +323,11 @@ mod tests {
         struct TestReply(String);
 
         impl Message for TestReply {
-            fn tag() -> &'static str {
-                "TestReply"
-            }
+            const TAG: &'static str = "TestReply";
+
             fn encode_local(&self) -> Vec<u8> {
                 let payload = encode_payload(&self.0);
-                encode_with_tag(Self::tag(), &payload)
+                encode_with_tag(Self::TAG, &payload)
             }
             fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
                 let inner = decode_payload(bytes)?;

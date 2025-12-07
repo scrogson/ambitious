@@ -138,12 +138,11 @@ mod tests {
     }
 
     impl Message for CounterCall {
-        fn tag() -> &'static str {
-            "CounterCall"
-        }
+        const TAG: &'static str = "CounterCall";
+
         fn encode_local(&self) -> Vec<u8> {
             let payload = encode_payload(self);
-            encode_with_tag(Self::tag(), &payload)
+            encode_with_tag(Self::TAG, &payload)
         }
         fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
             decode_payload(bytes)
@@ -164,12 +163,11 @@ mod tests {
     }
 
     impl Message for CounterCast {
-        fn tag() -> &'static str {
-            "CounterCast"
-        }
+        const TAG: &'static str = "CounterCast";
+
         fn encode_local(&self) -> Vec<u8> {
             let payload = encode_payload(self);
-            encode_with_tag(Self::tag(), &payload)
+            encode_with_tag(Self::TAG, &payload)
         }
         fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
             decode_payload(bytes)
@@ -187,12 +185,11 @@ mod tests {
     struct CounterReply(i64);
 
     impl Message for CounterReply {
-        fn tag() -> &'static str {
-            "CounterReply"
-        }
+        const TAG: &'static str = "CounterReply";
+
         fn encode_local(&self) -> Vec<u8> {
             let payload = encode_payload(&self.0);
-            encode_with_tag(Self::tag(), &payload)
+            encode_with_tag(Self::TAG, &payload)
         }
         fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
             let inner = decode_payload(bytes)?;

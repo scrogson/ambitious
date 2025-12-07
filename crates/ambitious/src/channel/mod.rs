@@ -45,10 +45,7 @@
 //! #[async_trait]
 //! impl Channel for LobbyChannel {
 //!     type JoinPayload = JoinPayload;
-//!
-//!     fn topic_pattern() -> &'static str {
-//!         "lobby:*"
-//!     }
+//!     const TOPIC_PATTERN: &'static str = "lobby:*";
 //!
 //!     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
 //!         JoinResult::Ok(Self { nick: payload.nick })

@@ -62,11 +62,10 @@ pub enum PubSubCall {
 }
 
 impl Message for PubSubCall {
-    fn tag() -> &'static str {
-        "PubSubCall"
-    }
+    const TAG: &'static str = "PubSubCall";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -116,11 +115,10 @@ pub enum PubSubCast {
 }
 
 impl Message for PubSubCast {
-    fn tag() -> &'static str {
-        "PubSubCast"
-    }
+    const TAG: &'static str = "PubSubCast";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -145,11 +143,10 @@ pub enum PubSubInfo {
 }
 
 impl Message for PubSubInfo {
-    fn tag() -> &'static str {
-        "PubSubInfo"
-    }
+    const TAG: &'static str = "PubSubInfo";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -176,11 +173,10 @@ pub enum PubSubReply {
 }
 
 impl Message for PubSubReply {
-    fn tag() -> &'static str {
-        "PubSubReply"
-    }
+    const TAG: &'static str = "PubSubReply";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)

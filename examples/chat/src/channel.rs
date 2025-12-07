@@ -13,12 +13,13 @@ use ambitious::Message;
 use ambitious::RawTerm;
 use ambitious::channel::{
     Channel, ChannelReply, HandleIn, HandleResult, JoinError, JoinResult, RawHandleResult,
-    ReplyStatus, Socket, TerminateReason, broadcast_from, push,
+    ReplyStatus, Socket, TerminateReason, async_trait, broadcast_from, push,
 };
 use ambitious::gen_server::call;
+use ambitious::handle_in;
+use ambitious::message::{Message as MessageTrait, decode_tag};
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
-use ambitious::{channel, handle_in};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -94,37 +95,9 @@ pub struct UserPresenceMeta {
 
 /// Internal messages for the channel (handle_info).
 ///
-/// These are sent to the channel's own process (via send_raw to socket.pid)
+/// These are sent to the channel's own process (via send to socket.pid)
 /// and handled in handle_info. They are NOT broadcast messages.
-///
-/// IMPORTANT: Uses a magic marker to prevent accidental deserialization of other
-/// message types (like PresenceMessage::Delta) as ChannelInfo. Without this,
-/// postcard's compact encoding can cause false positive matches.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChannelInfoMessage {
-    /// Magic marker - must be CHANNEL_INFO_MAGIC for valid messages
-    magic: u64,
-    /// The actual message
-    info: ChannelInfo,
-}
-
-/// Magic number to identify valid ChannelInfo messages
-const CHANNEL_INFO_MAGIC: u64 = 0xC4A7_14F0_DEAD_BEEF;
-
-impl ChannelInfoMessage {
-    fn new(info: ChannelInfo) -> Self {
-        Self {
-            magic: CHANNEL_INFO_MAGIC,
-            info,
-        }
-    }
-
-    fn is_valid(&self) -> bool {
-        self.magic == CHANNEL_INFO_MAGIC
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
 enum ChannelInfo {
     /// Trigger after-join logic (broadcast user joined, push history).
     AfterJoin,
@@ -142,9 +115,10 @@ pub struct RoomChannel {
     room_name: String,
 }
 
-#[channel(topic = "room:*")]
+#[async_trait]
 impl Channel for RoomChannel {
     type JoinPayload = JoinPayload;
+    const TOPIC_PATTERN: &'static str = "room:*";
 
     async fn join(topic: &str, payload: Self::JoinPayload, socket: &Socket) -> JoinResult<Self> {
         // Extract room name from topic
@@ -194,7 +168,7 @@ impl Channel for RoomChannel {
         tracing::debug!(topic = %presence_topic, "Subscribed to presence updates");
 
         // Send ourselves an :after_join message to trigger presence sync and history push
-        let _ = ambitious::send(socket.pid, &ChannelInfoMessage::new(ChannelInfo::AfterJoin));
+        let _ = ambitious::send(socket.pid, &ChannelInfo::AfterJoin);
 
         JoinResult::Ok(RoomChannel {
             nick: payload.nick,
@@ -203,11 +177,12 @@ impl Channel for RoomChannel {
     }
 
     async fn handle_info_raw(&mut self, msg: RawTerm, socket: &Socket) -> RawHandleResult {
-        // First try to decode as ChannelInfoMessage (internal messages with magic marker)
-        if let Some(wrapped) = msg.decode::<ChannelInfoMessage>()
-            && wrapped.is_valid()
+        // First check if this is a ChannelInfo message by checking the tag
+        if let Ok((tag, payload)) = decode_tag(msg.as_bytes())
+            && tag == <ChannelInfo as MessageTrait>::TAG
+            && let Ok(info) = <ChannelInfo as MessageTrait>::decode_local(payload)
         {
-            match wrapped.info {
+            match info {
                 ChannelInfo::AfterJoin => {
                     tracing::info!(
                         room = %self.room_name,
@@ -250,10 +225,7 @@ impl Channel for RoomChannel {
                     let pid = socket.pid;
                     ambitious::spawn(move || async move {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let _ = ambitious::send(
-                            pid,
-                            &ChannelInfoMessage::new(ChannelInfo::PushPresenceState),
-                        );
+                        let _ = ambitious::send(pid, &ChannelInfo::PushPresenceState);
                     });
 
                     return RawHandleResult::NoReply;
@@ -329,7 +301,7 @@ impl Channel for RoomChannel {
                         // Forward to our internal handler
                         let _ = ambitious::send(
                             socket.pid,
-                            &ChannelInfoMessage::new(ChannelInfo::PresenceSyncRequest { from_pid }),
+                            &ChannelInfo::PresenceSyncRequest { from_pid },
                         );
                     }
                     _ => {
@@ -480,8 +452,8 @@ mod tests {
 
     #[test]
     fn test_room_channel_pattern() {
-        assert!(topic_matches(RoomChannel::topic_pattern(), "room:lobby"));
-        assert!(topic_matches(RoomChannel::topic_pattern(), "room:123"));
-        assert!(!topic_matches(RoomChannel::topic_pattern(), "user:123"));
+        assert!(topic_matches(RoomChannel::TOPIC_PATTERN, "room:lobby"));
+        assert!(topic_matches(RoomChannel::TOPIC_PATTERN, "room:123"));
+        assert!(!topic_matches(RoomChannel::TOPIC_PATTERN, "user:123"));
     }
 }

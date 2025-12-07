@@ -286,10 +286,7 @@ pub enum TerminateReason {
 /// #[async_trait]
 /// impl Channel for LobbyChannel {
 ///     type JoinPayload = JoinPayload;
-///
-///     fn topic_pattern() -> &'static str {
-///         "lobby:*"
-///     }
+///     const TOPIC_PATTERN: &'static str = "lobby:*";
 ///
 ///     async fn join(_topic: &str, payload: JoinPayload, _socket: &Socket) -> JoinResult<Self> {
 ///         JoinResult::Ok(Self { nick: payload.nick })
@@ -316,7 +313,7 @@ pub trait Channel: Sized + Send + Sync + 'static {
     /// The topic pattern this channel handles (e.g., "room:*").
     ///
     /// Use `*` as a wildcard to match any suffix.
-    fn topic_pattern() -> &'static str;
+    const TOPIC_PATTERN: &'static str;
 
     /// Called when a client attempts to join a topic.
     ///
@@ -759,11 +756,11 @@ impl<C: Channel> Default for TypedChannelHandler<C> {
 #[async_trait]
 impl<C: Channel> ChannelHandler for TypedChannelHandler<C> {
     fn topic_pattern(&self) -> &'static str {
-        C::topic_pattern()
+        C::TOPIC_PATTERN
     }
 
     fn matches(&self, topic: &str) -> bool {
-        topic_matches(C::topic_pattern(), topic)
+        topic_matches(C::TOPIC_PATTERN, topic)
     }
 
     async fn handle_join(

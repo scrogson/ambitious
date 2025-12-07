@@ -91,11 +91,10 @@ pub enum PresenceCall {
 }
 
 impl Message for PresenceCall {
-    fn tag() -> &'static str {
-        "PresenceCall"
-    }
+    const TAG: &'static str = "PresenceCall";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -132,11 +131,10 @@ pub enum PresenceCast {
 }
 
 impl Message for PresenceCast {
-    fn tag() -> &'static str {
-        "PresenceCast"
-    }
+    const TAG: &'static str = "PresenceCast";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -161,11 +159,10 @@ pub enum PresenceInfo {
 }
 
 impl Message for PresenceInfo {
-    fn tag() -> &'static str {
-        "PresenceInfo"
-    }
+    const TAG: &'static str = "PresenceInfo";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)
@@ -194,11 +191,10 @@ pub enum PresenceReply {
 }
 
 impl Message for PresenceReply {
-    fn tag() -> &'static str {
-        "PresenceReply"
-    }
+    const TAG: &'static str = "PresenceReply";
+
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         decode_payload(bytes)

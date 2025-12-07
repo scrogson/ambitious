@@ -60,7 +60,7 @@ pub trait Message: Sized + Send + 'static {
     ///
     /// By default, this is the type name (e.g., "Get", "Add").
     /// Can be customized with `#[message(tag = "custom")]`.
-    fn tag() -> &'static str;
+    const TAG: &'static str;
 
     /// Encode for local (same-node) communication.
     ///
@@ -107,12 +107,10 @@ pub fn decode_tag(bytes: &[u8]) -> Result<(&str, &[u8]), DecodeError> {
 ///
 /// This is used for acknowledgment messages (like stop replies).
 impl Message for () {
-    fn tag() -> &'static str {
-        "unit"
-    }
+    const TAG: &'static str = "unit";
 
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &[])
+        encode_with_tag(Self::TAG, &[])
     }
 
     fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {
@@ -132,12 +130,10 @@ impl Message for () {
 macro_rules! impl_message_for_primitive {
     ($t:ty, $tag:expr) => {
         impl Message for $t {
-            fn tag() -> &'static str {
-                $tag
-            }
+            const TAG: &'static str = $tag;
 
             fn encode_local(&self) -> Vec<u8> {
-                encode_with_tag(Self::tag(), &encode_payload(self))
+                encode_with_tag(Self::TAG, &encode_payload(self))
             }
 
             fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
@@ -170,12 +166,10 @@ impl_message_for_primitive!(String, "String");
 
 /// Implementation of Message for `Option<T>` where T: Message + Serialize + DeserializeOwned.
 impl<T: Message + Serialize + DeserializeOwned> Message for Option<T> {
-    fn tag() -> &'static str {
-        "Option"
-    }
+    const TAG: &'static str = "Option";
 
     fn encode_local(&self) -> Vec<u8> {
-        encode_with_tag(Self::tag(), &encode_payload(self))
+        encode_with_tag(Self::TAG, &encode_payload(self))
     }
 
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
@@ -215,13 +209,11 @@ mod tests {
     }
 
     impl Message for TestMsg {
-        fn tag() -> &'static str {
-            "TestMsg"
-        }
+        const TAG: &'static str = "TestMsg";
 
         fn encode_local(&self) -> Vec<u8> {
             let payload = postcard::to_allocvec(&self.value).unwrap();
-            encode_with_tag(Self::tag(), &payload)
+            encode_with_tag(Self::TAG, &payload)
         }
 
         fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
@@ -268,12 +260,10 @@ mod tests {
     struct UnitMsg;
 
     impl Message for UnitMsg {
-        fn tag() -> &'static str {
-            "UnitMsg"
-        }
+        const TAG: &'static str = "UnitMsg";
 
         fn encode_local(&self) -> Vec<u8> {
-            encode_with_tag(Self::tag(), &[])
+            encode_with_tag(Self::TAG, &[])
         }
 
         fn decode_local(_bytes: &[u8]) -> Result<Self, DecodeError> {

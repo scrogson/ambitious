@@ -3,8 +3,10 @@
 //! The lobby channel provides system-level operations like listing rooms.
 //! Clients join "lobby:main" to access these features.
 
-use ambitious::channel::{Channel, HandleIn, HandleResult, JoinResult, ReplyStatus, Socket};
-use ambitious::{Message, channel, handle_in};
+use ambitious::channel::{
+    Channel, HandleIn, HandleResult, JoinResult, ReplyStatus, Socket, async_trait,
+};
+use ambitious::{Message, handle_in};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::RoomInfo;
@@ -36,9 +38,10 @@ pub struct LobbyChannel {
     nick: Option<String>,
 }
 
-#[channel(topic = "lobby:*")]
+#[async_trait]
 impl Channel for LobbyChannel {
     type JoinPayload = LobbyJoinPayload;
+    const TOPIC_PATTERN: &'static str = "lobby:*";
 
     async fn join(_topic: &str, payload: Self::JoinPayload, _socket: &Socket) -> JoinResult<Self> {
         tracing::info!(nick = ?payload.nick, "Client joining lobby");
@@ -68,8 +71,8 @@ mod tests {
 
     #[test]
     fn test_lobby_channel_pattern() {
-        assert!(topic_matches(LobbyChannel::topic_pattern(), "lobby:main"));
-        assert!(topic_matches(LobbyChannel::topic_pattern(), "lobby:system"));
-        assert!(!topic_matches(LobbyChannel::topic_pattern(), "room:lobby"));
+        assert!(topic_matches(LobbyChannel::TOPIC_PATTERN, "lobby:main"));
+        assert!(topic_matches(LobbyChannel::TOPIC_PATTERN, "lobby:system"));
+        assert!(!topic_matches(LobbyChannel::TOPIC_PATTERN, "room:lobby"));
     }
 }
