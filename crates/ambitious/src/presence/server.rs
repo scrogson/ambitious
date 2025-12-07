@@ -1,14 +1,14 @@
-//! Presence GenServer v3 implementation using enum-based dispatch.
+//! Presence GenServer implementation using enum-based dispatch.
 
 use super::crdt::{PresenceCrdt, PresenceDelta as CrdtDelta, Tag, TrackedEntry};
 use super::types::{PresenceDiff, PresenceMessage, PresenceMeta, PresenceRef, PresenceState};
 use crate::core::{Atom, DecodeError, Pid};
 use crate::dist::pg;
-use crate::distribution::{monitor_node, NodeDown};
-use crate::gen_server::v3::{
-    async_trait, call, start, ExitReason, From, GenServer, Init, Reply, Status,
+use crate::distribution::{NodeDown, monitor_node};
+use crate::gen_server::{
+    ExitReason, From, GenServer, Init, Reply, Status, async_trait, call, start,
 };
-use crate::message::{decode_payload, encode_payload, encode_with_tag, Message};
+use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
 use crate::pubsub::PubSub;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -442,12 +442,9 @@ impl GenServer for Presence {
                 Reply::Ok(PresenceReply::PresenceList(presences))
             }
             PresenceCall::Get { topic, key } => {
-                let presence = self
-                    .crdt
-                    .get(&topic, &key)
-                    .map(|entries| PresenceState {
-                        metas: entries.iter().map(entry_to_meta).collect(),
-                    });
+                let presence = self.crdt.get(&topic, &key).map(|entries| PresenceState {
+                    metas: entries.iter().map(entry_to_meta).collect(),
+                });
                 Reply::Ok(PresenceReply::PresenceGet(presence))
             }
         }
@@ -478,10 +475,10 @@ impl GenServer for Presence {
 
     async fn handle_continue(&mut self, arg: Vec<u8>) -> Status {
         // Try to decode as PresenceInfo (for continue messages)
-        if let Ok((_tag, payload)) = crate::message::decode_tag(&arg) {
-            if let Ok(info) = PresenceInfo::decode_local(payload) {
-                return self.handle_info(info).await;
-            }
+        if let Ok((_tag, payload)) = crate::message::decode_tag(&arg)
+            && let Ok(info) = PresenceInfo::decode_local(payload)
+        {
+            return self.handle_info(info).await;
         }
 
         // Also check for raw messages that might be system messages
@@ -545,10 +542,7 @@ impl Presence {
             // Broadcast leaves for each topic
             let mut by_topic: HashMap<String, Vec<TrackedEntry>> = HashMap::new();
             for entry in removed {
-                by_topic
-                    .entry(entry.topic.clone())
-                    .or_default()
-                    .push(entry);
+                by_topic.entry(entry.topic.clone()).or_default().push(entry);
             }
 
             for (topic, entries) in by_topic {

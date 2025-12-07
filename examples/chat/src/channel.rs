@@ -15,7 +15,7 @@ use ambitious::channel::{
     Channel, ChannelReply, HandleIn, HandleResult, JoinError, JoinResult, RawHandleResult,
     ReplyStatus, Socket, TerminateReason, broadcast_from, push,
 };
-use ambitious::gen_server::v3::call;
+use ambitious::gen_server::call;
 use ambitious::presence::{Presence, PresenceMessage};
 use ambitious::pubsub::PubSub;
 use ambitious::{channel, handle_in};

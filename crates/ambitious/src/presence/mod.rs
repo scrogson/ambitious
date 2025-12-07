@@ -65,14 +65,13 @@
 //! This provides eventually consistent presence across the cluster.
 
 mod crdt;
-mod server_v3;
+mod server;
 mod types;
 
 pub use crdt::{
     Clock, MergeResult, PresenceCrdt, PresenceDelta, Replica, ReplicaStatus, Tag, TrackedEntry,
 };
-// v3 is now the primary implementation
-pub use server_v3::{
+pub use server::{
     Presence, PresenceCall, PresenceCast, PresenceConfig, PresenceInfo, PresenceReply,
 };
 pub use types::{PresenceDiff, PresenceMessage, PresenceMeta, PresenceRef, PresenceState};

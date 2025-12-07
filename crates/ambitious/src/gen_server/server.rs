@@ -1,16 +1,16 @@
-//! GenServer v3 server loop and client API.
+//! GenServer server loop and client API.
 //!
 //! This module provides:
 //! - `start` / `start_link` - spawn a GenServer process
 //! - `call` / `cast` - client functions using OTP envelope format
 //! - The main message loop with envelope-based dispatch
 
-use super::super::protocol::{
+use super::protocol::{
     self, From, Message as ProtocolMessage, decode_gen_call_envelope, decode_gen_cast_envelope,
     encode_gen_call_envelope, encode_gen_cast_envelope, encode_reply,
 };
-use super::super::types::{Init, Reply, Status};
 use super::traits::GenServer;
+use super::types::{Init, Reply, Status};
 use crate::core::{DecodeError, ExitReason, Pid, Ref, Term};
 use crate::message::Message;
 use crate::process::global;
@@ -132,9 +132,9 @@ async fn gen_server_main<G: GenServer>(
 /// The main message loop for a GenServer.
 ///
 /// Uses OTP envelope format for dispatch:
-/// - `$gen_call` envelope → `handle_call`
-/// - `$gen_cast` envelope → `handle_cast`
-/// - Other messages → `handle_info`
+/// - `$gen_call` envelope -> `handle_call`
+/// - `$gen_cast` envelope -> `handle_cast`
+/// - Other messages -> `handle_info`
 async fn gen_server_loop<G: GenServer>(mut server: G) {
     loop {
         let raw_msg = match crate::recv().await {
@@ -150,21 +150,19 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
             // The request is encoded with encode_local() which includes a tag.
             // Strip the tag first, then decode.
             match crate::message::decode_tag(&call_envelope.request) {
-                Ok((_tag, payload)) => {
-                    match G::Call::decode_local(payload) {
-                        Ok(msg) => {
-                            let reply = server.handle_call(msg, call_envelope.from.clone()).await;
-                            if let Some(reason) = handle_call_reply(&call_envelope.from, reply) {
-                                server.terminate(reason).await;
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Failed to decode call message");
-                            send_error(&call_envelope.from, &ExitReason::Error(e.to_string()));
+                Ok((_tag, payload)) => match G::Call::decode_local(payload) {
+                    Ok(msg) => {
+                        let reply = server.handle_call(msg, call_envelope.from.clone()).await;
+                        if let Some(reason) = handle_call_reply(&call_envelope.from, reply) {
+                            server.terminate(reason).await;
+                            return;
                         }
                     }
-                }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "Failed to decode call message");
+                        send_error(&call_envelope.from, &ExitReason::Error(e.to_string()));
+                    }
+                },
                 Err(e) => {
                     tracing::error!(error = ?e, "Failed to decode call message tag");
                     send_error(&call_envelope.from, &ExitReason::Error(e.to_string()));
@@ -177,20 +175,18 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
             // The request is encoded with encode_local() which includes a tag.
             // Strip the tag first, then decode.
             match crate::message::decode_tag(&cast_envelope.request) {
-                Ok((_tag, payload)) => {
-                    match G::Cast::decode_local(payload) {
-                        Ok(msg) => {
-                            let status = server.handle_cast(msg).await;
-                            if let Some(reason) = handle_status(status) {
-                                server.terminate(reason).await;
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Failed to decode cast message");
+                Ok((_tag, payload)) => match G::Cast::decode_local(payload) {
+                    Ok(msg) => {
+                        let status = server.handle_cast(msg).await;
+                        if let Some(reason) = handle_status(status) {
+                            server.terminate(reason).await;
+                            return;
                         }
                     }
-                }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "Failed to decode cast message");
+                    }
+                },
                 Err(e) => {
                     tracing::error!(error = ?e, "Failed to decode cast message tag");
                 }
@@ -226,20 +222,18 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
                     tracing::warn!("gen_server received unexpected Reply message");
                 }
                 // Legacy Call/Cast - try to decode as info
-                _ => {
-                    match G::Info::decode_local(&raw_msg) {
-                        Ok(msg) => {
-                            let status = server.handle_info(msg).await;
-                            if let Some(reason) = handle_status(status) {
-                                server.terminate(reason).await;
-                                return;
-                            }
-                        }
-                        Err(_) => {
-                            tracing::trace!("Ignoring unknown message");
+                _ => match G::Info::decode_local(&raw_msg) {
+                    Ok(msg) => {
+                        let status = server.handle_info(msg).await;
+                        if let Some(reason) = handle_status(status) {
+                            server.terminate(reason).await;
+                            return;
                         }
                     }
-                }
+                    Err(_) => {
+                        tracing::trace!("Ignoring unknown message");
+                    }
+                },
             }
             continue;
         }
@@ -393,15 +387,14 @@ async fn wait_for_reply<R: Message>(reference: Ref) -> Result<R, Error> {
             reference: ref r,
             payload,
         }) = ProtocolMessage::decode(&raw_msg)
+            && *r == reference
         {
-            if *r == reference {
-                // The payload is encoded with encode_local() which already has the tag.
-                // decode_local expects just the payload without tag, so we need to strip it.
-                let (_tag, reply_payload) = crate::message::decode_tag(&payload)?;
-                // Now reply_payload is the actual serialized data
-                let reply = R::decode_local(reply_payload)?;
-                return Ok(reply);
-            }
+            // The payload is encoded with encode_local() which already has the tag.
+            // decode_local expects just the payload without tag, so we need to strip it.
+            let (_tag, reply_payload) = crate::message::decode_tag(&payload)?;
+            // Now reply_payload is the actual serialized data
+            let reply = R::decode_local(reply_payload)?;
+            return Ok(reply);
         }
 
         // Not our reply - log and continue waiting

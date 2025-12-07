@@ -1,10 +1,10 @@
-//! GenServer v3 traits - enum-based message dispatch.
+//! GenServer traits - enum-based message dispatch.
 //!
 //! The struct IS the process. `init` constructs it, handlers mutate it via `&mut self`.
 //! Messages are organized into associated enum types for Call, Cast, and Info.
 
-use super::super::protocol::From;
-use super::super::types::{Init, Reply, Status};
+use super::protocol::From;
+use super::types::{Init, Reply, Status};
 use crate::core::ExitReason;
 use crate::message::Message;
 pub use async_trait::async_trait;

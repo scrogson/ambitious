@@ -1,4 +1,4 @@
-//! Chat room GenServer implementation using v3 enum-based dispatch.
+//! Chat room GenServer implementation using enum-based dispatch.
 //!
 //! Each room is a GenServer that stores message history and is registered globally.
 //! When users join a room, they fetch history directly from the room.
@@ -7,11 +7,9 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::HistoryMessage;
-use ambitious::gen_server::v3::{
-    async_trait, call, cast, start, From, GenServer, Init, Reply, Status,
-};
-use ambitious::message::Message;
 use ambitious::core::{DecodeError, Pid};
+use ambitious::gen_server::{From, GenServer, Init, Reply, Status, async_trait, call, cast, start};
+use ambitious::message::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -51,10 +49,7 @@ impl Message for RoomCall {
         "RoomCall"
     }
     fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(
-            Self::tag(),
-            &ambitious::message::encode_payload(self),
-        )
+        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         ambitious::message::decode_payload(bytes)
@@ -88,10 +83,7 @@ impl Message for RoomCast {
         "RoomCast"
     }
     fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(
-            Self::tag(),
-            &ambitious::message::encode_payload(self),
-        )
+        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         ambitious::message::decode_payload(bytes)
@@ -120,10 +112,7 @@ impl Message for RoomReply {
         "RoomReply"
     }
     fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(
-            Self::tag(),
-            &ambitious::message::encode_payload(self),
-        )
+        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         ambitious::message::decode_payload(bytes)
@@ -197,13 +186,13 @@ impl GenServer for Room {
 }
 
 // =============================================================================
-// Public API (unused in favor of direct v3 API, but kept for reference)
+// Public API (convenience wrappers around GenServer functions)
 // =============================================================================
 
 #[allow(dead_code)]
 impl Room {
     /// Start a new Room GenServer.
-    pub async fn start_room(name: String) -> Result<Pid, ambitious::gen_server::v3::Error> {
+    pub async fn start_room(name: String) -> Result<Pid, ambitious::gen_server::Error> {
         start::<Room>(RoomInit { name }).await
     }
 

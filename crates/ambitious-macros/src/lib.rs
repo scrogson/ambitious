@@ -491,8 +491,8 @@ fn get_message_tag(input: &DeriveInput) -> Option<String> {
     None
 }
 
-// Note: GenServer now uses the v3 enum-based pattern which doesn't require
-// attribute macros. See `ambitious::gen_server::v3` for the new API.
+// Note: GenServer now uses the enum-based pattern which doesn't require
+// attribute macros. See `ambitious::gen_server` for the new API.
 
 /// Generate a unique static name from server and message types.
 fn handler_static_name(prefix: &str, server: &Type, msg: &Type) -> syn::Ident {

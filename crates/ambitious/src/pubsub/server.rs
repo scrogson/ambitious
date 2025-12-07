@@ -1,10 +1,8 @@
-//! PubSub GenServer implementation using v3 enum-based dispatch.
+//! PubSub GenServer implementation using enum-based dispatch.
 
 use crate::core::{DecodeError, Pid};
 use crate::dist::pg;
-use crate::gen_server::v3::{
-    From, GenServer, Init, Reply, Status, async_trait, call, cast, start,
-};
+use crate::gen_server::{From, GenServer, Init, Reply, Status, async_trait, call, cast, start};
 use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
 use crate::registry::Registry;
 use serde::{Deserialize, Serialize};
@@ -271,16 +269,28 @@ impl GenServer for PubSub {
 
     async fn handle_cast(&mut self, msg: PubSubCast) -> Status {
         match msg {
-            PubSubCast::Broadcast { topic, payload, exclude } => {
+            PubSubCast::Broadcast {
+                topic,
+                payload,
+                exclude,
+            } => {
                 dispatch_local(&self.registry, &topic, &payload, exclude);
                 forward_to_remote_nodes(&self.pg_group, &topic, &payload, exclude, self.self_pid);
                 Status::Ok
             }
-            PubSubCast::LocalBroadcast { topic, payload, exclude } => {
+            PubSubCast::LocalBroadcast {
+                topic,
+                payload,
+                exclude,
+            } => {
                 dispatch_local(&self.registry, &topic, &payload, exclude);
                 Status::Ok
             }
-            PubSubCast::ForwardBroadcast { topic, payload, exclude } => {
+            PubSubCast::ForwardBroadcast {
+                topic,
+                payload,
+                exclude,
+            } => {
                 dispatch_local(&self.registry, &topic, &payload, exclude);
                 Status::Ok
             }
@@ -310,10 +320,10 @@ impl GenServer for PubSub {
 
     async fn handle_continue(&mut self, arg: Vec<u8>) -> Status {
         // Try to decode as PubSubInfo (for continue messages)
-        if let Ok((_tag, payload)) = crate::message::decode_tag(&arg) {
-            if let Ok(info) = PubSubInfo::decode_local(payload) {
-                return self.handle_info(info).await;
-            }
+        if let Ok((_tag, payload)) = crate::message::decode_tag(&arg)
+            && let Ok(info) = PubSubInfo::decode_local(payload)
+        {
+            return self.handle_info(info).await;
         }
         Status::Ok
     }
@@ -352,8 +362,7 @@ fn forward_to_remote_nodes(
         exclude,
     };
 
-    // For forwarding to remote nodes, we need to send via the old cast mechanism
-    // since they might not be running v3 yet. We'll use raw message sending.
+    // Forward to remote nodes using raw message sending.
     let msg_bytes = forward_msg.encode_local();
     for pid in members {
         if Some(pid) == self_pid {

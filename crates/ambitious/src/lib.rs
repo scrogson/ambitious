@@ -217,9 +217,9 @@ pub mod prelude {
     pub use crate::process::{Runtime, RuntimeHandle};
     pub use crate::runtime::Context;
 
-    // GenServer essentials (v3 enum-based pattern)
-    pub use crate::gen_server::v3::{
-        call, cast, start, start_link, Error, From, GenServer, Init, Reply, Status,
+    // GenServer essentials (enum-based pattern)
+    pub use crate::gen_server::{
+        Error, From, GenServer, Init, Reply, Status, call, cast, start, start_link,
     };
 
     // Supervisor essentials
@@ -285,11 +285,8 @@ mod tests {
     #[tokio::test]
     async fn test_gen_server_integration() {
         use crate::core::DecodeError;
-        use crate::gen_server::v3::{
-            From, GenServer, Init, Reply, Status, async_trait,
-            call, start,
-        };
-        use crate::message::{Message, encode_with_tag, encode_payload, decode_payload};
+        use crate::gen_server::{From, GenServer, Init, Reply, Status, async_trait, call, start};
+        use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
         use serde::{Deserialize, Serialize};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -297,7 +294,7 @@ mod tests {
 
         struct TestServer;
 
-        // Call message enum for v3 pattern
+        // Call message enum
         #[derive(Debug, Clone, Serialize, Deserialize)]
         enum TestCall {
             Ping,
@@ -384,9 +381,10 @@ mod tests {
             // Start the server
             let server_pid = start::<TestServer>(()).await.unwrap();
 
-            let reply: TestReply = call::<TestServer, _>(server_pid, TestCall::Ping, Duration::from_secs(5))
-                .await
-                .unwrap();
+            let reply: TestReply =
+                call::<TestServer, _>(server_pid, TestCall::Ping, Duration::from_secs(5))
+                    .await
+                    .unwrap();
 
             if reply.0 == "pong" {
                 test_passed_clone.store(true, Ordering::SeqCst);

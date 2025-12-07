@@ -1,4 +1,4 @@
-//! Room registry implementation using v3 enum-based dispatch.
+//! Room registry implementation using enum-based dispatch.
 //!
 //! The registry provides room lookups across the cluster.
 //! Rooms are registered globally when users join via Channels,
@@ -8,12 +8,12 @@
 //! and handlers mutate it via `&mut self`.
 
 use crate::protocol::RoomInfo;
+use ambitious::core::{DecodeError, Pid};
 use ambitious::dist::global;
-use ambitious::gen_server::v3::{
-    async_trait, call, start, Error, From, GenServer, Init, Reply, Status,
+use ambitious::gen_server::{
+    Error, From, GenServer, Init, Reply, Status, async_trait, call, start,
 };
 use ambitious::message::Message;
-use ambitious::core::{DecodeError, Pid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -42,10 +42,7 @@ impl Message for RegistryCall {
         "RegistryCall"
     }
     fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(
-            Self::tag(),
-            &ambitious::message::encode_payload(self),
-        )
+        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         ambitious::message::decode_payload(bytes)
@@ -76,10 +73,7 @@ impl Message for RegistryReply {
         "RegistryReply"
     }
     fn encode_local(&self) -> Vec<u8> {
-        ambitious::message::encode_with_tag(
-            Self::tag(),
-            &ambitious::message::encode_payload(self),
-        )
+        ambitious::message::encode_with_tag(Self::tag(), &ambitious::message::encode_payload(self))
     }
     fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
         ambitious::message::decode_payload(bytes)
