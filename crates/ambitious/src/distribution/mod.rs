@@ -92,3 +92,64 @@ pub async fn listen(addr: &str) -> Result<(), DistError> {
     let config = Config::new().listen_addr(addr);
     config.start().await
 }
+
+/// Check if a node is a BEAM/Erlang node.
+///
+/// Returns `true` if the node is connected via Erlang Distribution Protocol,
+/// `false` if it's a native Ambitious node or not connected.
+#[cfg(feature = "erlang-dist")]
+pub fn is_beam_node(node: crate::core::Atom) -> bool {
+    DIST_MANAGER
+        .get()
+        .and_then(|m| m.node_type(node))
+        .map(|t| matches!(t, NodeType::Erlang))
+        .unwrap_or(false)
+}
+
+/// Check if a node is a BEAM/Erlang node.
+///
+/// Always returns `false` when the `erlang-dist` feature is not enabled.
+#[cfg(not(feature = "erlang-dist"))]
+pub fn is_beam_node(_node: crate::core::Atom) -> bool {
+    false
+}
+
+/// Send a message to a BEAM node.
+///
+/// The payload should already be encoded as ETF bytes.
+#[cfg(feature = "erlang-dist")]
+pub fn send_to_beam(pid: crate::core::Pid, etf_bytes: Vec<u8>) -> Result<(), DistError> {
+    let manager = DIST_MANAGER.get().ok_or(DistError::NotInitialized)?;
+    manager.send_to_erlang(pid, etf_bytes)
+}
+
+/// Connect to an Erlang/BEAM node.
+///
+/// This establishes a connection using the Erlang Distribution Protocol,
+/// enabling transparent message exchange with Erlang, Elixir, and other
+/// BEAM-based systems.
+///
+/// # Arguments
+///
+/// * `remote_node` - The remote node name (e.g., "elixir@localhost")
+/// * `cookie` - The shared secret cookie for authentication
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::dist;
+///
+/// // Connect to an Elixir node
+/// dist::connect_erlang("my_app@localhost", "secret_cookie").await?;
+///
+/// // Now you can send messages to BEAM processes transparently
+/// ambitious::send(beam_pid, MyMessage { data: 42 });
+/// ```
+#[cfg(feature = "erlang-dist")]
+pub async fn connect_erlang(
+    remote_node: &str,
+    cookie: &str,
+) -> Result<crate::core::Atom, DistError> {
+    let manager = DIST_MANAGER.get().ok_or(DistError::NotInitialized)?;
+    manager.connect_erlang(remote_node, cookie).await
+}

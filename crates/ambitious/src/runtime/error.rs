@@ -33,6 +33,14 @@ pub enum SendError {
     /// The process has terminated.
     #[error("process terminated")]
     ProcessTerminated,
+
+    /// Message encoding failed (e.g., ETF serialization error).
+    #[error("encoding error: {0}")]
+    EncodingError(String),
+
+    /// Distribution layer error.
+    #[error("distribution error: {0}")]
+    DistributionError(String),
 }
 
 /// Errors that can occur when spawning processes.

@@ -28,6 +28,15 @@ pub enum NodeType {
     Erlang,
 }
 
+/// An outgoing message destined for an Erlang/BEAM node.
+#[cfg(feature = "erlang-dist")]
+struct ErlangOutgoingMessage {
+    /// Destination PID on the BEAM node.
+    dest: Pid,
+    /// The message payload as an OwnedTerm.
+    payload: erltf::OwnedTerm,
+}
+
 /// Handle for managing an Erlang node connection.
 ///
 /// Wraps an `ErlangConnection` with message queuing and lifecycle management.
@@ -35,8 +44,8 @@ pub enum NodeType {
 pub struct ErlangNodeHandle {
     /// Node info.
     info: NodeInfo,
-    /// Sender for outgoing ETF-encoded messages.
-    tx: mpsc::Sender<erltf::OwnedTerm>,
+    /// Sender for outgoing ETF-encoded messages with destination info.
+    tx: mpsc::Sender<ErlangOutgoingMessage>,
     /// Last seen timestamp.
     last_seen_ms: AtomicU64,
 }
@@ -446,6 +455,167 @@ impl DistributionManager {
     /// Get a node's message sender.
     pub(crate) fn get_node_tx(&self, node_atom: Atom) -> Option<mpsc::Sender<DistMessage>> {
         self.nodes.get(&node_atom).map(|n| n.tx.clone())
+    }
+
+    /// Send a message to an Erlang/BEAM node.
+    ///
+    /// The payload should be ETF-encoded bytes. This method decodes them to
+    /// an OwnedTerm and sends via the Erlang Distribution Protocol.
+    #[cfg(feature = "erlang-dist")]
+    pub fn send_to_erlang(&self, pid: Pid, etf_bytes: Vec<u8>) -> Result<(), DistError> {
+        let node_atom = pid.node();
+
+        if let Some(handle) = self.erlang_nodes.get(&node_atom) {
+            // Decode ETF bytes to OwnedTerm
+            let payload = erltf::decode(&etf_bytes)
+                .map_err(|e| DistError::Decode(format!("ETF decode error: {}", e)))?;
+
+            // Create the outgoing message with destination info
+            let msg = ErlangOutgoingMessage { dest: pid, payload };
+
+            // Send via the channel
+            if handle.tx.try_send(msg).is_err() {
+                tracing::warn!(?pid, "Message queue full for Erlang node");
+            }
+            Ok(())
+        } else {
+            Err(DistError::NotConnected(node_atom))
+        }
+    }
+
+    /// Connect to an Erlang/BEAM node.
+    ///
+    /// This establishes a connection using the Erlang Distribution Protocol,
+    /// enabling transparent message exchange with Erlang, Elixir, and other
+    /// BEAM-based systems.
+    ///
+    /// # Arguments
+    ///
+    /// * `remote_node` - The remote node name (e.g., "elixir@localhost")
+    /// * `cookie` - The shared secret cookie for authentication
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use ambitious::dist;
+    ///
+    /// // Connect to an Elixir node
+    /// dist::connect_erlang("my_app@localhost", "secret_cookie").await?;
+    ///
+    /// // Now you can send messages to BEAM processes transparently
+    /// ambitious::send(beam_pid, MyMessage { data: 42 });
+    /// ```
+    #[cfg(feature = "erlang-dist")]
+    pub async fn connect_erlang(&self, remote_node: &str, cookie: &str) -> Result<Atom, DistError> {
+        use super::erlang::{ErlangConfig, ErlangConnection};
+
+        let node_atom = Atom::new(remote_node);
+
+        // Check if already connected
+        if self.erlang_nodes.contains_key(&node_atom) {
+            return Err(DistError::AlreadyConnected(node_atom));
+        }
+
+        // Create connection config
+        let config = ErlangConfig::new(&self.node_name, remote_node, cookie);
+
+        // Connect to the BEAM node
+        let conn = ErlangConnection::connect(config).await?;
+
+        tracing::info!(
+            local = %self.node_name,
+            remote = %remote_node,
+            "Connected to Erlang/BEAM node"
+        );
+
+        // Create message channel
+        let (tx, mut rx) = mpsc::channel::<ErlangOutgoingMessage>(256);
+
+        // Create node info
+        let info = NodeInfo {
+            name: NodeName::from(remote_node),
+            id: crate::core::NodeId::local(), // NodeId is just for display
+            addr: None,                       // BEAM nodes use EPMD for discovery
+            creation: 0,                      // BEAM doesn't expose creation in the same way
+        };
+
+        // Store the handle
+        let handle = ErlangNodeHandle {
+            info,
+            tx,
+            last_seen_ms: AtomicU64::new(current_time_ms()),
+        };
+        self.erlang_nodes.insert(node_atom, handle);
+        self.node_types.insert(node_atom, NodeType::Erlang);
+
+        // Spawn sender task
+        let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
+        let conn_sender = conn.clone();
+        let sender_node = node_atom;
+
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let mut guard = conn_sender.lock().await;
+
+                // Create "from" PID for this message
+                let from_pid = guard.allocate_pid();
+
+                // Convert the destination PID to an ErlangPid
+                let to_pid = super::erlang::ErlangPid::from_ambitious(
+                    msg.dest,
+                    &sender_node.as_str(),
+                    0, // creation
+                );
+
+                tracing::debug!(
+                    from = ?from_pid,
+                    to = ?to_pid,
+                    "Sending message to BEAM node"
+                );
+
+                if let Err(e) = guard.send_to_pid(&from_pid, &to_pid, msg.payload).await {
+                    tracing::warn!(
+                        node = %sender_node,
+                        error = %e,
+                        "Failed to send message to BEAM node"
+                    );
+                }
+            }
+            tracing::debug!(node = %sender_node, "Erlang sender task ended");
+        });
+
+        // Spawn receiver task to handle incoming messages
+        let receiver_node = node_atom;
+        let conn_receiver = conn;
+
+        tokio::spawn(async move {
+            loop {
+                let msg = {
+                    let mut guard = conn_receiver.lock().await;
+                    match guard.receive().await {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            tracing::warn!(node = %receiver_node, error = %e, "Erlang receive error");
+                            break;
+                        }
+                    }
+                };
+
+                tracing::debug!(node = %receiver_node, ?msg, "Received message from BEAM");
+
+                // Handle the incoming message based on control message type
+                handle_erlang_incoming(receiver_node, msg).await;
+            }
+
+            // Clean up on disconnect
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager.erlang_nodes.remove(&receiver_node);
+                manager.node_types.remove(&receiver_node);
+                tracing::info!(node = %receiver_node, "Disconnected from Erlang node");
+            }
+        });
+
+        Ok(node_atom)
     }
 
     /// Get our node name atom.
@@ -870,6 +1040,159 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
         _ => {
             tracing::warn!(?msg, "Unexpected message type");
         }
+    }
+}
+
+/// Handle an incoming message from an Erlang/BEAM node.
+///
+/// This function processes messages received via the Erlang Distribution Protocol
+/// and delivers them to local Ambitious processes.
+#[cfg(feature = "erlang-dist")]
+async fn handle_erlang_incoming(from_node: Atom, msg: super::erlang::ErlangMessage) {
+    use super::erlang::ControlMessage;
+
+    match msg.control {
+        ControlMessage::Send { to_pid, .. } | ControlMessage::SendSender { to_pid, .. } => {
+            // Extract the destination PID from the OwnedTerm
+            if let Some(local_pid) = extract_local_pid(&to_pid) {
+                if let Some(payload) = msg.payload {
+                    deliver_etf_to_local(local_pid, payload);
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?to_pid,
+                    "Could not extract local PID from BEAM message"
+                );
+            }
+        }
+        ControlMessage::RegSend { to_name, .. } => {
+            // Extract the registered name from the OwnedTerm
+            if let Some(name) = extract_atom_name(&to_name) {
+                // Look up the registered process
+                if let Some(handle) = crate::process::global::try_handle() {
+                    if let Some(local_pid) = handle.registry().whereis(&name) {
+                        if let Some(payload) = msg.payload {
+                            deliver_etf_to_local(local_pid, payload);
+                        }
+                    } else {
+                        tracing::debug!(
+                            node = %from_node,
+                            name = %name,
+                            "No process registered with name"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?to_name,
+                    "Could not extract registered name from BEAM message"
+                );
+            }
+        }
+        ControlMessage::Link { from_pid, to_pid } => {
+            tracing::debug!(
+                node = %from_node,
+                ?from_pid,
+                ?to_pid,
+                "Received LINK from BEAM (not yet implemented)"
+            );
+            // TODO: Implement cross-runtime linking
+        }
+        ControlMessage::Exit {
+            from_pid,
+            to_pid,
+            reason,
+        } => {
+            tracing::debug!(
+                node = %from_node,
+                ?from_pid,
+                ?to_pid,
+                ?reason,
+                "Received EXIT from BEAM (not yet implemented)"
+            );
+            // TODO: Implement cross-runtime exit signal handling
+        }
+        ControlMessage::MonitorP { .. } => {
+            tracing::debug!(
+                node = %from_node,
+                "Received MONITOR_P from BEAM (not yet implemented)"
+            );
+            // TODO: Implement cross-runtime monitoring
+        }
+        ControlMessage::DemonitorP { .. } => {
+            tracing::debug!(
+                node = %from_node,
+                "Received DEMONITOR_P from BEAM (not yet implemented)"
+            );
+        }
+        other => {
+            tracing::debug!(
+                node = %from_node,
+                ?other,
+                "Unhandled BEAM control message type"
+            );
+        }
+    }
+}
+
+/// Extract a local PID from an OwnedTerm that should be an ExternalPid.
+#[cfg(feature = "erlang-dist")]
+fn extract_local_pid(term: &erltf::OwnedTerm) -> Option<Pid> {
+    use erltf::OwnedTerm;
+
+    match term {
+        OwnedTerm::Pid(pid) => {
+            // The pid.id is the process ID in the Erlang term
+            // Reconstruct the local PID using our node's atom and the ID
+            let local_node = crate::core::node::node_name_atom();
+            let creation = crate::core::current_creation();
+            Some(Pid::from_parts_atom(local_node, pid.id as u64, creation))
+        }
+        _ => None,
+    }
+}
+
+/// Extract an atom name from an OwnedTerm.
+#[cfg(feature = "erlang-dist")]
+fn extract_atom_name(term: &erltf::OwnedTerm) -> Option<String> {
+    use erltf::OwnedTerm;
+
+    match term {
+        OwnedTerm::Atom(atom) => Some(atom.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Deliver an ETF-encoded payload to a local process.
+///
+/// The payload is encoded back to ETF bytes and delivered raw.
+/// The receiving process is responsible for decoding using erltf_serde.
+#[cfg(feature = "erlang-dist")]
+fn deliver_etf_to_local(pid: Pid, payload: erltf::OwnedTerm) {
+    // Encode the OwnedTerm back to ETF bytes
+    let etf_bytes = match erltf::encode(&payload) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(
+                ?pid,
+                error = %e,
+                "Failed to encode ETF payload for local delivery"
+            );
+            return;
+        }
+    };
+
+    // Deliver to local process
+    if let Some(handle) = crate::process::global::try_handle()
+        && let Err(e) = handle.registry().send_raw(pid, etf_bytes)
+    {
+        tracing::debug!(
+            ?pid,
+            error = ?e,
+            "Failed to deliver BEAM message to local process"
+        );
     }
 }
 

@@ -118,6 +118,26 @@ impl ProcessRegistry {
     }
 
     /// Sends a typed message to a process.
+    ///
+    /// For local and native remote processes, uses postcard encoding.
+    /// For BEAM/Erlang nodes (when `erlang-dist` feature is enabled),
+    /// automatically encodes as ETF for transparent interoperability.
+    #[cfg(feature = "erlang-dist")]
+    pub fn send<M: Term + serde::Serialize>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
+        // Check if this is a BEAM node - if so, encode as ETF
+        if !pid.is_local() && crate::distribution::is_beam_node(pid.node()) {
+            let etf_bytes = erltf_serde::to_bytes(msg)
+                .map_err(|e| SendError::EncodingError(format!("ETF encoding failed: {}", e)))?;
+            return crate::distribution::send_to_beam(pid, etf_bytes)
+                .map_err(|e| SendError::DistributionError(e.to_string()));
+        }
+
+        // Default: postcard encoding for local and native remote processes
+        self.send_raw(pid, msg.encode())
+    }
+
+    /// Sends a typed message to a process.
+    #[cfg(not(feature = "erlang-dist"))]
     pub fn send<M: Term>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
         self.send_raw(pid, msg.encode())
     }

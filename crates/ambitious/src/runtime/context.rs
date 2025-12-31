@@ -96,6 +96,13 @@ impl Context {
     }
 
     /// Sends a typed message to another process.
+    #[cfg(feature = "erlang-dist")]
+    pub fn send<M: Term + serde::Serialize>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
+        self.registry.send(pid, msg)
+    }
+
+    /// Sends a typed message to another process.
+    #[cfg(not(feature = "erlang-dist"))]
     pub fn send<M: Term>(&self, pid: Pid, msg: &M) -> Result<(), SendError> {
         self.registry.send(pid, msg)
     }

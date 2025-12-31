@@ -128,6 +128,22 @@ pub fn send_raw(pid: Pid, data: Vec<u8>) -> Result<(), SendError> {
 /// # Panics
 ///
 /// Panics if called outside of a Ambitious process context.
+#[cfg(feature = "erlang-dist")]
+pub fn send<M: crate::Term + serde::Serialize>(pid: Pid, msg: &M) -> Result<(), SendError> {
+    let ctx = CONTEXT.with(|c| c.ctx.clone());
+    // Use try_lock since we're in a sync context
+    match ctx.try_lock() {
+        Ok(guard) => guard.send(pid, msg),
+        Err(_) => Err(SendError::ProcessNotFound(pid)), // Lock is held
+    }
+}
+
+/// Sends a typed message to another process.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+#[cfg(not(feature = "erlang-dist"))]
 pub fn send<M: crate::Term>(pid: Pid, msg: &M) -> Result<(), SendError> {
     let ctx = CONTEXT.with(|c| c.ctx.clone());
     // Use try_lock since we're in a sync context
