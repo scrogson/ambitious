@@ -235,6 +235,7 @@ impl Transport for TcpTransport {
 
 /// Wrapper for receiving messages from a TCP connection.
 pub struct TcpRecvStream {
+    #[allow(dead_code)]
     connection: TcpConnection,
 }
 

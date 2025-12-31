@@ -33,6 +33,7 @@ fn arb_pid_node2() -> impl Strategy<Value = Pid> {
 }
 
 /// Generate a PID from node2 after restart (creation 1)
+#[allow(dead_code)]
 fn arb_pid_node2_restarted() -> impl Strategy<Value = Pid> {
     arb_pid_for_node("node2@localhost", 1)
 }
@@ -47,6 +48,7 @@ enum PgOperation {
     /// Remove all PIDs from a node (simulates disconnect)
     NodeDisconnect { node: String },
     /// Apply a sync response (simulates reconnection sync)
+    #[allow(dead_code)]
     SyncResponse {
         from_node: String,
         groups: Vec<(String, Vec<Pid>)>,

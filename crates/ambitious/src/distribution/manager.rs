@@ -46,7 +46,8 @@ pub struct ErlangNodeHandle {
     info: NodeInfo,
     /// Sender for outgoing ETF-encoded messages with destination info.
     tx: mpsc::Sender<ErlangOutgoingMessage>,
-    /// Last seen timestamp.
+    /// Last seen timestamp (for future heartbeat tracking).
+    #[allow(dead_code)]
     last_seen_ms: AtomicU64,
 }
 
@@ -113,8 +114,6 @@ fn current_time_ms() -> u64 {
 pub struct DistributionManager {
     /// Our node name.
     node_name: String,
-    /// Our node name as an atom.
-    node_name_atom: Atom,
     /// Our creation number.
     creation: u32,
     /// Connected native nodes by node name atom.
@@ -141,10 +140,8 @@ pub struct DistributionManager {
 impl DistributionManager {
     /// Create a new distribution manager.
     pub fn new(node_name: String, creation: u32) -> Self {
-        let node_name_atom = Atom::new(&node_name);
         Self {
             node_name,
-            node_name_atom,
             creation,
             nodes: DashMap::new(),
             addr_to_node: DashMap::new(),
@@ -413,17 +410,20 @@ impl DistributionManager {
     }
 
     /// Get list of connected native nodes only.
+    #[allow(dead_code)]
     pub fn native_nodes(&self) -> Vec<Atom> {
         self.nodes.iter().map(|r| *r.key()).collect()
     }
 
     /// Get list of connected Erlang nodes only.
     #[cfg(feature = "erlang-dist")]
+    #[allow(dead_code)]
     pub fn erlang_nodes(&self) -> Vec<Atom> {
         self.erlang_nodes.iter().map(|r| *r.key()).collect()
     }
 
     /// Get the type of a connected node.
+    #[allow(dead_code)]
     pub fn node_type(&self, node_atom: Atom) -> Option<NodeType> {
         self.node_types.get(&node_atom).map(|r| *r)
     }
@@ -619,16 +619,19 @@ impl DistributionManager {
     }
 
     /// Get our node name atom.
+    #[allow(dead_code)]
     pub fn node_name_atom(&self) -> Atom {
-        self.node_name_atom
+        crate::core::node::node_name_atom()
     }
 
     /// Get our node name.
+    #[allow(dead_code)]
     pub fn node_name(&self) -> &str {
         &self.node_name
     }
 
     /// Get our creation number.
+    #[allow(dead_code)]
     pub fn creation(&self) -> u32 {
         self.creation
     }

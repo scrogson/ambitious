@@ -140,7 +140,6 @@ pub mod application;
 // =============================================================================
 
 /// Distribution layer for connecting Ambitious nodes.
-#[allow(dead_code)]
 pub mod distribution;
 
 /// Elixir-compatible Node API for distributed Ambitious.

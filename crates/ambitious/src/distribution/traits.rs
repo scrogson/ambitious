@@ -74,6 +74,7 @@ pub trait TransportConnection: Send + Sync + Clone + 'static {
 }
 
 /// A receive stream for reading additional data after the initial message.
+#[allow(dead_code)]
 #[async_trait]
 pub trait RecvStream: Send + 'static {
     /// Receive a message from this stream.

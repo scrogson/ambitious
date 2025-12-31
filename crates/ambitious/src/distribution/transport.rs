@@ -258,6 +258,7 @@ impl Transport for QuicTransport {
 }
 
 /// Wrapper around quinn's RecvStream that implements our RecvStream trait.
+#[allow(dead_code)]
 pub struct QuicRecvStream {
     inner: RecvStream,
 }
