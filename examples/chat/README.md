@@ -1,6 +1,6 @@
-# Starlang Chat Server
+# Ambitious Chat Server
 
-A fully distributed multi-user chat application demonstrating Starlang's capabilities:
+A fully distributed multi-user chat application demonstrating Ambitious's capabilities:
 
 - **Processes** for user sessions (one per TCP connection)
 - **GenServers** for rooms and the room registry
@@ -129,7 +129,7 @@ The client provides a full terminal UI with:
 - Message history with timestamps
 - User list for the current room
 - Input area with command history
-- Configurable themes via `~/.config/starlang-chat/config.toml`
+- Configurable themes via `~/.config/ambitious-chat/config.toml`
 
 ## Commands
 
@@ -153,10 +153,10 @@ Rooms are registered in the global registry, making them accessible from any nod
 
 ```rust
 // Register a room globally
-starlang::dist::global::register("room:general", room_pid);
+ambitious::dist::global::register("room:general", room_pid);
 
 // Look up a room from any node
-if let Some(pid) = starlang::dist::global::whereis("room:general") {
+if let Some(pid) = ambitious::dist::global::whereis("room:general") {
     // Can send messages to the room, even if it's on another node
 }
 ```
@@ -167,10 +167,10 @@ Room membership uses distributed process groups:
 
 ```rust
 // Join a room's process group
-starlang::dist::pg::join("room:general:members", session_pid);
+ambitious::dist::pg::join("room:general:members", session_pid);
 
 // Get all members across all nodes
-let members = starlang::dist::pg::get_members("room:general:members");
+let members = ambitious::dist::pg::get_members("room:general:members");
 ```
 
 ### Cross-Node Messaging
@@ -186,7 +186,7 @@ When a user sends a message:
 Rooms use Phoenix-style Channels for topic-based communication:
 
 ```rust
-use starlang::channel::{Channel, Socket, JoinResult, HandleResult};
+use ambitious::channel::{Channel, Socket, JoinResult, HandleResult};
 
 struct RoomChannel;
 
@@ -223,7 +223,7 @@ impl Channel for RoomChannel {
 Track users across the distributed cluster with custom metadata:
 
 ```rust
-use starlang::presence;
+use ambitious::presence;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct UserMeta {
@@ -306,14 +306,14 @@ enum ServerEvent {
 Terminal 1 - Start node1:
 ```bash
 $ cargo run --bin chat-server -- --name node1 --port 9999 --dist-port 9000
-INFO Starting Starlang Chat Server name=node1 port=9999 dist_port=9000
+INFO Starting Ambitious Chat Server name=node1 port=9999 dist_port=9000
 INFO Distribution started node=node1@localhost addr=0.0.0.0:9000
 ```
 
 Terminal 2 - Start node2 and connect to node1:
 ```bash
 $ cargo run --bin chat-server -- --name node2 --port 9998 --dist-port 9001 --connect 127.0.0.1:9000
-INFO Starting Starlang Chat Server name=node2 port=9999 dist_port=9001
+INFO Starting Ambitious Chat Server name=node2 port=9999 dist_port=9001
 INFO Distribution started node=node2@localhost addr=0.0.0.0:9001
 INFO Connected to peer node peer=127.0.0.1:9000 node_id=node1@localhost
 ```
@@ -337,7 +337,7 @@ $ cargo run --bin chat-client -- --port 9998
 
 Alice sees Bob's message, even though they're connected to different servers!
 
-## Starlang Concepts Demonstrated
+## Ambitious Concepts Demonstrated
 
 1. **Processes**: Each client connection spawns a session process
 2. **GenServer**: Rooms and registry are GenServers with call/cast semantics

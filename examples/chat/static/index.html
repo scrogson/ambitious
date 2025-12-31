@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Starlang Chat</title>
+    <title>Ambitious Chat</title>
     <style>
         * {
             box-sizing: border-box;
@@ -350,7 +350,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>Starlang Chat</h1>
+            <h1>Ambitious Chat</h1>
             <p>Phoenix Channels over WebSocket</p>
             <div id="status" class="status disconnected">Disconnected</div>
         </header>
@@ -624,8 +624,8 @@
                 channel = socket.channel(`room:${room}`, { nick: nickname });
 
                 channel.on('new_msg', (payload) => {
-                    // Payload is RoomOutEvent::Message enum: {"Message": {"from": ..., "text": ...}}
-                    const msg = payload.Message || payload;
+                    // Payload is RoomOut::MessageBroadcast enum: {"MessageBroadcast": {"from": ..., "text": ...}}
+                    const msg = payload.MessageBroadcast || payload.Message || payload;
                     const type = msg.from === currentNick ? 'outgoing' : 'incoming';
                     const time = msg.timestamp ? new Date(msg.timestamp * 1000) : new Date();
                     addMessage(type, msg.from, msg.text, time);

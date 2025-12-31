@@ -13,7 +13,8 @@ use ambitious::Message;
 use ambitious::RawTerm;
 use ambitious::channel::{
     Channel, ChannelReply, HandleResult, JoinError, JoinResult, RawHandleResult, ReplyStatus,
-    Socket, TerminateReason, async_trait, broadcast_from, push,
+    Socket, TerminateReason, async_trait, broadcast_from_json, handle_result_to_raw_json,
+    push_json,
 };
 use ambitious::gen_server::call;
 use ambitious::message::{Message as MessageTrait, decode_tag};
@@ -50,7 +51,11 @@ pub enum RoomIn {
 }
 
 /// All outgoing events for the room channel.
+///
+/// Using `#[serde(untagged)]` so payloads serialize without enum variant name wrapper.
+/// For example: `{"from":"alice","text":"hi"}` instead of `{"MessageBroadcast":{"from":"alice","text":"hi"}}`.
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
+#[serde(untagged)]
 pub enum RoomOut {
     /// Broadcast payload for new messages.
     MessageBroadcast {
@@ -67,7 +72,11 @@ pub enum RoomOut {
 }
 
 /// Events broadcast to room members (used for push/broadcast).
+///
+/// Using `#[serde(untagged)]` so payloads serialize without enum variant name wrapper.
+/// For example: `{"nick":"alice"}` instead of `{"UserJoined":{"nick":"alice"}}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum RoomOutEvent {
     /// A user joined the room.
     UserJoined { nick: String },
@@ -220,6 +229,83 @@ impl Channel for RoomChannel {
         }
     }
 
+    /// Override handle_in_raw to use JSON serialization instead of postcard.
+    /// This ensures broadcasts work correctly with WebSocket clients.
+    ///
+    /// In Phoenix Channels, the event name determines the message type, and the
+    /// payload is just the inner data (e.g., `{"text":"hello"}` for `new_msg`).
+    /// We use the event to construct the appropriate enum variant.
+    async fn handle_in_raw(
+        &mut self,
+        event: &str,
+        payload: &[u8],
+        socket: &Socket,
+    ) -> RawHandleResult {
+        // First try to construct the message from event + payload (Phoenix style)
+        // The event name tells us which variant, payload is the inner data
+        let msg: RoomIn = match event {
+            "new_msg" => {
+                // Try to parse as {"text": "..."} directly
+                #[derive(serde::Deserialize)]
+                struct NewMsgPayload {
+                    text: String,
+                }
+                match serde_json::from_slice::<NewMsgPayload>(payload) {
+                    Ok(p) => RoomIn::NewMsg { text: p.text },
+                    Err(_) => {
+                        // Fall back to enum-wrapped format or postcard
+                        match serde_json::from_slice::<RoomIn>(payload) {
+                            Ok(m) => m,
+                            Err(_) => match <RoomIn as MessageTrait>::decode_local(payload) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    tracing::warn!(event = %event, error = %e, "Failed to decode new_msg");
+                                    return RawHandleResult::NoReply;
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+            "update_nick" => {
+                #[derive(serde::Deserialize)]
+                struct UpdateNickPayload {
+                    nick: String,
+                }
+                match serde_json::from_slice::<UpdateNickPayload>(payload) {
+                    Ok(p) => RoomIn::UpdateNick { nick: p.nick },
+                    Err(_) => match serde_json::from_slice::<RoomIn>(payload) {
+                        Ok(m) => m,
+                        Err(_) => match <RoomIn as MessageTrait>::decode_local(payload) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!(event = %event, error = %e, "Failed to decode update_nick");
+                                return RawHandleResult::NoReply;
+                            }
+                        },
+                    },
+                }
+            }
+            _ => {
+                // Unknown event - try enum-wrapped JSON or postcard
+                match serde_json::from_slice::<RoomIn>(payload) {
+                    Ok(m) => m,
+                    Err(_) => match <RoomIn as MessageTrait>::decode_local(payload) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!(event = %event, error = %e, "Failed to decode channel message");
+                            return RawHandleResult::NoReply;
+                        }
+                    },
+                }
+            }
+        };
+
+        let result = self.handle_in(event, msg, socket).await;
+        // Use JSON serialization so broadcasts work for WebSocket clients
+        handle_result_to_raw_json(result)
+    }
+
     async fn handle_info(&mut self, msg: ChannelInfo, socket: &Socket) -> HandleResult<RoomOut> {
         match msg {
             ChannelInfo::AfterJoin => {
@@ -231,7 +317,7 @@ impl Channel for RoomChannel {
                 );
 
                 // Broadcast UserJoined to notify others (not ourselves)
-                broadcast_from(
+                broadcast_from_json(
                     socket,
                     "user_joined",
                     &RoomOutEvent::UserJoined {
@@ -256,7 +342,7 @@ impl Channel for RoomChannel {
                         message_count = messages.len(),
                         "PUSHING HISTORY to socket"
                     );
-                    push(socket, "history", &RoomOutEvent::History { messages });
+                    push_json(socket, "history", &RoomOutEvent::History { messages });
                 }
 
                 // Schedule a delayed message to push presence state
@@ -300,7 +386,7 @@ impl Channel for RoomChannel {
                     users = ?users,
                     "Pushing presence state to user"
                 );
-                push(
+                push_json(
                     socket,
                     "presence_state",
                     &RoomOutEvent::PresenceState { users },
@@ -316,7 +402,7 @@ impl Channel for RoomChannel {
                     "Responding to presence sync request"
                 );
 
-                broadcast_from(
+                broadcast_from_json(
                     socket,
                     "presence_sync_response",
                     &RoomOutEvent::PresenceSyncResponse {
@@ -372,7 +458,7 @@ impl Channel for RoomChannel {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves
                                 if meta.pid != socket.pid {
-                                    push(
+                                    push_json(
                                         socket,
                                         "user_joined",
                                         &RoomOutEvent::UserJoined {
@@ -390,7 +476,7 @@ impl Channel for RoomChannel {
                             if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
                                 // Don't notify about ourselves
                                 if meta.pid != socket.pid {
-                                    push(
+                                    push_json(
                                         socket,
                                         "user_left",
                                         &RoomOutEvent::UserLeft {
@@ -424,7 +510,7 @@ impl Channel for RoomChannel {
         );
 
         // Broadcast that we're leaving
-        broadcast_from(
+        broadcast_from_json(
             socket,
             "user_left",
             &RoomOutEvent::UserLeft {

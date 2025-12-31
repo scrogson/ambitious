@@ -50,8 +50,31 @@ impl Socket {
 ///
 /// This mirrors Phoenix's `push/3` - sends an event directly to one client
 /// without requiring a prior message from the client.
+///
+/// **Note**: This uses postcard (binary) serialization for the payload.
+/// For WebSocket/JSON clients, use `push_json` instead.
 pub fn push<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
     if let Ok(payload_bytes) = postcard::to_allocvec(payload) {
+        let msg = ChannelReply::Push {
+            topic: socket.topic.clone(),
+            event: event.to_string(),
+            payload: payload_bytes,
+        };
+        if let Ok(bytes) = postcard::to_allocvec(&msg) {
+            let _ = crate::send_raw(socket.pid, bytes);
+        }
+    }
+}
+
+/// Push a message directly to a socket's client using JSON serialization.
+///
+/// This is the JSON variant of `push` - uses JSON serialization
+/// for the payload, making it compatible with WebSocket/Phoenix clients.
+///
+/// This function is only available with the `websocket` feature.
+#[cfg(feature = "websocket")]
+pub fn push_json<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
+    if let Ok(payload_bytes) = serde_json::to_vec(payload) {
         let msg = ChannelReply::Push {
             topic: socket.topic.clone(),
             event: event.to_string(),
@@ -75,6 +98,9 @@ pub fn broadcast<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
 ///
 /// This mirrors Phoenix's `broadcast_from/3` - sends to all subscribers except
 /// the socket that initiated the broadcast.
+///
+/// **Note**: This uses postcard (binary) serialization for the payload.
+/// For WebSocket/JSON clients, use `broadcast_from_json` instead.
 pub fn broadcast_from<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
     if let Ok(payload_bytes) = postcard::to_allocvec(payload) {
         let msg = ChannelReply::Push {
@@ -101,6 +127,46 @@ pub fn broadcast_from<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
                         success = result.is_ok(),
                         error = ?result.err(),
                         "broadcast_from: sent to member"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Broadcast a message to all subscribers of a topic, excluding the sender.
+///
+/// This is the JSON variant of `broadcast_from` - uses JSON serialization
+/// for the payload, making it compatible with WebSocket/Phoenix clients.
+///
+/// This function is only available with the `websocket` feature.
+#[cfg(feature = "websocket")]
+pub fn broadcast_from_json<T: Serialize>(socket: &Socket, event: &str, payload: &T) {
+    if let Ok(payload_bytes) = serde_json::to_vec(payload) {
+        let msg = ChannelReply::Push {
+            topic: socket.topic.clone(),
+            event: event.to_string(),
+            payload: payload_bytes,
+        };
+        if let Ok(bytes) = postcard::to_allocvec(&msg) {
+            let group = format!("channel:{}", socket.topic);
+            let members = pg::get_members(&group);
+            tracing::debug!(
+                topic = %socket.topic,
+                event = %event,
+                sender = ?socket.pid,
+                member_count = members.len(),
+                members = ?members,
+                "broadcast_from_json: sending to pg group members"
+            );
+            for pid in members {
+                if pid != socket.pid {
+                    let result = crate::send_raw(pid, bytes.clone());
+                    tracing::debug!(
+                        to = ?pid,
+                        success = result.is_ok(),
+                        error = ?result.err(),
+                        "broadcast_from_json: sent to member"
                     );
                 }
             }
@@ -249,6 +315,24 @@ pub enum ReplyStatus {
     Error,
 }
 
+/// Result of handling an outgoing message in `handle_out`.
+///
+/// This allows filtering or modifying outgoing broadcasts before they're sent.
+#[derive(Debug)]
+pub enum OutResult {
+    /// Send the message as-is (default behavior).
+    Send,
+    /// Send a modified payload instead.
+    SendModified {
+        /// The modified event name (or None to keep original).
+        event: Option<String>,
+        /// The modified payload.
+        payload: Vec<u8>,
+    },
+    /// Don't send this message to this client.
+    Drop,
+}
+
 /// Reason for channel termination.
 #[derive(Debug, Clone)]
 pub enum TerminateReason {
@@ -262,6 +346,48 @@ pub enum TerminateReason {
     Shutdown(String),
     /// Error occurred.
     Error(String),
+}
+
+// ============================================================================
+// ChannelEvent Trait - Phoenix-style event/payload separation
+// ============================================================================
+
+/// Trait for channel output events that supports Phoenix-style event naming.
+///
+/// Phoenix Channels use a wire format where the event name is separate from
+/// the payload: `[join_ref, ref, topic, event, payload]`
+///
+/// This trait allows enums to be split into event name and payload, enabling
+/// proper Phoenix wire format encoding.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::channel::ChannelEvent;
+///
+/// #[derive(ChannelEvent, Serialize)]
+/// enum RoomOut {
+///     #[event(name = "new_msg")]
+///     NewMsg { from: String, text: String },
+///     #[event(name = "user_joined")]
+///     UserJoined { nick: String },
+/// }
+///
+/// let event = RoomOut::NewMsg { from: "alice".into(), text: "hello".into() };
+/// assert_eq!(event.event_name(), "new_msg");
+/// // payload_bytes() returns just {"from":"alice","text":"hello"}
+/// ```
+pub trait ChannelEvent: Serialize {
+    /// Get the event name for this variant (snake_case).
+    ///
+    /// For an enum variant `NewMsg`, this returns `"new_msg"`.
+    fn event_name(&self) -> &'static str;
+
+    /// Serialize just the payload (inner fields) to bytes.
+    ///
+    /// This serializes the variant's fields without the enum wrapper,
+    /// suitable for the Phoenix wire format where event name is separate.
+    fn payload_bytes(&self) -> Vec<u8>;
 }
 
 // ============================================================================
@@ -344,6 +470,19 @@ pub trait Channel: Sized + Send + Sync + 'static {
     /// Use `*` as a wildcard to match any suffix.
     const TOPIC_PATTERN: &'static str;
 
+    /// Events to intercept before sending to the client.
+    ///
+    /// When a broadcast is received for an event in this list, `handle_out`
+    /// will be called before sending to the client. This allows filtering
+    /// or modifying outgoing messages on a per-client basis.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// const INTERCEPT: &'static [&'static str] = &["new_msg", "user_joined"];
+    /// ```
+    const INTERCEPT: &'static [&'static str] = &[];
+
     /// Called when a client attempts to join a topic.
     ///
     /// This constructs the channel state. Return `JoinResult::Ok(self)`
@@ -371,6 +510,45 @@ pub trait Channel: Sized + Send + Sync + 'static {
     /// Override this to handle messages sent to the channel's process.
     async fn handle_info(&mut self, _msg: Self::Info, _socket: &Socket) -> HandleResult<Self::Out> {
         HandleResult::NoReply
+    }
+
+    /// Handle an outgoing broadcast before it's sent to the client.
+    ///
+    /// This is only called for events listed in `INTERCEPT`. For intercepted
+    /// events, you can:
+    /// - Modify the payload before sending
+    /// - Filter (drop) the message entirely
+    /// - Add per-client customization
+    ///
+    /// **Important**: This is called once per subscriber for intercepted events,
+    /// which is less efficient than non-intercepted broadcasts. Use sparingly.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// const INTERCEPT: &'static [&'static str] = &["user_joined"];
+    ///
+    /// async fn handle_out(
+    ///     &mut self,
+    ///     event: &str,
+    ///     payload: &[u8],
+    ///     socket: &Socket,
+    /// ) -> OutResult {
+    ///     match event {
+    ///         "user_joined" => {
+    ///             // Check if this client is ignoring the user
+    ///             let msg: UserJoined = postcard::from_bytes(payload).unwrap();
+    ///             if self.ignored_users.contains(&msg.user_id) {
+    ///                 return OutResult::Drop;
+    ///             }
+    ///             OutResult::Send
+    ///         }
+    ///         _ => OutResult::Send,
+    ///     }
+    /// }
+    /// ```
+    async fn handle_out(&mut self, _event: &str, _payload: &[u8], _socket: &Socket) -> OutResult {
+        OutResult::Send
     }
 
     /// Handle a raw incoming event (for transport layer).
@@ -405,6 +583,19 @@ pub trait Channel: Sized + Send + Sync + 'static {
             }
             Err(_) => RawHandleResult::NoReply,
         }
+    }
+
+    /// Check if an event is intercepted.
+    fn is_intercepted(event: &str) -> bool {
+        Self::INTERCEPT.contains(&event)
+    }
+
+    /// Handle an outgoing broadcast (for transport layer).
+    ///
+    /// Called for intercepted events before sending to the client.
+    /// Default implementation calls `handle_out`.
+    async fn handle_out_raw(&mut self, event: &str, payload: &[u8], socket: &Socket) -> OutResult {
+        self.handle_out(event, payload, socket).await
     }
 }
 
@@ -452,7 +643,7 @@ pub enum RawHandleResult {
     },
 }
 
-/// Convert a typed HandleResult to RawHandleResult.
+/// Convert a typed HandleResult to RawHandleResult using postcard (binary) serialization.
 pub fn handle_result_to_raw<T: Serialize>(result: HandleResult<T>) -> RawHandleResult {
     match result {
         HandleResult::NoReply => RawHandleResult::NoReply,
@@ -479,6 +670,49 @@ pub fn handle_result_to_raw<T: Serialize>(result: HandleResult<T>) -> RawHandleR
             Err(_) => RawHandleResult::NoReply,
         },
         HandleResult::Push { event, payload } => match postcard::to_allocvec(&payload) {
+            Ok(bytes) => RawHandleResult::Push {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::PushRaw { event, payload } => RawHandleResult::Push { event, payload },
+        HandleResult::Stop { reason } => RawHandleResult::Stop { reason },
+    }
+}
+
+/// Convert a typed HandleResult to RawHandleResult using JSON serialization.
+///
+/// Use this for channels that need to interoperate with WebSocket/Phoenix clients.
+///
+/// This function is only available with the `websocket` feature.
+#[cfg(feature = "websocket")]
+pub fn handle_result_to_raw_json<T: Serialize>(result: HandleResult<T>) -> RawHandleResult {
+    match result {
+        HandleResult::NoReply => RawHandleResult::NoReply,
+        HandleResult::Reply { status, payload } => match serde_json::to_vec(&payload) {
+            Ok(bytes) => RawHandleResult::Reply {
+                status,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::ReplyRaw { status, payload } => RawHandleResult::Reply { status, payload },
+        HandleResult::Broadcast { event, payload } => match serde_json::to_vec(&payload) {
+            Ok(bytes) => RawHandleResult::Broadcast {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::BroadcastFrom { event, payload } => match serde_json::to_vec(&payload) {
+            Ok(bytes) => RawHandleResult::BroadcastFrom {
+                event,
+                payload: bytes,
+            },
+            Err(_) => RawHandleResult::NoReply,
+        },
+        HandleResult::Push { event, payload } => match serde_json::to_vec(&payload) {
             Ok(bytes) => RawHandleResult::Push {
                 event,
                 payload: bytes,
@@ -676,6 +910,14 @@ pub trait ChannelInstance: Send + Sync {
 
     /// Handle termination.
     async fn terminate(&mut self, reason: TerminateReason, socket: &Socket);
+
+    /// Check if an event should be intercepted.
+    fn is_intercepted(&self, event: &str) -> bool;
+
+    /// Handle an outgoing broadcast before sending.
+    ///
+    /// Only called for intercepted events.
+    async fn handle_out(&mut self, event: &str, payload: &[u8], socket: &Socket) -> OutResult;
 }
 
 /// Wrapper to make a typed Channel into a type-erased ChannelHandler.
@@ -749,6 +991,14 @@ impl<C: Channel> ChannelInstance for TypedChannelInstance<C> {
 
     async fn terminate(&mut self, reason: TerminateReason, socket: &Socket) {
         self.channel.terminate(reason, socket).await;
+    }
+
+    fn is_intercepted(&self, event: &str) -> bool {
+        C::is_intercepted(event)
+    }
+
+    async fn handle_out(&mut self, event: &str, payload: &[u8], socket: &Socket) -> OutResult {
+        self.channel.handle_out_raw(event, payload, socket).await
     }
 }
 

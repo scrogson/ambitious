@@ -156,6 +156,32 @@ impl Message for PresenceCast {
 pub enum PresenceInfo {
     /// Complete initialization after we have our PID.
     CompleteInit,
+    /// CRDT delta from another node.
+    CrdtDelta {
+        /// The topic.
+        topic: String,
+        /// The CRDT delta.
+        delta: CrdtDelta,
+    },
+    /// Request sync with causal context.
+    CrdtSyncRequest {
+        /// The requesting PID.
+        from: Pid,
+        /// The causal context.
+        context: HashMap<String, u64>,
+    },
+    /// Sync response with CRDT delta.
+    CrdtSyncResponse {
+        /// The delta to apply.
+        delta: CrdtDelta,
+    },
+    /// Node disconnected.
+    NodeDown {
+        /// The node name.
+        node_name: String,
+        /// The reason.
+        reason: String,
+    },
 }
 
 impl Message for PresenceInfo {
@@ -466,6 +492,14 @@ impl GenServer for Presence {
     async fn handle_info(&mut self, msg: PresenceInfo) -> Status {
         match msg {
             PresenceInfo::CompleteInit => self.complete_init().await,
+            PresenceInfo::CrdtDelta { topic, delta } => self.handle_crdt_delta(topic, delta).await,
+            PresenceInfo::CrdtSyncRequest { from, context } => {
+                self.handle_crdt_sync_request(from, context).await
+            }
+            PresenceInfo::CrdtSyncResponse { delta } => self.handle_crdt_sync_response(delta).await,
+            PresenceInfo::NodeDown { node_name, reason } => {
+                self.handle_node_down_info(node_name, reason).await
+            }
         }
     }
 
@@ -490,6 +524,148 @@ impl GenServer for Presence {
 }
 
 impl Presence {
+    /// Handle CRDT delta from a remote node.
+    async fn handle_crdt_delta(&mut self, topic: String, delta: CrdtDelta) -> Status {
+        tracing::debug!(
+            topic = %topic,
+            joins = delta.joins.len(),
+            leaves = delta.leave_tags.len(),
+            "Presence received CRDT delta from remote node"
+        );
+
+        // Check if any of the joins are from a node we're not monitoring
+        let my_node = crate::core::node::node_name_atom();
+        for entry in &delta.joins {
+            let replica = Atom::new(&entry.tag.replica);
+            if replica != my_node
+                && !self.monitored_nodes.contains(&replica)
+                && let Ok(_monitor_ref) = monitor_node(replica)
+            {
+                self.monitored_nodes.insert(replica);
+                tracing::info!(
+                    node = %entry.tag.replica,
+                    my_pid = ?crate::runtime::current_pid(),
+                    "Presence monitoring remote node for disconnect (from delta)"
+                );
+
+                // Send our state to them since they're new
+                let our_delta = self.crdt.extract_all();
+                if !our_delta.is_empty() {
+                    let response = PresenceInfo::CrdtDelta {
+                        topic: topic.clone(),
+                        delta: our_delta,
+                    };
+                    // Find their presence server PID
+                    for peer_pid in pg::get_members(&self.pg_group) {
+                        if peer_pid.node() == replica {
+                            tracing::debug!(
+                                peer = ?peer_pid,
+                                "Sending our presence state to new remote node"
+                            );
+                            let _ = crate::send(peer_pid, &response);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _result = self.crdt.merge(&delta);
+        Status::Ok
+    }
+
+    /// Handle CRDT sync request from a remote node.
+    async fn handle_crdt_sync_request(
+        &mut self,
+        from: Pid,
+        context: HashMap<String, u64>,
+    ) -> Status {
+        tracing::debug!(
+            from = ?from,
+            context_size = context.len(),
+            "Presence received CRDT sync request"
+        );
+
+        // Monitor the requesting node for disconnects
+        let from_node = from.node();
+        let my_node = crate::core::node::node_name_atom();
+        if from_node != my_node
+            && !self.monitored_nodes.contains(&from_node)
+            && let Ok(_monitor_ref) = monitor_node(from_node)
+        {
+            self.monitored_nodes.insert(from_node);
+            tracing::debug!(
+                node = %from_node,
+                "Presence monitoring remote node for disconnect (from sync request)"
+            );
+        }
+
+        // Extract only what they need
+        let delta = self.crdt.extract(&context);
+
+        if !delta.is_empty() {
+            let response = PresenceInfo::CrdtSyncResponse { delta };
+            let _ = crate::send(from, &response);
+        }
+
+        Status::Ok
+    }
+
+    /// Handle CRDT sync response from a remote node.
+    async fn handle_crdt_sync_response(&mut self, delta: CrdtDelta) -> Status {
+        tracing::debug!(
+            joins = delta.joins.len(),
+            "Presence received CRDT sync response"
+        );
+        let _result = self.crdt.merge(&delta);
+        Status::Ok
+    }
+
+    /// Handle node down notification via PresenceInfo.
+    async fn handle_node_down_info(&mut self, node_name: String, reason: String) -> Status {
+        tracing::info!(
+            node = %node_name,
+            reason = %reason,
+            "Presence detected node disconnect, removing presences"
+        );
+
+        // Remove all presences from the disconnected node
+        let removed = self.crdt.remove_down_replica(&node_name);
+        self.monitored_nodes.remove(&Atom::new(&node_name));
+
+        if !removed.is_empty() {
+            tracing::debug!(
+                removed_count = removed.len(),
+                "Removed presences from disconnected node"
+            );
+
+            // Broadcast leaves for each topic
+            let mut by_topic: HashMap<String, Vec<TrackedEntry>> = HashMap::new();
+            for entry in removed {
+                by_topic.entry(entry.topic.clone()).or_default().push(entry);
+            }
+
+            for (topic, entries) in by_topic {
+                let mut leaves: HashMap<String, PresenceState> = HashMap::new();
+                for entry in entries {
+                    leaves
+                        .entry(entry.key.clone())
+                        .or_insert_with(|| PresenceState { metas: vec![] })
+                        .metas
+                        .push(entry_to_meta(&entry));
+                }
+
+                let diff = PresenceDiff {
+                    joins: HashMap::new(),
+                    leaves,
+                };
+                broadcast_delta(&self.pubsub, &self.name, &topic, diff).await;
+            }
+        }
+
+        Status::Ok
+    }
+
     /// Handle raw messages that aren't typed (NodeDown, CRDT, legacy).
     async fn handle_raw_message(&mut self, payload: Vec<u8>) -> Status {
         // Check for NodeDown message (node disconnect notification)
@@ -563,96 +739,22 @@ impl Presence {
     }
 
     async fn handle_crdt_message(&mut self, msg: CrdtPresenceMessage) -> Status {
+        // Handle legacy CRDT messages (backwards compatibility)
+        // New code uses PresenceInfo variants, but we still handle raw postcard messages
         match msg {
             CrdtPresenceMessage::Delta { topic, delta } => {
-                tracing::debug!(
-                    topic = %topic,
-                    joins = delta.joins.len(),
-                    leaves = delta.leave_tags.len(),
-                    "Presence received CRDT delta from remote node"
-                );
-
-                // Check if any of the joins are from a node we're not monitoring
-                let my_node = crate::core::node::node_name_atom();
-                for entry in &delta.joins {
-                    let replica = Atom::new(&entry.tag.replica);
-                    if replica != my_node
-                        && !self.monitored_nodes.contains(&replica)
-                        && let Ok(_monitor_ref) = monitor_node(replica)
-                    {
-                        self.monitored_nodes.insert(replica);
-                        tracing::info!(
-                            node = %entry.tag.replica,
-                            my_pid = ?crate::runtime::current_pid(),
-                            "Presence monitoring remote node for disconnect (from delta)"
-                        );
-
-                        // Send our state to them since they're new
-                        let our_delta = self.crdt.extract_all();
-                        if !our_delta.is_empty() {
-                            let response = CrdtPresenceMessage::Delta {
-                                topic: topic.clone(),
-                                delta: our_delta,
-                            };
-                            if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
-                                // Find their presence server PID
-                                for peer_pid in pg::get_members(&self.pg_group) {
-                                    if peer_pid.node() == replica {
-                                        tracing::debug!(
-                                            peer = ?peer_pid,
-                                            "Sending our presence state to new remote node"
-                                        );
-                                        let _ = crate::send_raw(peer_pid, msg_bytes.clone());
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let _result = self.crdt.merge(&delta);
+                // Delegate to the new handler
+                self.handle_crdt_delta(topic, delta).await
             }
             CrdtPresenceMessage::SyncRequest { from, context } => {
-                tracing::debug!(
-                    from = ?from,
-                    context_size = context.len(),
-                    "Presence received CRDT sync request"
-                );
-
-                // Monitor the requesting node for disconnects
-                let from_node = from.node();
-                let my_node = crate::core::node::node_name_atom();
-                if from_node != my_node
-                    && !self.monitored_nodes.contains(&from_node)
-                    && let Ok(_monitor_ref) = monitor_node(from_node)
-                {
-                    self.monitored_nodes.insert(from_node);
-                    tracing::debug!(
-                        node = %from_node,
-                        "Presence monitoring remote node for disconnect (from sync request)"
-                    );
-                }
-
-                // Extract only what they need
-                let delta = self.crdt.extract(&context);
-
-                if !delta.is_empty() {
-                    let response = CrdtPresenceMessage::SyncResponse { delta };
-                    if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
-                        let _ = crate::send_raw(from, msg_bytes);
-                    }
-                }
+                // Delegate to the new handler
+                self.handle_crdt_sync_request(from, context).await
             }
             CrdtPresenceMessage::SyncResponse { delta } => {
-                tracing::debug!(
-                    joins = delta.joins.len(),
-                    "Presence received CRDT sync response"
-                );
-                let _result = self.crdt.merge(&delta);
+                // Delegate to the new handler
+                self.handle_crdt_sync_response(delta).await
             }
         }
-        Status::Ok
     }
 
     async fn handle_legacy_message(&mut self, msg: PresenceMessage) -> Status {
@@ -685,14 +787,12 @@ impl Presence {
                     "Presence received legacy sync request, sending CRDT state"
                 );
 
-                // Send full state as CRDT delta
+                // Send full state using new PresenceInfo format
                 let delta = self.crdt.extract_all();
 
                 if !delta.is_empty() {
-                    let response = CrdtPresenceMessage::SyncResponse { delta };
-                    if let Ok(msg_bytes) = postcard::to_allocvec(&response) {
-                        let _ = crate::send_raw(from, msg_bytes);
-                    }
+                    let response = PresenceInfo::CrdtSyncResponse { delta };
+                    let _ = crate::send(from, &response);
                 }
             }
             PresenceMessage::SyncResponse {
@@ -737,33 +837,31 @@ impl Presence {
         let my_node = crate::core::node::node_name_atom();
 
         // Send CRDT sync request with our context and monitor remote nodes
-        let sync_request = CrdtPresenceMessage::SyncRequest {
+        let sync_request = PresenceInfo::CrdtSyncRequest {
             from: self_pid,
             context: self.crdt.context().clone(),
         };
-        if let Ok(msg_bytes) = postcard::to_allocvec(&sync_request) {
-            for peer_pid in existing_members {
-                // Only request from remote nodes (not ourselves)
-                if peer_pid != self_pid && peer_pid.node() != my_node {
-                    let peer_node = peer_pid.node();
+        for peer_pid in existing_members {
+            // Only request from remote nodes (not ourselves)
+            if peer_pid != self_pid && peer_pid.node() != my_node {
+                let peer_node = peer_pid.node();
 
-                    // Monitor this node for disconnects (if not already monitoring)
-                    if !self.monitored_nodes.contains(&peer_node)
-                        && let Ok(_monitor_ref) = monitor_node(peer_node)
-                    {
-                        self.monitored_nodes.insert(peer_node);
-                        tracing::debug!(
-                            node = %peer_node,
-                            "Presence monitoring remote node for disconnect"
-                        );
-                    }
-
+                // Monitor this node for disconnects (if not already monitoring)
+                if !self.monitored_nodes.contains(&peer_node)
+                    && let Ok(_monitor_ref) = monitor_node(peer_node)
+                {
+                    self.monitored_nodes.insert(peer_node);
                     tracing::debug!(
-                        peer = ?peer_pid,
-                        "Requesting CRDT presence sync from remote Presence server"
+                        node = %peer_node,
+                        "Presence monitoring remote node for disconnect"
                     );
-                    let _ = crate::send_raw(peer_pid, msg_bytes.clone());
                 }
+
+                tracing::debug!(
+                    peer = ?peer_pid,
+                    "Requesting CRDT presence sync from remote Presence server"
+                );
+                let _ = crate::send(peer_pid, &sync_request);
             }
         }
 
@@ -954,7 +1052,7 @@ async fn broadcast_crdt_delta(pg_group: &str, topic: &str, delta: CrdtDelta) {
         return;
     }
 
-    let msg = CrdtPresenceMessage::Delta {
+    let msg = PresenceInfo::CrdtDelta {
         topic: topic.to_string(),
         delta,
     };
@@ -963,17 +1061,15 @@ async fn broadcast_crdt_delta(pg_group: &str, topic: &str, delta: CrdtDelta) {
     let self_pid = crate::current_pid();
     let my_node = crate::core::node::node_name_atom();
 
-    if let Ok(msg_bytes) = postcard::to_allocvec(&msg) {
-        for pid in members {
-            // Skip ourselves and only send to remote nodes
-            if pid != self_pid && pid.node() != my_node {
-                tracing::trace!(
-                    target_pid = ?pid,
-                    topic = %topic,
-                    "Forwarding CRDT presence delta to remote Presence server"
-                );
-                let _ = crate::send_raw(pid, msg_bytes.clone());
-            }
+    for pid in members {
+        // Skip ourselves and only send to remote nodes
+        if pid != self_pid && pid.node() != my_node {
+            tracing::trace!(
+                target_pid = ?pid,
+                topic = %topic,
+                "Forwarding CRDT presence delta to remote Presence server"
+            );
+            let _ = crate::send(pid, &msg);
         }
     }
 }

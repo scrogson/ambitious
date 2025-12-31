@@ -7,15 +7,21 @@
 //!
 //! - **Channel**: The struct IS the channel state
 //! - **Socket**: Connection metadata (PID, topic, join_ref)
-//! - **`HandleIn<M>`**: Typed handler trait for incoming events
+//! - **Transport**: Handles wire protocol and connection management
+//! - **Serializer**: Encodes/decodes messages at the transport boundary
 //! - **Topic**: String identifier for routing (supports patterns like `"room:*"`)
 //!
 //! # Transports
 //!
-//! Channels can be served over different transports:
+//! Channels can be served over different transports. The `Transport` trait
+//! allows you to define custom transports for any connection type.
 //!
+//! Built-in transports:
 //! - **WebSocket** (requires `websocket` feature): Phoenix Channels V2 JSON protocol
 //!   for direct compatibility with Phoenix JavaScript clients
+//!
+//! Custom transports can be implemented using the `Transport` trait and
+//! `run_transport` helper function.
 //!
 //! # Example
 //!
@@ -66,9 +72,16 @@
 //! ```
 
 mod core;
+pub mod transport;
 
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
 // Re-export everything from core
 pub use core::*;
+
+// Re-export transport types
+pub use transport::{
+    ConnectionMetadata, ControlMessage, Transport, TransportBuilder, TransportConfig,
+    TransportMessage, TransportReply, TransportResult, run_transport_loop,
+};

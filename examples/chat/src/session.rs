@@ -1,7 +1,7 @@
-//! User session process using Channels.
+//! User session process using Channels and Transport trait.
 //!
 //! Each connected client gets a session process that:
-//! - Reads commands from the TCP socket
+//! - Reads commands from the TCP socket via Transport
 //! - Sends events back to the client
 //! - Uses ChannelServer for room management
 
@@ -10,19 +10,153 @@ use crate::protocol::{ClientCommand, ServerEvent, frame_message, parse_frame};
 use crate::registry::Registry;
 use crate::room::{Room, RoomCast};
 use crate::room_supervisor;
+use ambitious::channel::transport::{Transport, TransportConfig};
 use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
 use ambitious::gen_server::cast;
-use ambitious::{Pid, RawTerm, Term};
-use std::sync::Arc;
+use ambitious::{Pid, Term};
+use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+
+// ============================================================================
+// TCP Transport Implementation
+// ============================================================================
+
+/// TCP transport for the chat protocol.
+///
+/// Uses length-prefixed postcard framing: 4-byte big-endian length + payload.
+pub struct TcpTransport {
+    stream: TcpStream,
+    /// Buffer for incomplete frames
+    pending: Vec<u8>,
+}
+
+/// Error type for TCP transport operations.
+#[derive(Debug)]
+pub enum TcpTransportError {
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for TcpTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TcpTransportError::Io(e) => write!(f, "IO error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for TcpTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TcpTransportError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for TcpTransportError {
+    fn from(e: std::io::Error) -> Self {
+        TcpTransportError::Io(e)
+    }
+}
+
+#[async_trait]
+impl Transport for TcpTransport {
+    type Connection = TcpStream;
+    type Error = TcpTransportError;
+
+    async fn connect(
+        conn: Self::Connection,
+        _config: &TransportConfig,
+    ) -> Result<Self, Self::Error> {
+        Ok(TcpTransport {
+            stream: conn,
+            pending: Vec::new(),
+        })
+    }
+
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+        // First check if we have a complete frame in pending buffer
+        if let Some((cmd, consumed)) = parse_frame::<ClientCommand>(&self.pending) {
+            self.pending.drain(..consumed);
+            // Re-serialize for return (we need raw bytes, not the parsed command)
+            // Actually, let's return the raw frame bytes
+            let frame = frame_message(&cmd);
+            return Ok(Some(frame));
+        }
+
+        // Read more data from socket
+        let mut buf = [0u8; 4096];
+        match self.stream.read(&mut buf).await {
+            Ok(0) => Ok(None), // Connection closed
+            Ok(n) => {
+                self.pending.extend_from_slice(&buf[..n]);
+                // Try to parse again
+                if let Some((cmd, consumed)) = parse_frame::<ClientCommand>(&self.pending) {
+                    self.pending.drain(..consumed);
+                    let frame = frame_message(&cmd);
+                    Ok(Some(frame))
+                } else {
+                    // Return empty to indicate no complete message yet
+                    // Caller should call recv again
+                    Ok(Some(Vec::new()))
+                }
+            }
+            Err(e) => Err(TcpTransportError::Io(e)),
+        }
+    }
+
+    async fn send(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.stream.write_all(data).await?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.stream.shutdown().await?;
+        Ok(())
+    }
+}
+
+impl TcpTransport {
+    /// Try to receive a complete command without blocking indefinitely.
+    /// Returns None if no complete command is available.
+    pub async fn try_recv_command(&mut self) -> Result<Option<ClientCommand>, TcpTransportError> {
+        // Check pending buffer first
+        if let Some((cmd, consumed)) = parse_frame::<ClientCommand>(&self.pending) {
+            self.pending.drain(..consumed);
+            return Ok(Some(cmd));
+        }
+        Ok(None)
+    }
+
+    /// Read more data into the pending buffer.
+    pub async fn fill_buffer(&mut self) -> Result<bool, TcpTransportError> {
+        let mut buf = [0u8; 4096];
+        match self.stream.read(&mut buf).await {
+            Ok(0) => Ok(false), // Connection closed
+            Ok(n) => {
+                self.pending.extend_from_slice(&buf[..n]);
+                Ok(true)
+            }
+            Err(e) => Err(TcpTransportError::Io(e)),
+        }
+    }
+
+    /// Send a server event to the client.
+    pub async fn send_event(&mut self, event: &ServerEvent) -> Result<(), TcpTransportError> {
+        let frame = frame_message(event);
+        self.send(&frame).await
+    }
+}
+
+// ============================================================================
+// Session using Transport
+// ============================================================================
 
 /// User session state.
 pub struct Session {
-    /// TCP stream for this client.
-    stream: Arc<Mutex<TcpStream>>,
+    /// TCP transport for this client.
+    transport: TcpTransport,
     /// User's nickname.
     nick: Option<String>,
     /// Channel server for managing room connections.
@@ -30,70 +164,87 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(stream: TcpStream, pid: Pid) -> Self {
+    pub async fn new(stream: TcpStream, pid: Pid) -> Result<Self, TcpTransportError> {
         // Build channel server with RoomChannel handler
         let channels = ChannelServerBuilder::new()
             .channel::<RoomChannel>()
             .build(pid);
 
-        Self {
-            stream: Arc::new(Mutex::new(stream)),
+        // Create transport using the Transport trait
+        let config = TransportConfig::new();
+        let transport = TcpTransport::connect(stream, &config).await?;
+
+        Ok(Self {
+            transport,
             nick: None,
             channels,
-        }
+        })
     }
 
     /// Run the session, processing commands until disconnect.
     pub async fn run(mut self) {
         // Send welcome message
-        self.send_event(ServerEvent::Welcome {
-            message: "Welcome to Ambitious Chat! Use /nick <name> to set your nickname."
-                .to_string(),
-        })
-        .await;
-
-        let mut buf = vec![0u8; 4096];
-        let mut pending = Vec::new();
+        if self
+            .transport
+            .send_event(&ServerEvent::Welcome {
+                message: "Welcome to Ambitious Chat! Use /nick <name> to set your nickname."
+                    .to_string(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
 
         loop {
-            // Try to parse any pending data first
-            while let Some((cmd, consumed)) = parse_frame::<ClientCommand>(&pending) {
-                pending.drain(..consumed);
-                if !self.handle_command(cmd).await {
-                    return; // Client quit
-                }
-            }
-
             // First, drain any pending process messages (non-blocking)
             while let Some(data) = ambitious::try_recv() {
                 self.handle_channel_message(&data).await;
             }
 
-            // Now wait for either TCP data or process messages
-            let stream = self.stream.clone();
-            let mut guard = stream.lock().await;
+            // Try to parse any pending commands
+            match self.transport.try_recv_command().await {
+                Ok(Some(cmd)) => {
+                    if !self.handle_command(cmd).await {
+                        return; // Client quit
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Error parsing command");
+                    self.cleanup().await;
+                    return;
+                }
+            }
 
+            // Wait for either TCP data or process messages
             tokio::select! {
                 biased; // Prefer process messages over TCP
 
                 // Check for messages from channels (broadcasts, pushes)
                 msg = ambitious::recv_timeout(Duration::from_millis(100)) => {
-                    drop(guard); // Release lock before processing
                     if let Ok(Some(data)) = msg {
                         self.handle_channel_message(&data).await;
                     }
                 }
 
-                result = guard.read(&mut buf) => {
+                // Read more data from transport
+                result = self.transport.fill_buffer() => {
                     match result {
-                        Ok(0) => {
+                        Ok(true) => {
+                            // Data received, try to parse commands
+                            while let Ok(Some(cmd)) = self.transport.try_recv_command().await {
+                                if !self.handle_command(cmd).await {
+                                    return; // Client quit
+                                }
+                            }
+                        }
+                        Ok(false) => {
                             // Connection closed
                             tracing::info!(nick = ?self.nick, "Client disconnected");
                             self.cleanup().await;
                             return;
-                        }
-                        Ok(n) => {
-                            pending.extend_from_slice(&buf[..n]);
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Read error");
@@ -112,6 +263,8 @@ impl Session {
     /// 1. ChannelReply::Push - broadcasts from pg groups, forwarded to the client
     /// 2. Everything else - internal messages dispatched to channel handle_info
     async fn handle_channel_message(&mut self, data: &[u8]) {
+        use ambitious::RawTerm;
+
         let raw = RawTerm::from(data.to_vec());
 
         // First, check if this is a ChannelReply::Push (broadcast from pg group)
@@ -123,10 +276,13 @@ impl Session {
         }) = raw.decode::<ChannelReply>()
         {
             // Decode the room event and forward to client
-            let payload_raw = RawTerm::from(payload);
-            if let Some(room_event) = payload_raw.decode::<RoomOutEvent>() {
+            // Try JSON first (from WebSocket clients), then fallback to postcard (from TUI)
+            let room_event: Option<RoomOutEvent> = serde_json::from_slice(&payload)
+                .ok()
+                .or_else(|| RawTerm::from(payload).decode::<RoomOutEvent>());
+            if let Some(room_event) = room_event {
                 let room_name = topic.strip_prefix("room:").unwrap_or(&topic);
-                match room_event {
+                let event = match room_event {
                     RoomOutEvent::UserJoined { nick } => {
                         tracing::debug!(
                             room = %room_name,
@@ -134,27 +290,20 @@ impl Session {
                             my_nick = ?self.nick,
                             "Received UserJoined broadcast, sending to client"
                         );
-                        self.send_event(ServerEvent::UserJoined {
+                        Some(ServerEvent::UserJoined {
                             room: room_name.to_string(),
                             nick,
                         })
-                        .await;
                     }
-                    RoomOutEvent::UserLeft { nick } => {
-                        self.send_event(ServerEvent::UserLeft {
-                            room: room_name.to_string(),
-                            nick,
-                        })
-                        .await;
-                    }
-                    RoomOutEvent::Message { from, text } => {
-                        self.send_event(ServerEvent::Message {
-                            room: room_name.to_string(),
-                            from,
-                            text,
-                        })
-                        .await;
-                    }
+                    RoomOutEvent::UserLeft { nick } => Some(ServerEvent::UserLeft {
+                        room: room_name.to_string(),
+                        nick,
+                    }),
+                    RoomOutEvent::Message { from, text } => Some(ServerEvent::Message {
+                        room: room_name.to_string(),
+                        from,
+                        text,
+                    }),
                     RoomOutEvent::PresenceState { users } => {
                         tracing::debug!(
                             room = %room_name,
@@ -162,50 +311,48 @@ impl Session {
                             nick = ?self.nick,
                             "Received PresenceState broadcast, sending UserList to client"
                         );
-                        self.send_event(ServerEvent::UserList {
+                        Some(ServerEvent::UserList {
                             room: room_name.to_string(),
                             users,
                         })
-                        .await;
                     }
                     RoomOutEvent::PresenceSyncRequest { .. } => {
                         // These should go through handle_info, not be broadcast
-                        // But if we receive one, ignore it here
+                        None
                     }
                     RoomOutEvent::PresenceSyncResponse { nick } => {
-                        // An existing member announced themselves
                         tracing::debug!(
                             room = %room_name,
                             nick = %nick,
                             "Received presence sync response, sending UserJoined to client"
                         );
-                        self.send_event(ServerEvent::UserJoined {
+                        Some(ServerEvent::UserJoined {
                             room: room_name.to_string(),
                             nick,
                         })
-                        .await;
                     }
                     RoomOutEvent::History { messages } => {
-                        // History pushed to this client specifically
                         tracing::debug!(
                             nick = ?self.nick,
                             room = %room_name,
                             message_count = messages.len(),
                             "Received history push, forwarding to client"
                         );
-                        self.send_event(ServerEvent::History {
+                        Some(ServerEvent::History {
                             room: room_name.to_string(),
                             messages,
                         })
-                        .await;
                     }
+                };
+
+                if let Some(event) = event {
+                    let _ = self.transport.send_event(&event).await;
                 }
             }
             return; // Message handled as broadcast, don't dispatch to handle_info
         }
 
         // Not a ChannelReply::Push - dispatch to channel handle_info for internal messages
-        // (e.g., ChannelInfo::AfterJoin, PresenceMessage::Delta, etc.)
         let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
         for (topic, result) in info_results {
             match result {
@@ -270,7 +417,10 @@ impl Session {
             ClientCommand::ListRooms => {
                 let rooms = Registry::list_rooms().await;
                 tracing::debug!(room_count = rooms.len(), "Sending room list to client");
-                self.send_event(ServerEvent::RoomList { rooms }).await;
+                let _ = self
+                    .transport
+                    .send_event(&ServerEvent::RoomList { rooms })
+                    .await;
             }
 
             ClientCommand::ListUsers(room_name) => {
@@ -290,10 +440,12 @@ impl Session {
     /// Handle nick command.
     async fn handle_nick(&mut self, nick: String) {
         if nick.is_empty() || nick.len() > 32 {
-            self.send_event(ServerEvent::NickError {
-                reason: "Nickname must be 1-32 characters".to_string(),
-            })
-            .await;
+            let _ = self
+                .transport
+                .send_event(&ServerEvent::NickError {
+                    reason: "Nickname must be 1-32 characters".to_string(),
+                })
+                .await;
             return;
         }
 
@@ -301,7 +453,10 @@ impl Session {
         self.nick = Some(nick.clone());
 
         tracing::info!(old = ?old_nick, new = %nick, "Nick changed");
-        self.send_event(ServerEvent::NickOk { nick }).await;
+        let _ = self
+            .transport
+            .send_event(&ServerEvent::NickOk { nick })
+            .await;
     }
 
     /// Handle join command using channels.
@@ -310,11 +465,13 @@ impl Session {
         let nick = match &self.nick {
             Some(n) => n.clone(),
             None => {
-                self.send_event(ServerEvent::JoinError {
-                    room: room_name,
-                    reason: "Set a nickname first with /nick".to_string(),
-                })
-                .await;
+                let _ = self
+                    .transport
+                    .send_event(&ServerEvent::JoinError {
+                        room: room_name,
+                        reason: "Set a nickname first with /nick".to_string(),
+                    })
+                    .await;
                 return;
             }
         };
@@ -322,16 +479,17 @@ impl Session {
         // Check if already joined
         let topic = format!("room:{}", room_name);
         if self.channels.is_joined(&topic) {
-            self.send_event(ServerEvent::JoinError {
-                room: room_name,
-                reason: "Already in this room".to_string(),
-            })
-            .await;
+            let _ = self
+                .transport
+                .send_event(&ServerEvent::JoinError {
+                    room: room_name,
+                    reason: "Already in this room".to_string(),
+                })
+                .await;
             return;
         }
 
         // Get or create the room GenServer first (this registers it globally)
-        // The room is created here so it exists before the channel join
         if let Err(e) = room_supervisor::get_or_create_room(&room_name).await {
             tracing::warn!(room = %room_name, error = ?e, "Failed to create room");
         }
@@ -349,26 +507,21 @@ impl Session {
 
         match reply {
             ChannelReply::JoinOk { .. } => {
-                // Note: History is sent via the channel's AfterJoin handler
-                // to ensure it only goes to the joining user (not duplicated here)
-
-                self.send_event(ServerEvent::Joined {
-                    room: room_name.clone(),
-                })
-                .await;
-
-                // RoomChannel::join() sends :after_join which will:
-                // - Broadcast UserJoined to other members
-                // - Push history to the joining user
-                // - Schedule PushPresenceState to send full user list after sync
-                // These are handled when the mailbox messages arrive in handle_channel_message
+                let _ = self
+                    .transport
+                    .send_event(&ServerEvent::Joined {
+                        room: room_name.clone(),
+                    })
+                    .await;
             }
             ChannelReply::JoinError { reason, .. } => {
-                self.send_event(ServerEvent::JoinError {
-                    room: room_name,
-                    reason,
-                })
-                .await;
+                let _ = self
+                    .transport
+                    .send_event(&ServerEvent::JoinError {
+                        room: room_name,
+                        reason,
+                    })
+                    .await;
             }
             _ => {}
         }
@@ -379,16 +532,21 @@ impl Session {
         let topic = format!("room:{}", room_name);
 
         if !self.channels.is_joined(&topic) {
-            self.send_event(ServerEvent::Error {
-                message: format!("Not in room '{}'", room_name),
-            })
-            .await;
+            let _ = self
+                .transport
+                .send_event(&ServerEvent::Error {
+                    message: format!("Not in room '{}'", room_name),
+                })
+                .await;
             return;
         }
 
         // RoomChannel::terminate() broadcasts UserLeft for us
         self.channels.handle_leave(topic).await;
-        self.send_event(ServerEvent::Left { room: room_name }).await;
+        let _ = self
+            .transport
+            .send_event(&ServerEvent::Left { room: room_name })
+            .await;
     }
 
     /// Handle message command.
@@ -396,10 +554,12 @@ impl Session {
         let topic = format!("room:{}", room);
 
         if !self.channels.is_joined(&topic) {
-            self.send_event(ServerEvent::Error {
-                message: format!("Not in room '{}'. Join first.", room),
-            })
-            .await;
+            let _ = self
+                .transport
+                .send_event(&ServerEvent::Error {
+                    message: format!("Not in room '{}'. Join first.", room),
+                })
+                .await;
             return;
         }
 
@@ -424,10 +584,11 @@ impl Session {
             from: nick,
             text: text.clone(),
         };
+        let payload_json = serde_json::to_vec(&event).unwrap_or_default();
         let msg = ChannelReply::Push {
             topic: topic.to_string(),
             event: "new_msg".to_string(),
-            payload: event.encode(),
+            payload: payload_json,
         };
         let group = format!("channel:{}", topic);
         let members = ambitious::dist::pg::get_members(&group);
@@ -460,21 +621,13 @@ impl Session {
             })
             .collect();
 
-        self.send_event(ServerEvent::UserList {
-            room: room_name,
-            users,
-        })
-        .await;
-    }
-
-    /// Send an event to the client.
-    async fn send_event(&self, event: ServerEvent) {
-        let frame = frame_message(&event);
-        let stream = self.stream.clone();
-        let mut guard = stream.lock().await;
-        if let Err(e) = guard.write_all(&frame).await {
-            tracing::error!(error = %e, "Failed to send event");
-        }
+        let _ = self
+            .transport
+            .send_event(&ServerEvent::UserList {
+                room: room_name,
+                users,
+            })
+            .await;
     }
 
     /// Cleanup when disconnecting.
@@ -483,6 +636,9 @@ impl Session {
         self.channels
             .terminate(ambitious::channel::TerminateReason::Closed)
             .await;
+
+        // Close the transport
+        let _ = self.transport.close().await;
     }
 }
 
@@ -490,7 +646,11 @@ impl Session {
 pub fn spawn_session(stream: TcpStream) -> Pid {
     ambitious::spawn(move || async move {
         let pid = ambitious::current_pid();
-        let session = Session::new(stream, pid);
-        session.run().await;
+        match Session::new(stream, pid).await {
+            Ok(session) => session.run().await,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create session");
+            }
+        }
     })
 }

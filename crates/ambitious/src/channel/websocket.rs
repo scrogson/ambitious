@@ -15,6 +15,12 @@
 //! - `phx_error`: Error response
 //! - `phx_close`: Channel closed
 //!
+//! # Serializer Pattern
+//!
+//! Following Phoenix's approach, serialization is handled at the transport boundary
+//! by a `Serializer` trait. The WebSocket transport uses `V2JsonSerializer` by default.
+//! Channels are completely unaware of the wire format.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -47,6 +53,212 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
+
+// ============================================================================
+// Serializer - Phoenix-style transport boundary serialization
+// ============================================================================
+
+/// A serializer handles encoding/decoding messages at the transport boundary.
+///
+/// This follows Phoenix's Serializer behavior pattern. The serializer is
+/// responsible for converting between wire format (e.g., JSON) and the
+/// internal message representation.
+///
+/// Channels never see wire formats - they work with typed Rust structs.
+/// The serializer sits at the edge of the system.
+pub trait Serializer: Send + Sync {
+    /// Decode incoming wire data into a Phoenix message.
+    ///
+    /// Returns the parsed message components: join_ref, msg_ref, topic, event, payload.
+    /// The payload is returned as raw bytes in the wire format.
+    fn decode(&self, data: &[u8]) -> Option<DecodedMessage>;
+
+    /// Encode a reply message to wire format.
+    fn encode_reply(
+        &self,
+        join_ref: Option<&str>,
+        msg_ref: Option<&str>,
+        topic: &str,
+        status: &str,
+        payload: &[u8],
+    ) -> Vec<u8>;
+
+    /// Encode a push message to wire format.
+    fn encode_push(
+        &self,
+        join_ref: Option<&str>,
+        topic: &str,
+        event: &str,
+        payload: &[u8],
+    ) -> Vec<u8>;
+
+    /// Fast path for encoding broadcast messages.
+    ///
+    /// This is called for high-frequency broadcasts. Implementations may
+    /// optimize this path (e.g., pre-serializing parts of the message).
+    fn fastlane(&self, topic: &str, event: &str, payload: &[u8]) -> Vec<u8> {
+        self.encode_push(None, topic, event, payload)
+    }
+}
+
+/// A decoded message from the wire.
+#[derive(Debug, Clone)]
+pub struct DecodedMessage {
+    /// Join reference for channel correlation.
+    pub join_ref: Option<String>,
+    /// Message reference for request/reply correlation.
+    pub msg_ref: Option<String>,
+    /// The topic (e.g., "room:lobby").
+    pub topic: String,
+    /// The event name (e.g., "phx_join", "new_msg").
+    pub event: String,
+    /// The payload in wire format (e.g., JSON bytes).
+    pub payload: Vec<u8>,
+}
+
+/// A factory for creating serializers.
+///
+/// This allows dynamic serializer selection at connection time based on
+/// connection parameters like the `vsn` query param.
+pub type SerializerFactory = Arc<dyn Fn() -> Arc<dyn Serializer> + Send + Sync>;
+
+/// Registry for serializer versions.
+///
+/// Maps version strings (from `vsn` query param) to serializer factories.
+/// The endpoint uses this to negotiate the wire format per-connection.
+///
+/// # Example
+///
+/// ```ignore
+/// let registry = SerializerRegistry::new()
+///     .register("1.0.0", || Arc::new(V1JsonSerializer))
+///     .register("2.0.0", || Arc::new(V2JsonSerializer))
+///     .register("postcard", || Arc::new(PostcardSerializer))
+///     .default_version("2.0.0");
+/// ```
+pub struct SerializerRegistry {
+    serializers: HashMap<String, SerializerFactory>,
+    default_version: String,
+}
+
+impl SerializerRegistry {
+    /// Create a new registry with V2JsonSerializer as default.
+    pub fn new() -> Self {
+        let mut serializers = HashMap::new();
+        serializers.insert(
+            "2.0.0".to_string(),
+            Arc::new(|| Arc::new(V2JsonSerializer) as Arc<dyn Serializer>) as SerializerFactory,
+        );
+        Self {
+            serializers,
+            default_version: "2.0.0".to_string(),
+        }
+    }
+
+    /// Register a serializer for a version string.
+    pub fn register<F>(mut self, version: &str, factory: F) -> Self
+    where
+        F: Fn() -> Arc<dyn Serializer> + Send + Sync + 'static,
+    {
+        self.serializers
+            .insert(version.to_string(), Arc::new(factory));
+        self
+    }
+
+    /// Set the default version to use when `vsn` is not specified.
+    pub fn default_version(mut self, version: &str) -> Self {
+        self.default_version = version.to_string();
+        self
+    }
+
+    /// Get a serializer for the given version.
+    ///
+    /// Returns the default serializer if the version is not registered.
+    pub fn get(&self, version: Option<&str>) -> Arc<dyn Serializer> {
+        let vsn = version.unwrap_or(&self.default_version);
+        self.serializers.get(vsn).map(|f| f()).unwrap_or_else(|| {
+            // Fall back to default
+            self.serializers
+                .get(&self.default_version)
+                .map(|f| f())
+                .unwrap_or_else(|| Arc::new(V2JsonSerializer))
+        })
+    }
+
+    /// Get the list of supported versions.
+    pub fn versions(&self) -> Vec<&str> {
+        self.serializers.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+impl Default for SerializerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Phoenix Channels V2 JSON serializer.
+///
+/// This implements the standard Phoenix Channels V2 protocol:
+/// - Wire format: `[join_ref, ref, topic, event, payload]`
+/// - Payload encoding: JSON
+///
+/// This is the default serializer for WebSocket connections.
+#[derive(Debug, Clone, Default)]
+pub struct V2JsonSerializer;
+
+impl Serializer for V2JsonSerializer {
+    fn decode(&self, data: &[u8]) -> Option<DecodedMessage> {
+        let text = std::str::from_utf8(data).ok()?;
+        let value: Value = serde_json::from_str(text).ok()?;
+        let arr = value.as_array()?;
+        if arr.len() != 5 {
+            return None;
+        }
+
+        Some(DecodedMessage {
+            join_ref: arr[0].as_str().map(String::from),
+            msg_ref: arr[1].as_str().map(String::from),
+            topic: arr[2].as_str()?.to_string(),
+            event: arr[3].as_str()?.to_string(),
+            payload: serde_json::to_vec(&arr[4]).ok()?,
+        })
+    }
+
+    fn encode_reply(
+        &self,
+        join_ref: Option<&str>,
+        msg_ref: Option<&str>,
+        topic: &str,
+        status: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        // Parse payload as JSON, or use empty object
+        let response: Value = serde_json::from_slice(payload).unwrap_or(json!({}));
+        let msg = json!([
+            join_ref,
+            msg_ref,
+            topic,
+            "phx_reply",
+            { "status": status, "response": response }
+        ]);
+        msg.to_string().into_bytes()
+    }
+
+    fn encode_push(
+        &self,
+        join_ref: Option<&str>,
+        topic: &str,
+        event: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        // Parse payload as JSON, or wrap in object
+        let payload_json: Value =
+            serde_json::from_slice(payload).unwrap_or_else(|_| json!({ "data": payload }));
+        let msg = json!([join_ref, null, topic, event, payload_json]);
+        msg.to_string().into_bytes()
+    }
+}
 
 /// Phoenix Channels V2 message format.
 /// Format: [join_ref, ref, topic, event, payload]
@@ -194,13 +406,13 @@ impl Default for WebSocketConfig {
 }
 
 // ============================================================================
-// JSON-based Channel Handler for WebSocket transport
+// JSON Channel Handler for WebSocket transport
 // ============================================================================
 
-/// Wrapper to make a typed Channel into a JSON-based type-erased ChannelHandler.
+/// A channel handler that uses JSON for wire format payloads.
 ///
-/// Unlike `TypedChannelHandler` which uses postcard (binary), this uses JSON
-/// serialization which is required for the Phoenix Channels protocol.
+/// This wraps a standard channel and handles JSON<->postcard conversion
+/// at the join boundary. The Serializer handles the rest at the transport layer.
 pub struct JsonChannelHandler<C: Channel> {
     _phantom: std::marker::PhantomData<C>,
 }
@@ -223,7 +435,9 @@ impl<C: Channel> Default for JsonChannelHandler<C> {
 #[async_trait]
 impl<C: Channel> ChannelHandler for JsonChannelHandler<C>
 where
-    C::Join: DeserializeOwned,
+    C::Join: DeserializeOwned + serde::Serialize,
+    C::In: DeserializeOwned + serde::Serialize,
+    C::Out: DeserializeOwned + serde::Serialize,
 {
     fn topic_pattern(&self) -> &'static str {
         C::TOPIC_PATTERN
@@ -239,7 +453,7 @@ where
         payload: &[u8],
         socket: Socket,
     ) -> Result<(Box<dyn ChannelInstance>, Option<Vec<u8>>), JoinError> {
-        // Parse JSON payload
+        // Parse JSON payload into the channel's Join type
         let join_payload: C::Join = serde_json::from_slice(payload)
             .map_err(|e| JoinError::new(format!("invalid payload: {}", e)))?;
 
@@ -248,7 +462,12 @@ where
                 Ok((Box::new(JsonChannelInstance::new(channel)), None))
             }
             super::JoinResult::OkReply(channel, reply) => {
-                Ok((Box::new(JsonChannelInstance::new(channel)), Some(reply)))
+                // Reply is already in internal format, convert to JSON for wire
+                let json_reply = serde_json::to_vec(&serde_json::Value::Object(
+                    serde_json::from_slice(&reply).unwrap_or_default(),
+                ))
+                .ok();
+                Ok((Box::new(JsonChannelInstance::new(channel)), json_reply))
             }
             super::JoinResult::Error(e) => Err(e),
         }
@@ -257,8 +476,7 @@ where
 
 /// A JSON-aware channel instance wrapper.
 ///
-/// This wraps a typed channel instance and handles JSON serialization
-/// for the WebSocket transport.
+/// Converts between JSON (wire) and postcard (internal) at the channel boundary.
 struct JsonChannelInstance<C: Channel> {
     channel: C,
 }
@@ -270,46 +488,172 @@ impl<C: Channel> JsonChannelInstance<C> {
 }
 
 #[async_trait]
-impl<C: Channel> ChannelInstance for JsonChannelInstance<C> {
+impl<C: Channel> ChannelInstance for JsonChannelInstance<C>
+where
+    C::In: DeserializeOwned + serde::Serialize,
+    C::Out: DeserializeOwned + serde::Serialize,
+    C::Join: DeserializeOwned + serde::Serialize,
+{
     async fn handle_event(
         &mut self,
         event: &str,
         payload: &[u8],
         socket: &Socket,
     ) -> RawHandleResult {
-        self.channel.handle_in_raw(event, payload, socket).await
+        // Convert JSON payload to internal format (postcard)
+        let internal_payload: Vec<u8> = match serde_json::from_slice::<C::In>(payload) {
+            Ok(msg) => match postcard::to_allocvec(&msg) {
+                Ok(bytes) => bytes,
+                Err(_) => payload.to_vec(),
+            },
+            Err(_) => payload.to_vec(),
+        };
+
+        let result = self
+            .channel
+            .handle_in_raw(event, &internal_payload, socket)
+            .await;
+
+        // Convert result payloads from internal to JSON
+        self.convert_result_to_json(result)
     }
 
     async fn handle_info(&mut self, msg: crate::core::RawTerm, socket: &Socket) -> RawHandleResult {
-        self.channel.handle_info_raw(msg, socket).await
+        let result = self.channel.handle_info_raw(msg, socket).await;
+        self.convert_result_to_json(result)
     }
 
     async fn terminate(&mut self, reason: TerminateReason, socket: &Socket) {
         self.channel.terminate(reason, socket).await;
+    }
+
+    fn is_intercepted(&self, event: &str) -> bool {
+        C::is_intercepted(event)
+    }
+
+    async fn handle_out(
+        &mut self,
+        event: &str,
+        payload: &[u8],
+        socket: &Socket,
+    ) -> crate::channel::OutResult {
+        self.channel.handle_out_raw(event, payload, socket).await
+    }
+}
+
+impl<C: Channel> JsonChannelInstance<C>
+where
+    C::Out: DeserializeOwned + serde::Serialize,
+{
+    /// Convert internal format payloads in a result to JSON for wire transmission.
+    fn convert_result_to_json(&self, result: RawHandleResult) -> RawHandleResult {
+        match result {
+            RawHandleResult::Reply { status, payload } => {
+                let json_payload = self.payload_to_json(&payload).unwrap_or(payload);
+                RawHandleResult::Reply {
+                    status,
+                    payload: json_payload,
+                }
+            }
+            RawHandleResult::Push { event, payload } => {
+                let json_payload = self.payload_to_json(&payload).unwrap_or(payload);
+                RawHandleResult::Push {
+                    event,
+                    payload: json_payload,
+                }
+            }
+            RawHandleResult::Broadcast { event, payload } => {
+                let json_payload = self.payload_to_json(&payload).unwrap_or(payload);
+                RawHandleResult::Broadcast {
+                    event,
+                    payload: json_payload,
+                }
+            }
+            RawHandleResult::BroadcastFrom { event, payload } => {
+                let json_payload = self.payload_to_json(&payload).unwrap_or(payload);
+                RawHandleResult::BroadcastFrom {
+                    event,
+                    payload: json_payload,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Convert internal (postcard) payload to JSON.
+    fn payload_to_json(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        // Try to decode as C::Out and re-encode as JSON
+        let out: C::Out = postcard::from_bytes(payload).ok()?;
+        serde_json::to_vec(&out).ok()
     }
 }
 
 /// A WebSocket endpoint that serves Phoenix Channels.
 ///
 /// The endpoint manages WebSocket connections and routes messages to the
-/// appropriate channel handlers.
+/// appropriate channel handlers. It uses a `SerializerRegistry` to negotiate
+/// the wire format per-connection based on the `vsn` query parameter.
+///
+/// # Serializer Negotiation
+///
+/// Clients can specify the protocol version via query param:
+/// - `ws://localhost:4000/socket/websocket?vsn=2.0.0` - Phoenix V2 JSON
+/// - `ws://localhost:4000/socket/websocket?vsn=postcard` - Binary postcard format
+///
+/// Custom serializers can be registered for different clients (TUI, native, etc).
 pub struct WebSocketEndpoint {
     handlers: Vec<Arc<dyn ChannelHandler + Send + Sync>>,
     config: WebSocketConfig,
+    serializer_registry: Arc<SerializerRegistry>,
 }
 
 impl WebSocketEndpoint {
-    /// Create a new WebSocket endpoint.
+    /// Create a new WebSocket endpoint with the default serializer registry.
+    ///
+    /// The default registry supports:
+    /// - `2.0.0` - Phoenix Channels V2 JSON protocol (default)
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
             config: WebSocketConfig::default(),
+            serializer_registry: Arc::new(SerializerRegistry::new()),
         }
     }
 
     /// Set the configuration.
     pub fn config(mut self, config: WebSocketConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Set a custom serializer registry for version negotiation.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let registry = SerializerRegistry::new()
+    ///     .register("2.0.0", || Arc::new(V2JsonSerializer))
+    ///     .register("postcard", || Arc::new(PostcardSerializer))
+    ///     .default_version("2.0.0");
+    ///
+    /// let endpoint = WebSocketEndpoint::new()
+    ///     .serializer_registry(registry)
+    ///     .channel::<RoomChannel>();
+    /// ```
+    pub fn serializer_registry(mut self, registry: SerializerRegistry) -> Self {
+        self.serializer_registry = Arc::new(registry);
+        self
+    }
+
+    /// Set a single serializer for all connections (bypasses version negotiation).
+    ///
+    /// Use this for simple setups where all clients use the same protocol.
+    /// For multi-protocol support, use `serializer_registry` instead.
+    pub fn serializer<S: Serializer + 'static>(mut self, serializer: S) -> Self {
+        // Create a registry with only this serializer
+        let s = Arc::new(serializer);
+        let registry = SerializerRegistry::new().register("default", move || s.clone());
+        self.serializer_registry = Arc::new(registry.default_version("default"));
         self
     }
 
@@ -320,7 +664,9 @@ impl WebSocketEndpoint {
     pub fn channel<C>(mut self) -> Self
     where
         C: Channel,
-        C::Join: DeserializeOwned,
+        C::Join: DeserializeOwned + serde::Serialize,
+        C::In: DeserializeOwned + serde::Serialize,
+        C::Out: DeserializeOwned + serde::Serialize,
     {
         self.handlers.push(Arc::new(JsonChannelHandler::<C>::new()));
         self
@@ -363,6 +709,16 @@ impl WebSocketEndpoint {
     /// Get the registered handlers.
     pub fn handlers(&self) -> &[Arc<dyn ChannelHandler + Send + Sync>] {
         &self.handlers
+    }
+
+    /// Get the serializer registry.
+    pub fn registry(&self) -> &Arc<SerializerRegistry> {
+        &self.serializer_registry
+    }
+
+    /// Get a serializer for a specific version.
+    pub fn get_serializer(&self, version: Option<&str>) -> Arc<dyn Serializer> {
+        self.serializer_registry.get(version)
     }
 }
 
@@ -509,19 +865,60 @@ impl WsSession {
     }
 }
 
+/// Extract query parameters from a URI string.
+fn parse_query_params(uri: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    if let Some(query_start) = uri.find('?') {
+        let query = &uri[query_start + 1..];
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                params.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    params
+}
+
 /// Handle a WebSocket connection.
 async fn handle_connection(
     endpoint: Arc<WebSocketEndpoint>,
     stream: TcpStream,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!(%addr, "WebSocket connection");
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    // Track the vsn from the HTTP request
+    let vsn: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let vsn_capture = vsn.clone();
+
+    // Accept WebSocket with header callback to extract vsn
+    let callback = |req: &Request,
+                    response: Response|
+     -> Result<
+        Response,
+        tokio_tungstenite::tungstenite::http::Response<Option<String>>,
+    > {
+        let uri = req.uri().to_string();
+        let params = parse_query_params(&uri);
+        if let Some(v) = params.get("vsn")
+            && let Ok(mut guard) = vsn_capture.lock()
+        {
+            *guard = Some(v.clone());
+        }
+        tracing::info!(%addr, uri = %uri, vsn = ?params.get("vsn"), "WebSocket connection");
+        Ok(response)
+    };
+
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
     let (mut write, mut read) = ws_stream.split();
 
     // Get a PID for this session
     let pid = crate::current_pid();
+
+    // Get the serializer based on negotiated vsn
+    let negotiated_vsn = vsn.lock().ok().and_then(|g| g.clone());
+    let serializer = endpoint.get_serializer(negotiated_vsn.as_deref());
+    tracing::debug!(%addr, vsn = ?negotiated_vsn, "Selected serializer");
 
     let mut session = WsSession::new(pid, endpoint.handlers.clone());
 
@@ -555,27 +952,22 @@ async fn handle_connection(
                                 }
                             }
 
-                            // Convert the payload from postcard to JSON
-                            // Try to parse as JSON, or create a wrapper
-                            let json_payload: Value = serde_json::from_slice(&payload)
-                                .unwrap_or_else(|_| json!({ "data": payload }));
-
-                            let phx_msg = PhxMessage::push(
-                                session.get_join_ref(&topic),
-                                topic,
-                                event,
-                                json_payload,
+                            // Use the serializer to encode the push message for the wire
+                            let wire_bytes = serializer.encode_push(
+                                session.get_join_ref(&topic).as_deref(),
+                                &topic,
+                                &event,
+                                &payload,
                             );
 
-                            let json_str = phx_msg.to_json().to_string();
-                            if let Err(e) = write.send(Message::Text(json_str.into())).await {
+                            if let Err(e) = write.send(Message::Text(String::from_utf8_lossy(&wire_bytes).into_owned().into())).await {
                                 tracing::warn!(%addr, error = %e, "WebSocket write error");
                                 break;
                             }
                         }
                     } else {
                         // Not a ChannelReply - dispatch to handle_info for all joined channels
-                        let results = session.handle_info_all(msg_bytes.into()).await;
+                        let results = session.handle_info_all(crate::RawTerm::from(msg_bytes)).await;
                         for (topic, result) in results {
                             // Handle any broadcasts from handle_info
                             if let RawHandleResult::Broadcast { event, payload } = result {
@@ -612,27 +1004,19 @@ async fn handle_connection(
 
                 match msg {
                     Message::Text(text) => {
-                        let value: Value = match serde_json::from_str(&text) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(%addr, error = %e, "Invalid JSON");
-                                continue;
-                            }
-                        };
-
-                        let phx_msg = match PhxMessage::from_json(&value) {
-                            Some(m) => m,
+                        // Use the serializer to decode the wire message
+                        let decoded = match serializer.decode(text.as_bytes()) {
+                            Some(d) => d,
                             None => {
                                 tracing::warn!(%addr, "Invalid Phoenix message format");
                                 continue;
                             }
                         };
 
-                        // Handle the message and send replies directly
-                        let replies = handle_phx_message(&mut session, phx_msg).await;
-                        for reply in replies {
-                            let json_str = reply.to_json().to_string();
-                            if let Err(e) = write.send(Message::Text(json_str.into())).await {
+                        // Handle the message using the serializer for encoding replies
+                        let replies = handle_decoded_message(&mut session, &serializer, decoded).await;
+                        for reply_bytes in replies {
+                            if let Err(e) = write.send(Message::Text(String::from_utf8_lossy(&reply_bytes).into_owned().into())).await {
                                 tracing::warn!(%addr, error = %e, "WebSocket write error");
                                 break;
                             }
@@ -662,151 +1046,127 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Handle a Phoenix protocol message.
-async fn handle_phx_message(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage> {
+/// Handle a decoded Phoenix protocol message using the serializer for encoding replies.
+async fn handle_decoded_message(
+    session: &mut WsSession,
+    serializer: &Arc<dyn Serializer>,
+    msg: DecodedMessage,
+) -> Vec<Vec<u8>> {
     match msg.event.as_str() {
         "heartbeat" if msg.topic == "phoenix" => {
             // Reply to heartbeat
-            vec![PhxMessage::ok_reply(
-                None,
-                msg.msg_ref,
-                "phoenix",
-                json!({}),
-            )]
+            vec![serializer.encode_reply(None, msg.msg_ref.as_deref(), "phoenix", "ok", b"{}")]
         }
 
-        "phx_join" => handle_join(session, msg).await,
+        "phx_join" => handle_join_decoded(session, serializer, msg).await,
 
-        "phx_leave" => handle_leave(session, msg).await,
+        "phx_leave" => handle_leave_decoded(session, serializer, msg).await,
 
         // Custom events for joined channels
-        _ => handle_channel_event(session, msg).await,
+        _ => handle_channel_event_decoded(session, serializer, msg).await,
     }
 }
 
-/// Handle phx_join event.
-async fn handle_join(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage> {
-    let mut replies = Vec::new();
-
-    // Convert JSON payload to bytes for the channel server
-    let payload_bytes = match serde_json::to_vec(&msg.payload) {
-        Ok(b) => b,
-        Err(_) => {
-            replies.push(PhxMessage::error_reply(
-                msg.join_ref,
-                msg.msg_ref,
-                msg.topic,
-                "invalid payload",
-            ));
-            return replies;
-        }
-    };
-
+/// Handle phx_join event with serializer.
+async fn handle_join_decoded(
+    session: &mut WsSession,
+    serializer: &Arc<dyn Serializer>,
+    msg: DecodedMessage,
+) -> Vec<Vec<u8>> {
     match session
-        .handle_join(msg.topic.clone(), payload_bytes, msg.join_ref.clone())
+        .handle_join(msg.topic.clone(), msg.payload.clone(), msg.join_ref.clone())
         .await
     {
         Ok(reply_payload) => {
-            // Parse reply payload if present
-            let response = reply_payload
-                .and_then(|p| serde_json::from_slice(&p).ok())
-                .unwrap_or(json!({}));
-
-            replies.push(PhxMessage::ok_reply(
-                msg.join_ref,
-                msg.msg_ref,
-                msg.topic,
-                response,
-            ));
+            // Reply payload is already in wire format (JSON) from JsonChannelInstance
+            let response = reply_payload.unwrap_or_else(|| b"{}".to_vec());
+            vec![serializer.encode_reply(
+                msg.join_ref.as_deref(),
+                msg.msg_ref.as_deref(),
+                &msg.topic,
+                "ok",
+                &response,
+            )]
         }
         Err(e) => {
-            replies.push(PhxMessage::error_reply(
-                msg.join_ref,
-                msg.msg_ref,
-                msg.topic,
-                e.reason,
-            ));
+            let error_payload = json!({ "reason": e.reason }).to_string();
+            vec![serializer.encode_reply(
+                msg.join_ref.as_deref(),
+                msg.msg_ref.as_deref(),
+                &msg.topic,
+                "error",
+                error_payload.as_bytes(),
+            )]
         }
     }
-
-    replies
 }
 
-/// Handle phx_leave event.
-async fn handle_leave(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage> {
+/// Handle phx_leave event with serializer.
+async fn handle_leave_decoded(
+    session: &mut WsSession,
+    serializer: &Arc<dyn Serializer>,
+    msg: DecodedMessage,
+) -> Vec<Vec<u8>> {
     session.handle_leave(&msg.topic).await;
 
-    vec![PhxMessage::ok_reply(
-        None,
-        msg.msg_ref,
-        msg.topic,
-        json!({}),
-    )]
+    vec![serializer.encode_reply(None, msg.msg_ref.as_deref(), &msg.topic, "ok", b"{}")]
 }
 
-/// Handle custom channel events.
-async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<PhxMessage> {
+/// Handle custom channel events with serializer.
+async fn handle_channel_event_decoded(
+    session: &mut WsSession,
+    serializer: &Arc<dyn Serializer>,
+    msg: DecodedMessage,
+) -> Vec<Vec<u8>> {
     let mut replies = Vec::new();
 
     // Check if joined
     if !session.is_joined(&msg.topic) {
-        return vec![PhxMessage::error_reply(
+        let error_payload = json!({ "reason": "not joined" }).to_string();
+        return vec![serializer.encode_reply(
             None,
-            msg.msg_ref,
-            msg.topic,
-            "not joined",
+            msg.msg_ref.as_deref(),
+            &msg.topic,
+            "error",
+            error_payload.as_bytes(),
         )];
     }
 
-    // Convert JSON payload to bytes
-    let payload_bytes = match serde_json::to_vec(&msg.payload) {
-        Ok(b) => b,
-        Err(_) => {
-            return vec![PhxMessage::error_reply(
-                session.get_join_ref(&msg.topic),
-                msg.msg_ref,
-                msg.topic,
-                "invalid payload",
-            )];
-        }
-    };
-
     let result = session
-        .handle_event(&msg.topic, &msg.event, payload_bytes)
+        .handle_event(&msg.topic, &msg.event, msg.payload.clone())
         .await;
 
     if let Some(raw_result) = result {
         match raw_result {
             RawHandleResult::NoReply => {
                 // Send ok reply for events that don't have explicit replies
-                replies.push(PhxMessage::ok_reply(
-                    session.get_join_ref(&msg.topic),
-                    msg.msg_ref,
-                    msg.topic,
-                    json!({}),
+                replies.push(serializer.encode_reply(
+                    session.get_join_ref(&msg.topic).as_deref(),
+                    msg.msg_ref.as_deref(),
+                    &msg.topic,
+                    "ok",
+                    b"{}",
                 ));
             }
             RawHandleResult::Reply { status, payload } => {
-                let response: Value = serde_json::from_slice(&payload).unwrap_or(json!({}));
                 let status_str = match status {
                     ReplyStatus::Ok => "ok",
                     ReplyStatus::Error => "error",
                 };
-                replies.push(PhxMessage::reply(
-                    session.get_join_ref(&msg.topic),
-                    msg.msg_ref,
-                    msg.topic,
+                replies.push(serializer.encode_reply(
+                    session.get_join_ref(&msg.topic).as_deref(),
+                    msg.msg_ref.as_deref(),
+                    &msg.topic,
                     status_str,
-                    response,
+                    &payload,
                 ));
             }
             RawHandleResult::Push { event, payload } => {
-                let response: Value = serde_json::from_slice(&payload).unwrap_or(json!({}));
-                replies.push(PhxMessage::push(
-                    session.get_join_ref(&msg.topic),
-                    msg.topic,
-                    event,
-                    response,
+                replies.push(serializer.encode_push(
+                    session.get_join_ref(&msg.topic).as_deref(),
+                    &msg.topic,
+                    &event,
+                    &payload,
                 ));
             }
             RawHandleResult::Broadcast { event, payload } => {
@@ -824,11 +1184,12 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
                     }
                 }
                 // Send ok reply
-                replies.push(PhxMessage::ok_reply(
-                    session.get_join_ref(&msg.topic),
-                    msg.msg_ref,
-                    msg.topic,
-                    json!({}),
+                replies.push(serializer.encode_reply(
+                    session.get_join_ref(&msg.topic).as_deref(),
+                    msg.msg_ref.as_deref(),
+                    &msg.topic,
+                    "ok",
+                    b"{}",
                 ));
             }
             RawHandleResult::BroadcastFrom { event, payload } => {
@@ -848,11 +1209,12 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
                     }
                 }
                 // Send ok reply
-                replies.push(PhxMessage::ok_reply(
-                    session.get_join_ref(&msg.topic),
-                    msg.msg_ref,
-                    msg.topic,
-                    json!({}),
+                replies.push(serializer.encode_reply(
+                    session.get_join_ref(&msg.topic).as_deref(),
+                    msg.msg_ref.as_deref(),
+                    &msg.topic,
+                    "ok",
+                    b"{}",
                 ));
             }
             RawHandleResult::Stop { reason } => {
@@ -862,45 +1224,17 @@ async fn handle_channel_event(session: &mut WsSession, msg: PhxMessage) -> Vec<P
         }
     } else {
         // No result - not joined or handler not found
-        replies.push(PhxMessage::error_reply(
-            session.get_join_ref(&msg.topic),
-            msg.msg_ref,
-            msg.topic,
-            "handler error",
+        let error_payload = json!({ "reason": "handler error" }).to_string();
+        replies.push(serializer.encode_reply(
+            session.get_join_ref(&msg.topic).as_deref(),
+            msg.msg_ref.as_deref(),
+            &msg.topic,
+            "error",
+            error_payload.as_bytes(),
         ));
     }
 
     replies
-}
-
-/// JSON serializer/deserializer for channel payloads.
-///
-/// Use this when you want your channel to work with JSON payloads
-/// instead of postcard-serialized bytes.
-pub mod json_payload {
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
-    use serde_json::Value;
-
-    /// Serialize a payload to JSON bytes.
-    pub fn serialize<T: Serialize>(payload: &T) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(payload)
-    }
-
-    /// Deserialize a payload from JSON bytes.
-    pub fn deserialize<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
-
-    /// Deserialize a payload from JSON Value.
-    pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
-        serde_json::from_value(value)
-    }
-
-    /// Serialize a payload to JSON Value.
-    pub fn to_value<T: Serialize>(payload: &T) -> Result<Value, serde_json::Error> {
-        serde_json::to_value(payload)
-    }
 }
 
 #[cfg(test)]

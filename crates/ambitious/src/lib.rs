@@ -196,7 +196,9 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use ambitious_macros::{GenServerImpl, Message, ambitious_process, main, self_pid, test};
+pub use ambitious_macros::{
+    ChannelEvent, GenServerImpl, Message, ambitious_process, main, self_pid, test,
+};
 
 /// Prelude module for convenient imports.
 ///

@@ -407,10 +407,14 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
                             where
                                 D: ::serde::Deserializer<'de>,
                             {
-                                // Deserialize as tuple for simplicity (matches encode_payload)
-                                let (#(#field_names),*): (#(#field_types),*) =
-                                    ::serde::Deserialize::deserialize(deserializer)?;
-                                Ok(Self { #(#field_names),* })
+                                // Deserialize as struct (matches Serialize impl)
+                                #[derive(::serde::Deserialize)]
+                                #[serde(crate = "::serde")]
+                                struct Helper #ty_generics #where_clause {
+                                    #(#field_names: #field_types),*
+                                }
+                                let helper = Helper::deserialize(deserializer)?;
+                                Ok(Self { #(#field_names: helper.#field_names),* })
                             }
                         }
                     },
@@ -499,3 +503,193 @@ fn get_message_tag(input: &DeriveInput) -> Option<String> {
 // Note: Both GenServer and Channel now use the enum-based pattern which doesn't
 // require attribute macros. See `ambitious::gen_server` and `ambitious::channel`
 // for the new APIs.
+
+/// Derive macro for implementing the ChannelEvent trait.
+///
+/// This generates `event_name()` and `payload_bytes()` implementations for
+/// channel output enums, enabling Phoenix-style wire format where the event
+/// name is separate from the payload.
+///
+/// # Attributes
+///
+/// - `#[event(name = "custom_name")]` - Override the event name for a variant
+///   (defaults to snake_case of the variant name)
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::ChannelEvent;
+/// use serde::Serialize;
+///
+/// #[derive(ChannelEvent, Serialize)]
+/// enum RoomOut {
+///     // Event name: "new_msg", payload: {"from": "...", "text": "..."}
+///     NewMsg { from: String, text: String },
+///
+///     // Custom event name: "user_join"
+///     #[event(name = "user_join")]
+///     UserJoined { nick: String },
+///
+///     // Unit variant: event name "ping", payload: {}
+///     Ping,
+/// }
+/// ```
+#[proc_macro_derive(ChannelEvent, attributes(event))]
+pub fn derive_channel_event(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let variants = match &input.data {
+        Data::Enum(data) => &data.variants,
+        _ => {
+            return syn::Error::new_spanned(input, "ChannelEvent can only be derived for enums")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Generate match arms for event_name()
+    let event_name_arms: Vec<_> = variants
+        .iter()
+        .map(|v| {
+            let variant_name = &v.ident;
+            let event_name =
+                get_event_name(v).unwrap_or_else(|| to_snake_case(&variant_name.to_string()));
+
+            // Generate pattern that ignores all fields
+            let pattern = match &v.fields {
+                Fields::Unit => quote! { #name::#variant_name },
+                Fields::Named(_) => quote! { #name::#variant_name { .. } },
+                Fields::Unnamed(fields) => {
+                    let ignores: Vec<_> = fields.unnamed.iter().map(|_| quote! { _ }).collect();
+                    quote! { #name::#variant_name(#(#ignores),*) }
+                }
+            };
+
+            quote! {
+                #pattern => #event_name,
+            }
+        })
+        .collect();
+
+    // Generate match arms for payload_bytes()
+    let payload_bytes_arms: Vec<_> = variants
+        .iter()
+        .map(|v| {
+            let variant_name = &v.ident;
+
+            match &v.fields {
+                Fields::Unit => {
+                    // Unit variant: empty object {}
+                    quote! {
+                        #name::#variant_name => {
+                            ::serde_json::to_vec(&::serde_json::json!({})).unwrap_or_default()
+                        }
+                    }
+                }
+                Fields::Named(fields) => {
+                    // Named fields: extract and serialize as object
+                    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
+                    let field_strs: Vec<_> = field_names
+                        .iter()
+                        .map(|n| n.as_ref().map(|i| i.to_string()).unwrap_or_default())
+                        .collect();
+
+                    quote! {
+                        #name::#variant_name { #(#field_names),* } => {
+                            let payload = ::serde_json::json!({
+                                #(#field_strs: #field_names),*
+                            });
+                            ::serde_json::to_vec(&payload).unwrap_or_default()
+                        }
+                    }
+                }
+                Fields::Unnamed(fields) => {
+                    if fields.unnamed.len() == 1 {
+                        // Newtype: serialize the inner value directly
+                        quote! {
+                            #name::#variant_name(inner) => {
+                                ::serde_json::to_vec(inner).unwrap_or_default()
+                            }
+                        }
+                    } else {
+                        // Tuple: serialize as array
+                        let bindings: Vec<_> = (0..fields.unnamed.len())
+                            .map(|i| {
+                                syn::Ident::new(&format!("f{}", i), proc_macro2::Span::call_site())
+                            })
+                            .collect();
+                        quote! {
+                            #name::#variant_name(#(#bindings),*) => {
+                                let payload = ::serde_json::json!([#(#bindings),*]);
+                                ::serde_json::to_vec(&payload).unwrap_or_default()
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        impl #impl_generics ::ambitious::channel::ChannelEvent for #name #ty_generics #where_clause {
+            fn event_name(&self) -> &'static str {
+                match self {
+                    #(#event_name_arms)*
+                }
+            }
+
+            fn payload_bytes(&self) -> Vec<u8> {
+                match self {
+                    #(#payload_bytes_arms)*
+                }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Extract custom event name from #[event(name = "...")] attribute
+fn get_event_name(variant: &syn::Variant) -> Option<String> {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("event")
+            && let Ok(meta) = attr.meta.require_list()
+        {
+            let tokens = meta.tokens.to_string();
+            // Simple parsing: look for name = "value"
+            if let Some(start) = tokens.find("name") {
+                let rest = &tokens[start..];
+                if let Some(eq_pos) = rest.find('=') {
+                    let after_eq = rest[eq_pos + 1..].trim();
+                    // Extract string value between quotes
+                    if let Some(quote_start) = after_eq.find('"') {
+                        let after_quote = &after_eq[quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            return Some(after_quote[..quote_end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Convert a PascalCase string to snake_case
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
