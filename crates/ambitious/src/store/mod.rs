@@ -1369,4 +1369,72 @@ mod tests {
         assert!(store.contains_key(&2).unwrap());
         assert!(store.contains_key(&3).unwrap());
     }
+
+    #[tokio::test]
+    async fn test_store_inherited_notification() {
+        use crate::core::ExitReason;
+        use crate::message::{Message, decode_tag};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Initialize global runtime (required for cleanup_owned_stores)
+        crate::process::global::init();
+        let handle = crate::process::global::handle();
+
+        let notification_received = Arc::new(AtomicBool::new(false));
+        let notification_clone = notification_received.clone();
+        let store_id_holder = Arc::new(std::sync::Mutex::new(None::<StoreId>));
+        let store_id_clone = store_id_holder.clone();
+
+        // Spawn heir process that waits for StoreInherited message
+        let heir_pid = handle.spawn(move || async move {
+            // Wait for potential message with timeout
+            if let Ok(Some(msg)) = crate::recv_timeout(Duration::from_millis(500)).await
+                && let Ok((tag, payload)) = decode_tag(&msg)
+                && tag == StoreInherited::TAG
+                && let Ok(inherited) = StoreInherited::decode_local(payload)
+            {
+                // Verify the message contents
+                let expected_id = store_id_clone.lock().unwrap().unwrap();
+                if inherited.store_id == expected_id {
+                    notification_clone.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+
+        // Give heir time to start
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Spawn owner process that creates a store with heir
+        let heir_pid_for_owner = heir_pid;
+        let store_id_for_owner = store_id_holder.clone();
+        let owner_pid = handle.spawn(move || async move {
+            // Create a store with the heir
+            let store: Store<String, i32> =
+                Store::with_options(StoreOptions::default().heir(heir_pid_for_owner));
+            let id = store.id();
+
+            // Store the ID so heir can verify it
+            *store_id_for_owner.lock().unwrap() = Some(id);
+
+            // Keep the store alive briefly, then exit normally
+            // The runtime will call cleanup_owned_stores on exit
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+
+        // Wait for owner to set up store
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Exit the owner - this triggers cleanup_owned_stores
+        let _ = handle.exit(owner_pid, ExitReason::Normal);
+
+        // Wait for heir to receive notification
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            notification_received.load(Ordering::SeqCst),
+            "Heir should have received StoreInherited notification"
+        );
+    }
 }

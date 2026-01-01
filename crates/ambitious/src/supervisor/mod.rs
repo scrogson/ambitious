@@ -187,4 +187,145 @@ mod tests {
         // Supervisor should still be running
         assert!(handle.alive(sup_pid));
     }
+
+    #[tokio::test]
+    async fn test_supervisor_shutdown_waits_for_child() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        // Track that child was started
+        let child_started = Arc::new(AtomicBool::new(false));
+        let child_started_clone = child_started.clone();
+
+        struct WaitSupervisor;
+
+        impl Supervisor for WaitSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicBool>);
+
+            fn init((handle, started_flag): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne),
+                    vec![
+                        ChildSpec::new("worker", move || {
+                            let h = handle_clone.clone();
+                            let sf = started_flag.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    sf.store(true, Ordering::SeqCst);
+                                    // Simple worker that waits
+                                    while let Ok(Some(_)) =
+                                        crate::recv_timeout(Duration::from_secs(60)).await
+                                    {
+                                    }
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        // Use Timeout shutdown - supervisor should wait for child
+                        .shutdown(ShutdownType::Timeout(Duration::from_millis(500))),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid = start::<WaitSupervisor>(&handle, (handle.clone(), child_started_clone))
+            .await
+            .unwrap();
+
+        // Give it time to start children
+        sleep(Duration::from_millis(50)).await;
+        assert!(handle.alive(sup_pid));
+        assert!(
+            child_started.load(Ordering::SeqCst),
+            "Child should have started"
+        );
+
+        // Exit supervisor - it should wait for child
+        let _ = handle.exit(sup_pid, crate::core::ExitReason::Shutdown);
+
+        // Wait for shutdown
+        sleep(Duration::from_millis(100)).await;
+
+        // Supervisor should be dead now
+        assert!(!handle.alive(sup_pid), "Supervisor should have terminated");
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_brutal_kill_immediate() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let child_started = Arc::new(AtomicBool::new(false));
+        let child_started_clone = child_started.clone();
+
+        struct BrutalSupervisor;
+
+        impl Supervisor for BrutalSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicBool>);
+
+            fn init((handle, started_flag): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne),
+                    vec![
+                        ChildSpec::new("brutal_worker", move || {
+                            let h = handle_clone.clone();
+                            let sf = started_flag.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    sf.store(true, Ordering::SeqCst);
+                                    // Worker that waits
+                                    while let Ok(Some(_)) =
+                                        crate::recv_timeout(Duration::from_secs(60)).await
+                                    {
+                                    }
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        // Use BrutalKill - supervisor should kill immediately
+                        .shutdown(ShutdownType::BrutalKill),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid = start::<BrutalSupervisor>(&handle, (handle.clone(), child_started_clone))
+            .await
+            .unwrap();
+
+        // Give it time to start children
+        sleep(Duration::from_millis(50)).await;
+        assert!(handle.alive(sup_pid));
+        assert!(
+            child_started.load(Ordering::SeqCst),
+            "Child should have started"
+        );
+
+        let before = std::time::Instant::now();
+
+        // Exit supervisor
+        let _ = handle.exit(sup_pid, crate::core::ExitReason::Shutdown);
+
+        // Wait for shutdown
+        sleep(Duration::from_millis(50)).await;
+
+        let elapsed = before.elapsed();
+
+        // BrutalKill should be very fast (no waiting)
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "BrutalKill should terminate quickly, took {:?}",
+            elapsed
+        );
+
+        assert!(!handle.alive(sup_pid), "Supervisor should have terminated");
+    }
 }
