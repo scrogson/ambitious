@@ -221,7 +221,7 @@ pub async fn ping(node: Atom, timeout_ms: u64) -> PingResult {
 }
 
 /// Implementation of ping with Duration timeout.
-async fn ping_impl(node: Atom, _timeout_duration: Duration) -> PingResult {
+async fn ping_impl(node: Atom, timeout_duration: Duration) -> PingResult {
     let manager = match distribution::manager() {
         Some(m) => m,
         None => return PingResult::Pang,
@@ -234,24 +234,20 @@ async fn ping_impl(node: Atom, _timeout_duration: Duration) -> PingResult {
 
     let seq = PING_SEQ.fetch_add(1, Ordering::Relaxed);
 
+    // Register the ping before sending so we can await the pong
+    let pong_rx = manager.register_ping(node, seq);
+
     // Send ping
     let msg = DistMessage::Ping { seq };
     if tx.try_send(msg).is_err() {
         return PingResult::Pang;
     }
 
-    // For now, we just check if the send succeeded.
-    // A proper implementation would wait for the Pong response.
-    // TODO: Implement proper ping/pong with response tracking
-
-    // Small delay to let the ping go through
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    // Check if still connected (basic liveness check)
-    if manager.get_node_tx(node).is_some() {
-        PingResult::Pong
-    } else {
-        PingResult::Pang
+    // Wait for pong response with timeout
+    match tokio::time::timeout(timeout_duration, pong_rx).await {
+        Ok(Ok(())) => PingResult::Pong,
+        Ok(Err(_)) => PingResult::Pang, // Sender dropped (node disconnected)
+        Err(_) => PingResult::Pang,     // Timeout
     }
 }
 

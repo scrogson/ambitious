@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// The type of a connected node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +135,9 @@ pub struct DistributionManager {
     erlang_nodes: DashMap<Atom, ErlangNodeHandle>,
     /// Node type lookup (for all connected nodes).
     node_types: DashMap<Atom, NodeType>,
+    /// Pending ping requests awaiting pong responses.
+    /// Key is (node_atom, sequence_number), value is the oneshot sender.
+    pending_pings: DashMap<(Atom, u64), oneshot::Sender<()>>,
 }
 
 impl DistributionManager {
@@ -153,6 +156,7 @@ impl DistributionManager {
             #[cfg(feature = "erlang-dist")]
             erlang_nodes: DashMap::new(),
             node_types: DashMap::new(),
+            pending_pings: DashMap::new(),
         }
     }
 
@@ -455,6 +459,21 @@ impl DistributionManager {
     /// Get a node's message sender.
     pub(crate) fn get_node_tx(&self, node_atom: Atom) -> Option<mpsc::Sender<DistMessage>> {
         self.nodes.get(&node_atom).map(|n| n.tx.clone())
+    }
+
+    /// Register a pending ping and return a receiver to await the pong.
+    pub(crate) fn register_ping(&self, node: Atom, seq: u64) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_pings.insert((node, seq), tx);
+        rx
+    }
+
+    /// Complete a pending ping (called when pong is received).
+    pub(crate) fn complete_ping(&self, node: Atom, seq: u64) {
+        if let Some((_, tx)) = self.pending_pings.remove(&(node, seq)) {
+            // Send () to signal pong received. Ignore error if receiver dropped.
+            let _ = tx.send(());
+        }
     }
 
     /// Send a message to an Erlang/BEAM node.
@@ -915,11 +934,13 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
             }
         }
         DistMessage::Pong { seq } => {
-            // Update last seen timestamp - this is the critical heartbeat response
-            if let Some(manager) = DIST_MANAGER.get()
-                && let Some(node) = manager.nodes.get(&from_node)
-            {
-                node.touch();
+            // Update last seen timestamp and complete any pending ping request
+            if let Some(manager) = DIST_MANAGER.get() {
+                if let Some(node) = manager.nodes.get(&from_node) {
+                    node.touch();
+                }
+                // Notify any waiting ping caller that pong was received
+                manager.complete_ping(from_node, seq);
             }
             tracing::trace!(seq, from_node = %from_node, "Received pong");
         }
