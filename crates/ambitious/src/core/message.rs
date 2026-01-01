@@ -27,6 +27,9 @@ pub enum DecodeError {
     /// Postcard-specific error (for Message trait).
     #[error("postcard error: {0}")]
     Postcard(String),
+    /// ETF (Erlang Term Format) encoding/decoding error.
+    #[error("ETF error: {0}")]
+    Etf(String),
 }
 
 /// A trait for Erlang-like terms that can be serialized and sent between processes.

@@ -32,6 +32,7 @@
 //! ```
 
 use crate::core::DecodeError;
+use erltf::{OwnedTerm, erl_atom, erl_tuple};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Encode a value using postcard.
@@ -199,6 +200,101 @@ pub fn encode_with_tag(tag: &str, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+// =============================================================================
+// ETF Encoding Helpers (for remote/BEAM communication)
+// =============================================================================
+
+/// Encode a unit type (no payload) as ETF.
+///
+/// Produces a single atom: `:tag`
+///
+/// Helper for implementing `encode_remote` for unit structs.
+pub fn encode_etf_unit(tag: &str) -> Vec<u8> {
+    let term = erl_atom!(tag);
+    erltf::encode(&term).expect("failed to encode ETF atom")
+}
+
+/// Encode a value as a tagged ETF tuple.
+///
+/// Produces: `{:tag, payload}` where payload is the serde-serialized value.
+///
+/// Helper for implementing `encode_remote`.
+pub fn encode_etf_with_tag<T: Serialize>(tag: &str, value: &T) -> Vec<u8> {
+    // Serialize the value to an ETF term using erltf_serde
+    let payload_term = erltf_serde::to_term(value).expect("failed to serialize to ETF term");
+    let term = erl_tuple![erl_atom!(tag), payload_term];
+    erltf::encode(&term).expect("failed to encode ETF tuple")
+}
+
+/// Decode from ETF bytes, expecting a unit atom (for unit structs).
+///
+/// Expects: `:tag` atom
+///
+/// Helper for implementing `decode_remote` for unit structs.
+pub fn decode_etf_unit(bytes: &[u8], expected_tag: &str) -> Result<(), DecodeError> {
+    let term = erltf::decode(bytes).map_err(|e| DecodeError::Etf(e.to_string()))?;
+
+    match term {
+        OwnedTerm::Atom(atom) if atom.as_str() == expected_tag => Ok(()),
+        OwnedTerm::Tuple(elems) if elems.len() == 1 => {
+            // Also accept `{:tag}` tuple form
+            if let OwnedTerm::Atom(ref atom) = elems[0]
+                && atom.as_str() == expected_tag
+            {
+                return Ok(());
+            }
+            Err(DecodeError::Etf(format!(
+                "expected atom '{}', got {:?}",
+                expected_tag, elems
+            )))
+        }
+        other => Err(DecodeError::Etf(format!(
+            "expected atom '{}', got {:?}",
+            expected_tag, other
+        ))),
+    }
+}
+
+/// Decode from ETF bytes, expecting a tagged tuple.
+///
+/// Expects: `{:tag, payload}` and deserializes payload to type T.
+///
+/// Helper for implementing `decode_remote`.
+pub fn decode_etf_with_tag<T: DeserializeOwned>(
+    bytes: &[u8],
+    expected_tag: &str,
+) -> Result<T, DecodeError> {
+    let term = erltf::decode(bytes).map_err(|e| DecodeError::Etf(e.to_string()))?;
+
+    match term {
+        OwnedTerm::Tuple(elems) if elems.len() == 2 => {
+            // Check tag
+            if let OwnedTerm::Atom(ref atom) = elems[0] {
+                if atom.as_str() != expected_tag {
+                    return Err(DecodeError::Etf(format!(
+                        "expected tag '{}', got '{}'",
+                        expected_tag,
+                        atom.as_str()
+                    )));
+                }
+            } else {
+                return Err(DecodeError::Etf(format!(
+                    "expected atom tag, got {:?}",
+                    elems[0]
+                )));
+            }
+
+            // Deserialize payload
+            erltf_serde::from_term(&elems[1])
+                .map_err(|e| DecodeError::Etf(format!("failed to deserialize payload: {}", e)))
+        }
+        other => Err(DecodeError::Etf(format!(
+            "expected tagged tuple {{:{}, _}}, got {:?}",
+            expected_tag, other
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,4 +389,119 @@ mod tests {
 
     // Note: Derive macro tests are in crates/ambitious-macros/tests/derive_test.rs
     // because the macro generates ::ambitious:: paths which don't work inside the crate
+
+    // =============================================================================
+    // ETF Encoding Tests
+    // =============================================================================
+
+    #[test]
+    fn test_encode_etf_unit() {
+        let bytes = encode_etf_unit("ping");
+        // Decode and verify it's an atom
+        let term = erltf::decode(&bytes).unwrap();
+        match term {
+            OwnedTerm::Atom(atom) => assert_eq!(atom.as_str(), "ping"),
+            _ => panic!("expected atom, got {:?}", term),
+        }
+    }
+
+    #[test]
+    fn test_decode_etf_unit() {
+        // Encode an atom
+        let term = erl_atom!("pong");
+        let bytes = erltf::encode(&term).unwrap();
+
+        // Decode it
+        decode_etf_unit(&bytes, "pong").unwrap();
+
+        // Wrong tag should fail
+        assert!(decode_etf_unit(&bytes, "ping").is_err());
+    }
+
+    #[test]
+    fn test_encode_etf_with_tag() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct TestPayload {
+            value: i32,
+        }
+
+        let payload = TestPayload { value: 42 };
+        let bytes = encode_etf_with_tag("test", &payload);
+
+        // Decode and verify structure
+        let term = erltf::decode(&bytes).unwrap();
+        match term {
+            OwnedTerm::Tuple(elems) => {
+                assert_eq!(elems.len(), 2);
+                match &elems[0] {
+                    OwnedTerm::Atom(atom) => assert_eq!(atom.as_str(), "test"),
+                    _ => panic!("expected atom tag"),
+                }
+            }
+            _ => panic!("expected tuple"),
+        }
+    }
+
+    #[test]
+    fn test_decode_etf_with_tag() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct TestPayload {
+            value: i32,
+        }
+
+        // Encode
+        let original = TestPayload { value: 123 };
+        let bytes = encode_etf_with_tag("test", &original);
+
+        // Decode
+        let decoded: TestPayload = decode_etf_with_tag(&bytes, "test").unwrap();
+        assert_eq!(decoded, original);
+
+        // Wrong tag should fail
+        assert!(decode_etf_with_tag::<TestPayload>(&bytes, "wrong").is_err());
+    }
+
+    #[test]
+    fn test_etf_roundtrip_primitive() {
+        // Test with primitive types
+        let value: i64 = 12345;
+        let bytes = encode_etf_with_tag("num", &value);
+        let decoded: i64 = decode_etf_with_tag(&bytes, "num").unwrap();
+        assert_eq!(decoded, value);
+
+        let value = "hello world".to_string();
+        let bytes = encode_etf_with_tag("str", &value);
+        let decoded: String = decode_etf_with_tag(&bytes, "str").unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_etf_roundtrip_complex() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Complex {
+            name: String,
+            values: Vec<i32>,
+            nested: Option<Box<Complex>>,
+        }
+
+        let original = Complex {
+            name: "root".to_string(),
+            values: vec![1, 2, 3],
+            nested: Some(Box::new(Complex {
+                name: "child".to_string(),
+                values: vec![4, 5],
+                nested: None,
+            })),
+        };
+
+        let bytes = encode_etf_with_tag("complex", &original);
+        let decoded: Complex = decode_etf_with_tag(&bytes, "complex").unwrap();
+        assert_eq!(decoded, original);
+    }
 }

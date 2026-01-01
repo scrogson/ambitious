@@ -252,141 +252,176 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
     let tag = get_message_tag(&input).unwrap_or_else(|| name.to_string());
 
     // Generate different code based on struct variant
-    let (encode_body, decode_body, serde_impl) = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Unit => {
-                // Unit struct: struct Ping;
-                // No serde needed - nothing to serialize
-                (
-                    quote! {
-                        ::ambitious::message::encode_with_tag(Self::TAG, &[])
-                    },
-                    quote! {
-                        let _ = bytes;
-                        Ok(Self)
-                    },
-                    quote! {},
-                )
-            }
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                // Newtype struct: struct Add(i64);
-                let field_ty = &fields.unnamed.first().unwrap().ty;
-                (
-                    quote! {
-                        let payload = ::ambitious::message::encode_payload(&self.0);
-                        ::ambitious::message::encode_with_tag(Self::TAG, &payload)
-                    },
-                    quote! {
-                        let inner: #field_ty = ::ambitious::message::decode_payload(bytes)?;
-                        Ok(Self(inner))
-                    },
-                    // Generate Serialize/Deserialize for newtype
-                    quote! {
-                        impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
-                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                            where
-                                S: ::serde::Serializer,
-                            {
-                                self.0.serialize(serializer)
+    let (encode_body, decode_body, encode_remote_body, decode_remote_body, serde_impl) =
+        match &input.data {
+            Data::Struct(data) => match &data.fields {
+                Fields::Unit => {
+                    // Unit struct: struct Ping;
+                    // No serde needed - nothing to serialize
+                    (
+                        quote! {
+                            ::ambitious::message::encode_with_tag(Self::TAG, &[])
+                        },
+                        quote! {
+                            let _ = bytes;
+                            Ok(Self)
+                        },
+                        // ETF: encode as atom
+                        quote! {
+                            ::ambitious::message::encode_etf_unit(Self::TAG)
+                        },
+                        // ETF: decode from atom
+                        quote! {
+                            ::ambitious::message::decode_etf_unit(bytes, Self::TAG)?;
+                            Ok(Self)
+                        },
+                        quote! {},
+                    )
+                }
+                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                    // Newtype struct: struct Add(i64);
+                    let field_ty = &fields.unnamed.first().unwrap().ty;
+                    (
+                        quote! {
+                            let payload = ::ambitious::message::encode_payload(&self.0);
+                            ::ambitious::message::encode_with_tag(Self::TAG, &payload)
+                        },
+                        quote! {
+                            let inner: #field_ty = ::ambitious::message::decode_payload(bytes)?;
+                            Ok(Self(inner))
+                        },
+                        // ETF: encode as tagged tuple {tag, value}
+                        quote! {
+                            ::ambitious::message::encode_etf_with_tag(Self::TAG, &self.0)
+                        },
+                        // ETF: decode from tagged tuple
+                        quote! {
+                            let inner: #field_ty = ::ambitious::message::decode_etf_with_tag(bytes, Self::TAG)?;
+                            Ok(Self(inner))
+                        },
+                        // Generate Serialize/Deserialize for newtype
+                        quote! {
+                            impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
+                                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                                where
+                                    S: ::serde::Serializer,
+                                {
+                                    self.0.serialize(serializer)
+                                }
                             }
-                        }
 
-                        impl<'de> #impl_generics ::serde::Deserialize<'de> for #name #ty_generics #where_clause {
-                            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                            where
-                                D: ::serde::Deserializer<'de>,
-                            {
-                                let inner = <#field_ty as ::serde::Deserialize>::deserialize(deserializer)?;
-                                Ok(Self(inner))
+                            impl<'de> #impl_generics ::serde::Deserialize<'de> for #name #ty_generics #where_clause {
+                                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                                where
+                                    D: ::serde::Deserializer<'de>,
+                                {
+                                    let inner = <#field_ty as ::serde::Deserialize>::deserialize(deserializer)?;
+                                    Ok(Self(inner))
+                                }
                             }
-                        }
-                    },
-                )
-            }
-            Fields::Unnamed(_) => {
-                // Multi-field tuple struct not supported yet
-                return syn::Error::new_spanned(
+                        },
+                    )
+                }
+                Fields::Unnamed(_) => {
+                    // Multi-field tuple struct not supported yet
+                    return syn::Error::new_spanned(
                     input,
                     "Message derive only supports unit structs, newtype structs (single field), and named structs",
                 )
                 .to_compile_error()
                 .into();
-            }
-            Fields::Named(fields) => {
-                // Named struct: struct Login { user: String }
-                let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
-                let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
-                let field_count = field_names.len();
-                let field_strs: Vec<_> = field_names
-                    .iter()
-                    .map(|n| n.as_ref().map(|i| i.to_string()).unwrap_or_default())
-                    .collect();
+                }
+                Fields::Named(fields) => {
+                    // Named struct: struct Login { user: String }
+                    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
+                    let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
+                    let field_count = field_names.len();
+                    let field_strs: Vec<_> = field_names
+                        .iter()
+                        .map(|n| n.as_ref().map(|i| i.to_string()).unwrap_or_default())
+                        .collect();
 
+                    (
+                        quote! {
+                            let payload = ::ambitious::message::encode_payload(&(#(&self.#field_names),*));
+                            ::ambitious::message::encode_with_tag(Self::TAG, &payload)
+                        },
+                        quote! {
+                            let (#(#field_names),*): (#(#field_types),*) = ::ambitious::message::decode_payload(bytes)?;
+                            Ok(Self { #(#field_names),* })
+                        },
+                        // ETF: encode struct as tagged tuple with the struct serialized via erltf_serde
+                        quote! {
+                            ::ambitious::message::encode_etf_with_tag(Self::TAG, self)
+                        },
+                        // ETF: decode from tagged tuple
+                        quote! {
+                            ::ambitious::message::decode_etf_with_tag(bytes, Self::TAG)
+                        },
+                        // Generate Serialize/Deserialize for named struct
+                        quote! {
+                            impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
+                                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                                where
+                                    S: ::serde::Serializer,
+                                {
+                                    use ::serde::ser::SerializeStruct;
+                                    let mut state = serializer.serialize_struct(stringify!(#name), #field_count)?;
+                                    #(
+                                        state.serialize_field(#field_strs, &self.#field_names)?;
+                                    )*
+                                    state.end()
+                                }
+                            }
+
+                            impl<'de> #impl_generics ::serde::Deserialize<'de> for #name #ty_generics #where_clause {
+                                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                                where
+                                    D: ::serde::Deserializer<'de>,
+                                {
+                                    // Deserialize as struct (matches Serialize impl)
+                                    #[derive(::serde::Deserialize)]
+                                    #[serde(crate = "::serde")]
+                                    struct Helper #ty_generics #where_clause {
+                                        #(#field_names: #field_types),*
+                                    }
+                                    let helper = Helper::deserialize(deserializer)?;
+                                    Ok(Self { #(#field_names: helper.#field_names),* })
+                                }
+                            }
+                        },
+                    )
+                }
+            },
+            Data::Enum(_) => {
+                // Enum: requires Serialize + Deserialize to already be derived
+                // Uses encode_payload/decode_payload for the entire enum
                 (
                     quote! {
-                        let payload = ::ambitious::message::encode_payload(&(#(&self.#field_names),*));
+                        let payload = ::ambitious::message::encode_payload(self);
                         ::ambitious::message::encode_with_tag(Self::TAG, &payload)
                     },
                     quote! {
-                        let (#(#field_names),*): (#(#field_types),*) = ::ambitious::message::decode_payload(bytes)?;
-                        Ok(Self { #(#field_names),* })
+                        ::ambitious::message::decode_payload(bytes)
                     },
-                    // Generate Serialize/Deserialize for named struct
+                    // ETF: encode enum as tagged tuple
                     quote! {
-                        impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
-                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                            where
-                                S: ::serde::Serializer,
-                            {
-                                use ::serde::ser::SerializeStruct;
-                                let mut state = serializer.serialize_struct(stringify!(#name), #field_count)?;
-                                #(
-                                    state.serialize_field(#field_strs, &self.#field_names)?;
-                                )*
-                                state.end()
-                            }
-                        }
-
-                        impl<'de> #impl_generics ::serde::Deserialize<'de> for #name #ty_generics #where_clause {
-                            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                            where
-                                D: ::serde::Deserializer<'de>,
-                            {
-                                // Deserialize as struct (matches Serialize impl)
-                                #[derive(::serde::Deserialize)]
-                                #[serde(crate = "::serde")]
-                                struct Helper #ty_generics #where_clause {
-                                    #(#field_names: #field_types),*
-                                }
-                                let helper = Helper::deserialize(deserializer)?;
-                                Ok(Self { #(#field_names: helper.#field_names),* })
-                            }
-                        }
+                        ::ambitious::message::encode_etf_with_tag(Self::TAG, self)
                     },
+                    // ETF: decode from tagged tuple
+                    quote! {
+                        ::ambitious::message::decode_etf_with_tag(bytes, Self::TAG)
+                    },
+                    // No serde impl needed - user must derive Serialize/Deserialize
+                    quote! {},
                 )
             }
-        },
-        Data::Enum(_) => {
-            // Enum: requires Serialize + Deserialize to already be derived
-            // Uses encode_payload/decode_payload for the entire enum
-            (
-                quote! {
-                    let payload = ::ambitious::message::encode_payload(self);
-                    ::ambitious::message::encode_with_tag(Self::TAG, &payload)
-                },
-                quote! {
-                    ::ambitious::message::decode_payload(bytes)
-                },
-                // No serde impl needed - user must derive Serialize/Deserialize
-                quote! {},
-            )
-        }
-        Data::Union(_) => {
-            return syn::Error::new_spanned(input, "Message derive does not support unions")
-                .to_compile_error()
-                .into();
-        }
-    };
+            Data::Union(_) => {
+                return syn::Error::new_spanned(input, "Message derive does not support unions")
+                    .to_compile_error()
+                    .into();
+            }
+        };
 
     let expanded = quote! {
         #serde_impl
@@ -403,15 +438,11 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
             }
 
             fn encode_remote(&self) -> Vec<u8> {
-                // For now, use same encoding as local
-                // TODO: Implement ETF encoding
-                self.encode_local()
+                #encode_remote_body
             }
 
             fn decode_remote(bytes: &[u8]) -> Result<Self, ::ambitious::core::DecodeError> {
-                // For now, use same decoding as local
-                // TODO: Implement ETF decoding
-                Self::decode_local(bytes)
+                #decode_remote_body
             }
         }
     };
