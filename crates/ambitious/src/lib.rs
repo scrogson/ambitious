@@ -195,9 +195,7 @@ pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
 
 // Re-export macros (from separate proc-macro crate)
-pub use ambitious_macros::{
-    ChannelEvent, GenServerImpl, Message, ambitious_process, main, self_pid, test,
-};
+pub use ambitious_macros::{ChannelEvent, Message, main, self_pid, test};
 
 /// Prelude module for convenient imports.
 ///
@@ -227,7 +225,7 @@ pub mod prelude {
     pub use crate::application::{AppConfig, AppController, AppSpec, Application, StartResult};
 
     // Macros
-    pub use ambitious_macros::{GenServerImpl, ambitious_process, main, self_pid};
+    pub use ambitious_macros::{main, self_pid};
 
     // Task-local functions for process operations without ctx
     pub use crate::runtime::{
