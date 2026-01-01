@@ -120,6 +120,11 @@ pub(crate) fn heir_of(id: StoreId) -> Option<Pid> {
     REGISTRY.stores.get(&id).and_then(|r| r.heir)
 }
 
+/// Gets the name of a store.
+pub(crate) fn name_of(id: StoreId) -> Option<String> {
+    REGISTRY.stores.get(&id).and_then(|r| r.name.clone())
+}
+
 /// Sets the heir of a store.
 #[allow(dead_code)] // Useful API for dynamically setting heirs
 pub fn set_heir(id: StoreId, heir: Option<Pid>) {
@@ -133,9 +138,12 @@ pub fn set_heir(id: StoreId, heir: Option<Pid>) {
 /// This is called from `handle_process_exit` in the runtime.
 ///
 /// For each store owned by the exiting process:
-/// - If an heir is set and alive, transfer ownership to the heir
+/// - If an heir is set and alive, transfer ownership to the heir and notify
 /// - Otherwise, mark the store as deleted and remove from registry
 pub fn cleanup_owned_stores(pid: Pid, _reason: &ExitReason) {
+    use super::StoreInherited;
+    use crate::message::Message;
+
     // Get all stores owned by this process
     let store_ids: Vec<StoreId> = stores_owned_by(pid).into_iter().collect();
 
@@ -144,11 +152,22 @@ pub fn cleanup_owned_stores(pid: Pid, _reason: &ExitReason) {
         if let Some(heir_pid) = heir_of(store_id) {
             // Check if heir is alive
             if crate::alive(heir_pid) {
+                // Get store name before transfer (for the notification)
+                let store_name = name_of(store_id);
+
                 // Transfer to heir
                 transfer_ownership(store_id, pid, heir_pid);
 
-                // TODO: Send a message to heir notifying them of inheritance
-                // This would require storing a typed message or using raw bytes
+                // Notify the heir about the inheritance
+                if let Some(handle) = crate::try_handle() {
+                    let msg = StoreInherited {
+                        store_id,
+                        old_owner: pid,
+                        name: store_name,
+                    };
+                    // Best-effort send - ignore errors since the heir may have died
+                    let _ = handle.registry().send_raw(heir_pid, msg.encode_local());
+                }
                 continue;
             }
         }

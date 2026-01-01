@@ -55,7 +55,8 @@ mod registry;
 
 pub use registry::cleanup_owned_stores;
 
-use crate::core::Pid;
+use crate::core::{DecodeError, Pid};
+use crate::message::{Message, decode_payload, encode_payload, encode_with_tag};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -64,6 +65,57 @@ use std::hash::Hash;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// Message sent to an heir process when it inherits a store.
+///
+/// This message is sent when a store's owner process exits and the store
+/// is transferred to its designated heir.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::store::StoreInherited;
+///
+/// // In your process's message handler:
+/// match msg {
+///     StoreInherited { store_id, old_owner, name } => {
+///         println!("Inherited store {:?} from {:?}", store_id, old_owner);
+///         if let Some(name) = name {
+///             println!("Store was named: {}", name);
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreInherited {
+    /// The ID of the inherited store.
+    pub store_id: StoreId,
+    /// The PID of the previous owner (the process that died).
+    pub old_owner: Pid,
+    /// The optional registered name of the store.
+    pub name: Option<String>,
+}
+
+impl Message for StoreInherited {
+    const TAG: &'static str = "StoreInherited";
+
+    fn encode_local(&self) -> Vec<u8> {
+        let payload = encode_payload(self);
+        encode_with_tag(Self::TAG, &payload)
+    }
+
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_payload(bytes)
+    }
+
+    fn encode_remote(&self) -> Vec<u8> {
+        self.encode_local()
+    }
+
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_local(bytes)
+    }
+}
 
 /// Global counter for generating unique store IDs.
 static STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
