@@ -4,7 +4,8 @@
 
 use super::error::{DeleteError, StartError, TerminateError};
 use super::types::{
-    ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, Strategy, SupervisorFlags,
+    ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, ShutdownType, Strategy,
+    SupervisorFlags,
 };
 use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use crate::process::RuntimeHandle;
@@ -214,10 +215,31 @@ impl SupervisorState {
                 crate::runtime::with_ctx(|ctx| ctx.demonitor(ref_));
             }
 
-            // Send exit signal using task-local context
-            let _ = crate::runtime::with_ctx(|ctx| ctx.exit(pid, ExitReason::Shutdown));
+            // Terminate based on shutdown type
+            let shutdown = child.spec.shutdown;
+            match shutdown {
+                ShutdownType::BrutalKill => {
+                    // Immediate kill without waiting
+                    let _ = crate::runtime::with_ctx(|ctx| ctx.exit(pid, ExitReason::Killed));
+                }
+                ShutdownType::Timeout(duration) => {
+                    // Send shutdown signal
+                    let _ = crate::runtime::with_ctx(|ctx| ctx.exit(pid, ExitReason::Shutdown));
 
-            // TODO: Wait for child to actually terminate with timeout
+                    // Wait for child to terminate with timeout
+                    if !wait_for_termination(pid, Some(duration)).await {
+                        // Timed out - force kill
+                        let _ = crate::runtime::with_ctx(|ctx| ctx.exit(pid, ExitReason::Killed));
+                        // Give it a moment to process the kill
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+                ShutdownType::Infinity => {
+                    // Send shutdown signal and wait indefinitely
+                    let _ = crate::runtime::with_ctx(|ctx| ctx.exit(pid, ExitReason::Shutdown));
+                    wait_for_termination(pid, None).await;
+                }
+            }
         }
     }
 
@@ -467,4 +489,31 @@ pub async fn delete_child(
 ) -> Result<(), DeleteError> {
     // This would need a proper call mechanism
     Err(DeleteError::NotFound("not implemented".to_string()))
+}
+
+/// Waits for a process to terminate.
+///
+/// Returns `true` if the process terminated, `false` if the timeout expired.
+/// If `timeout` is `None`, waits indefinitely.
+async fn wait_for_termination(pid: Pid, timeout: Option<Duration>) -> bool {
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    let deadline = timeout.map(|t| Instant::now() + t);
+
+    loop {
+        // Check if process is dead
+        if !crate::alive(pid) {
+            return true;
+        }
+
+        // Check timeout
+        if let Some(deadline) = deadline
+            && Instant::now() >= deadline
+        {
+            return false;
+        }
+
+        // Wait a bit before checking again
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
