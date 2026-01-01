@@ -43,6 +43,7 @@ mod node;
 pub mod pg;
 mod process_monitor;
 pub(crate) mod protocol;
+pub mod spawn;
 mod tcp_transport;
 mod traits;
 mod transport;

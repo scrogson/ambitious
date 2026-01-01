@@ -142,6 +142,37 @@ pub enum DistMessage {
         /// Serialized PgMessage.
         payload: Vec<u8>,
     },
+
+    // === Remote Spawning ===
+    /// Request to spawn a process on this node.
+    Spawn {
+        /// Unique reference for this spawn request (for matching reply).
+        reference: u64,
+        /// The process requesting the spawn (will receive the reply).
+        from: Pid,
+        /// Module name (used as lookup key).
+        module: String,
+        /// Function name within the module.
+        function: String,
+        /// Serialized arguments for the function.
+        args: Vec<u8>,
+        /// Whether to link the spawned process to the requester.
+        link: bool,
+        /// Whether to monitor the spawned process.
+        monitor: bool,
+    },
+
+    /// Reply to a spawn request.
+    SpawnReply {
+        /// Reference from the spawn request.
+        reference: u64,
+        /// The spawned process PID (if successful).
+        pid: Option<Pid>,
+        /// Monitor reference (if monitor was requested and spawn succeeded).
+        monitor_ref: Option<u64>,
+        /// Error message (if spawn failed).
+        error: Option<String>,
+    },
 }
 
 impl DistMessage {

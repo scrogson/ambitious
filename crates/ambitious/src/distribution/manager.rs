@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+/// Type alias for spawn reply (pid, monitor_ref, error).
+type SpawnReply = (Option<Pid>, Option<u64>, Option<String>);
+
 /// The type of a connected node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
@@ -138,6 +141,9 @@ pub struct DistributionManager {
     /// Pending ping requests awaiting pong responses.
     /// Key is (node_atom, sequence_number), value is the oneshot sender.
     pending_pings: DashMap<(Atom, u64), oneshot::Sender<()>>,
+    /// Pending spawn requests awaiting replies.
+    /// Key is reference, value is the oneshot sender for (pid, monitor_ref, error).
+    pending_spawns: DashMap<u64, oneshot::Sender<SpawnReply>>,
 }
 
 impl DistributionManager {
@@ -157,6 +163,7 @@ impl DistributionManager {
             erlang_nodes: DashMap::new(),
             node_types: DashMap::new(),
             pending_pings: DashMap::new(),
+            pending_spawns: DashMap::new(),
         }
     }
 
@@ -473,6 +480,29 @@ impl DistributionManager {
         if let Some((_, tx)) = self.pending_pings.remove(&(node, seq)) {
             // Send () to signal pong received. Ignore error if receiver dropped.
             let _ = tx.send(());
+        }
+    }
+
+    /// Register a pending spawn request and return a receiver to await the reply.
+    pub(crate) fn register_spawn(
+        &self,
+        reference: u64,
+    ) -> oneshot::Receiver<(Option<Pid>, Option<u64>, Option<String>)> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_spawns.insert(reference, tx);
+        rx
+    }
+
+    /// Complete a pending spawn request (called when SpawnReply is received).
+    pub(crate) fn complete_spawn(
+        &self,
+        reference: u64,
+        pid: Option<Pid>,
+        monitor_ref: Option<u64>,
+        error: Option<String>,
+    ) {
+        if let Some((_, tx)) = self.pending_spawns.remove(&reference) {
+            let _ = tx.send((pid, monitor_ref, error));
         }
     }
 
@@ -1058,6 +1088,56 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
                 manager
                     .process_monitors
                     .handle_incoming_exit(from, target, &reason);
+            }
+        }
+
+        DistMessage::Spawn {
+            reference,
+            from,
+            module,
+            function,
+            args,
+            link,
+            monitor,
+        } => {
+            // Handle spawn request from remote node
+            let link_to = if link { Some(from) } else { None };
+            let monitor_from = if monitor { Some(from) } else { None };
+
+            let result =
+                super::spawn::execute_spawn(&module, &function, args, link_to, monitor_from);
+
+            // Send reply back to the requesting node
+            if let Some(manager) = DIST_MANAGER.get()
+                && let Some(tx) = manager.get_node_tx(from_node)
+            {
+                let reply = match result {
+                    Ok((pid, monitor_ref)) => DistMessage::SpawnReply {
+                        reference,
+                        pid: Some(pid),
+                        monitor_ref: monitor_ref.map(|r| r.as_raw()),
+                        error: None,
+                    },
+                    Err(e) => DistMessage::SpawnReply {
+                        reference,
+                        pid: None,
+                        monitor_ref: None,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.try_send(reply);
+            }
+        }
+
+        DistMessage::SpawnReply {
+            reference,
+            pid,
+            monitor_ref,
+            error,
+        } => {
+            // Handle spawn reply - complete the pending spawn request
+            if let Some(manager) = DIST_MANAGER.get() {
+                manager.complete_spawn(reference, pid, monitor_ref, error);
             }
         }
 

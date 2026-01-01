@@ -71,6 +71,9 @@ pub enum PingResult {
 /// Global sequence counter for ping operations.
 static PING_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Global sequence counter for spawn operations.
+static SPAWN_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Returns `true` if the local node is part of a distributed system.
 ///
 /// This is equivalent to Elixir's `Node.alive?/0`.
@@ -343,15 +346,16 @@ pub async fn start(name: &str, port: u16) -> Result<(), DistError> {
 }
 
 // === Remote Spawning ===
-// TODO: Implement remote spawn functions
-// These require additional protocol support for spawning processes on remote nodes.
+
+/// Default timeout for spawn operations (30 seconds).
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spawns a process on a remote node.
 ///
 /// This is equivalent to Elixir's `Node.spawn/2`.
 ///
-/// **Note**: This is not yet implemented. Remote spawning requires
-/// additional protocol support.
+/// The function must be registered on the remote node using
+/// `ambitious::distribution::spawn::register` before it can be spawned.
 ///
 /// # Arguments
 ///
@@ -363,52 +367,141 @@ pub async fn start(name: &str, port: u16) -> Result<(), DistError> {
 /// # Returns
 ///
 /// The PID of the spawned process.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::node;
+///
+/// // On the remote node, register the function:
+/// // ambitious::distribution::spawn::register("workers", "echo", |args| async move { ... });
+///
+/// // On the local node, spawn it:
+/// let pid = node::spawn(remote_node, "workers", "echo", args).await?;
+/// ```
 pub async fn spawn(
-    _node: Atom,
-    _module: &str,
-    _function: &str,
-    _args: Vec<u8>,
+    node: Atom,
+    module: &str,
+    function: &str,
+    args: Vec<u8>,
 ) -> Result<Pid, DistError> {
-    // TODO: Implement remote spawning
-    // This requires:
-    // 1. A way to serialize function references
-    // 2. Protocol message for spawn requests
-    // 3. Remote process creation
-    Err(DistError::Connect(
-        "remote spawn not yet implemented".to_string(),
-    ))
+    spawn_impl(node, module, function, args, false, false)
+        .await
+        .map(|(pid, _)| pid)
 }
 
 /// Spawns a linked process on a remote node.
 ///
 /// This is equivalent to Elixir's `Node.spawn_link/2`.
 ///
-/// **Note**: This is not yet implemented.
+/// The spawned process will be linked to the calling process, so if either
+/// process exits abnormally, the other will receive an exit signal.
+///
+/// # Arguments
+///
+/// * `node` - The node to spawn on
+/// * `module` - The module containing the function
+/// * `function` - The function name to execute
+/// * `args` - Serialized arguments
+///
+/// # Returns
+///
+/// The PID of the spawned process.
 pub async fn spawn_link(
-    _node: Atom,
-    _module: &str,
-    _function: &str,
-    _args: Vec<u8>,
+    node: Atom,
+    module: &str,
+    function: &str,
+    args: Vec<u8>,
 ) -> Result<Pid, DistError> {
-    Err(DistError::Connect(
-        "remote spawn_link not yet implemented".to_string(),
-    ))
+    spawn_impl(node, module, function, args, true, false)
+        .await
+        .map(|(pid, _)| pid)
 }
 
 /// Spawns a monitored process on a remote node.
 ///
 /// This is equivalent to Elixir's `Node.spawn_monitor/2`.
 ///
-/// **Note**: This is not yet implemented.
+/// The spawned process will be monitored, so when it exits, the calling
+/// process will receive a DOWN message.
+///
+/// # Arguments
+///
+/// * `node` - The node to spawn on
+/// * `module` - The module containing the function
+/// * `function` - The function name to execute
+/// * `args` - Serialized arguments
+///
+/// # Returns
+///
+/// A tuple of (PID, monitor reference).
 pub async fn spawn_monitor(
-    _node: Atom,
-    _module: &str,
-    _function: &str,
-    _args: Vec<u8>,
+    node: Atom,
+    module: &str,
+    function: &str,
+    args: Vec<u8>,
 ) -> Result<(Pid, crate::core::Ref), DistError> {
-    Err(DistError::Connect(
-        "remote spawn_monitor not yet implemented".to_string(),
-    ))
+    let (pid, monitor_ref) = spawn_impl(node, module, function, args, false, true).await?;
+    let ref_ = monitor_ref.ok_or_else(|| {
+        DistError::Connect("spawn_monitor did not return monitor reference".to_string())
+    })?;
+    Ok((pid, crate::core::Ref::from_raw(ref_)))
+}
+
+/// Internal implementation for all spawn variants.
+async fn spawn_impl(
+    node: Atom,
+    module: &str,
+    function: &str,
+    args: Vec<u8>,
+    link: bool,
+    monitor: bool,
+) -> Result<(Pid, Option<u64>), DistError> {
+    let manager = distribution::manager().ok_or(DistError::NotInitialized)?;
+
+    let tx = manager
+        .get_node_tx(node)
+        .ok_or(DistError::NotConnected(node))?;
+
+    // Generate unique reference for this spawn request
+    let reference = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    // Get the current process's PID as the sender
+    let from = crate::current_pid();
+
+    // Register the pending spawn before sending
+    let reply_rx = manager.register_spawn(reference);
+
+    // Send spawn request
+    let msg = DistMessage::Spawn {
+        reference,
+        from,
+        module: module.to_string(),
+        function: function.to_string(),
+        args,
+        link,
+        monitor,
+    };
+
+    tx.try_send(msg)
+        .map_err(|_| DistError::Connect("failed to send spawn request".to_string()))?;
+
+    // Wait for reply with timeout
+    match tokio::time::timeout(SPAWN_TIMEOUT, reply_rx).await {
+        Ok(Ok((pid, monitor_ref, error))) => {
+            if let Some(err) = error {
+                Err(DistError::Connect(err))
+            } else if let Some(pid) = pid {
+                Ok((pid, monitor_ref))
+            } else {
+                Err(DistError::Connect("spawn returned no PID".to_string()))
+            }
+        }
+        Ok(Err(_)) => Err(DistError::Connect(
+            "spawn reply channel closed (node disconnected?)".to_string(),
+        )),
+        Err(_) => Err(DistError::Connect("spawn request timed out".to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +526,48 @@ mod tests {
     fn test_ping_result_enum() {
         assert_eq!(PingResult::Pong, PingResult::Pong);
         assert_ne!(PingResult::Pong, PingResult::Pang);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_without_distribution() {
+        // Without distribution initialized, spawn should return NotInitialized
+        // Skip if distribution is already initialized (from other tests)
+        if distribution::manager().is_none() {
+            let result = spawn(Atom::new("remote@host"), "mod", "func", vec![]).await;
+            assert!(matches!(result, Err(DistError::NotInitialized)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_link_without_distribution() {
+        // Without distribution initialized, spawn_link should return NotInitialized
+        if distribution::manager().is_none() {
+            let result = spawn_link(Atom::new("remote@host"), "mod", "func", vec![]).await;
+            assert!(matches!(result, Err(DistError::NotInitialized)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_monitor_without_distribution() {
+        // Without distribution initialized, spawn_monitor should return NotInitialized
+        if distribution::manager().is_none() {
+            let result = spawn_monitor(Atom::new("remote@host"), "mod", "func", vec![]).await;
+            assert!(matches!(result, Err(DistError::NotInitialized)));
+        }
+    }
+
+    #[test]
+    fn test_spawn_timeout_constant() {
+        // Verify the spawn timeout is reasonable (30 seconds)
+        assert_eq!(SPAWN_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_spawn_seq_counter_increments() {
+        // Verify the spawn sequence counter works correctly
+        let first = SPAWN_SEQ.load(Ordering::Relaxed);
+        let _ = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
+        let second = SPAWN_SEQ.load(Ordering::Relaxed);
+        assert_eq!(second, first + 1);
     }
 }
