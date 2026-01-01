@@ -295,14 +295,30 @@ impl Peer {
 
     /// Stop the peer node.
     ///
-    /// This sends a termination signal to the peer process.
+    /// This sends a shutdown message via distribution before terminating.
     pub async fn stop(&self) -> Result<(), PeerError> {
         let mut child = self.child.write().await;
 
         if let Some(mut c) = child.take() {
             // Try graceful shutdown first via distribution
             if *self.state.read().await == PeerState::Running {
-                // TODO: Send shutdown message via distribution
+                // Send NodeGoingDown message and disconnect from the peer
+                if let Some(manager) = crate::distribution::manager() {
+                    // Send NodeGoingDown to notify the peer we're disconnecting
+                    if let Some(tx) = manager.get_node_tx(self.node) {
+                        use crate::distribution::protocol::DistMessage;
+                        let msg = DistMessage::NodeGoingDown {
+                            reason: "peer shutdown requested".to_string(),
+                        };
+                        let _ = tx.try_send(msg);
+                    }
+
+                    // Disconnect from the peer via distribution layer
+                    let _ = crate::distribution::disconnect(self.node);
+
+                    // Give the peer a moment to process the disconnect
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
 
             // Kill the process
@@ -365,6 +381,44 @@ pub fn random_name_with_prefix(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_peer_stop_no_child() {
+        // Test that stop() handles the case where there's no child process
+        let peer = Peer {
+            node: crate::atom::Atom::new("test@localhost"),
+            node_name: "test@localhost".to_string(),
+            child: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(PeerState::Down)),
+            options: PeerOptions::new(),
+            kill_on_drop: false,
+            dist_port: 9000,
+        };
+
+        // stop() should succeed even with no child process
+        let result = peer.stop().await;
+        assert!(result.is_ok());
+        assert_eq!(*peer.state.read().await, PeerState::Down);
+    }
+
+    #[tokio::test]
+    async fn test_peer_stop_sets_state_to_down() {
+        // Verify stop() transitions state to Down
+        let peer = Peer {
+            node: crate::atom::Atom::new("test@localhost"),
+            node_name: "test@localhost".to_string(),
+            child: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(PeerState::Booting)), // Start in Booting state
+            options: PeerOptions::new(),
+            kill_on_drop: false,
+            dist_port: 9000,
+        };
+
+        let result = peer.stop().await;
+        assert!(result.is_ok());
+        // State should be Down after stop
+        assert_eq!(*peer.state.read().await, PeerState::Down);
+    }
 
     #[test]
     fn test_random_name() {
