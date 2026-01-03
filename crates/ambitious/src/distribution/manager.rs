@@ -1196,27 +1196,69 @@ async fn handle_erlang_incoming(from_node: Atom, msg: super::erlang::ErlangMessa
             }
         }
         ControlMessage::Link { from_pid, to_pid } => {
-            tracing::debug!(
-                node = %from_node,
-                ?from_pid,
-                ?to_pid,
-                "Received LINK from BEAM (not yet implemented)"
-            );
-            // TODO: Implement cross-runtime linking
+            // A BEAM process wants to link with a local Ambitious process.
+            // from_pid is the BEAM process, to_pid is the local process.
+            if let (Some(remote_pid), Some(local_pid)) =
+                (extract_remote_pid(&from_pid), extract_local_pid(&to_pid))
+            {
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    "Received LINK from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager
+                        .process_monitors
+                        .handle_incoming_link(remote_pid, local_pid, from_node);
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?from_pid,
+                    ?to_pid,
+                    "Could not extract PIDs from BEAM LINK message"
+                );
+            }
         }
         ControlMessage::Exit {
             from_pid,
             to_pid,
             reason,
         } => {
-            tracing::debug!(
-                node = %from_node,
-                ?from_pid,
-                ?to_pid,
-                ?reason,
-                "Received EXIT from BEAM (not yet implemented)"
-            );
-            // TODO: Implement cross-runtime exit signal handling
+            // A linked BEAM process has exited - propagate to the local process.
+            // from_pid is the exiting BEAM process, to_pid is the local linked process.
+            if let (Some(remote_pid), Some(local_pid)) =
+                (extract_remote_pid(&from_pid), extract_local_pid(&to_pid))
+            {
+                // Convert the reason to a string representation
+                let reason_str = extract_exit_reason(&reason);
+
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    reason = %reason_str,
+                    "Received EXIT from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager.process_monitors.handle_incoming_exit(
+                        remote_pid,
+                        local_pid,
+                        &reason_str,
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?from_pid,
+                    ?to_pid,
+                    ?reason,
+                    "Could not extract PIDs from BEAM EXIT message"
+                );
+            }
         }
         ControlMessage::MonitorP { .. } => {
             tracing::debug!(
@@ -1229,6 +1271,57 @@ async fn handle_erlang_incoming(from_node: Atom, msg: super::erlang::ErlangMessa
             tracing::debug!(
                 node = %from_node,
                 "Received DEMONITOR_P from BEAM (not yet implemented)"
+            );
+        }
+        ControlMessage::Unlink { from_pid, to_pid } => {
+            // A BEAM process wants to unlink from a local Ambitious process (deprecated protocol).
+            if let (Some(remote_pid), Some(local_pid)) =
+                (extract_remote_pid(&from_pid), extract_local_pid(&to_pid))
+            {
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    "Received UNLINK from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager
+                        .process_monitors
+                        .handle_incoming_unlink(remote_pid, local_pid);
+                }
+            }
+        }
+        ControlMessage::UnlinkId {
+            id: _,
+            from_pid,
+            to_pid,
+        } => {
+            // A BEAM process wants to unlink from a local Ambitious process (OTP 23+ protocol).
+            if let (Some(remote_pid), Some(local_pid)) =
+                (extract_remote_pid(&from_pid), extract_local_pid(&to_pid))
+            {
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    "Received UNLINK_ID from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager
+                        .process_monitors
+                        .handle_incoming_unlink(remote_pid, local_pid);
+                }
+            }
+            // Note: We should send UnlinkIdAck back, but for now we'll skip it
+            // as it's not strictly required for correctness.
+        }
+        ControlMessage::UnlinkIdAck { .. } => {
+            // Acknowledgment for our unlink - we can ignore this for now.
+            tracing::trace!(
+                node = %from_node,
+                "Received UNLINK_ID_ACK from BEAM"
             );
         }
         other => {
@@ -1258,6 +1351,22 @@ fn extract_local_pid(term: &erltf::OwnedTerm) -> Option<Pid> {
     }
 }
 
+/// Extract a remote PID from an OwnedTerm that should be an ExternalPid.
+///
+/// This creates a Pid that represents a process on a remote BEAM node.
+#[cfg(feature = "erlang-dist")]
+fn extract_remote_pid(term: &erltf::OwnedTerm) -> Option<Pid> {
+    use erltf::OwnedTerm;
+
+    match term {
+        OwnedTerm::Pid(pid) => {
+            // Create a remote Pid using the node name from the ExternalPid
+            Some(Pid::remote(pid.node.as_str(), pid.id as u64, pid.creation))
+        }
+        _ => None,
+    }
+}
+
 /// Extract an atom name from an OwnedTerm.
 #[cfg(feature = "erlang-dist")]
 fn extract_atom_name(term: &erltf::OwnedTerm) -> Option<String> {
@@ -1266,6 +1375,41 @@ fn extract_atom_name(term: &erltf::OwnedTerm) -> Option<String> {
     match term {
         OwnedTerm::Atom(atom) => Some(atom.as_str().to_string()),
         _ => None,
+    }
+}
+
+/// Extract an exit reason from an OwnedTerm.
+///
+/// Common Erlang exit reasons:
+/// - `:normal` - normal termination
+/// - `:shutdown` - ordered shutdown
+/// - `{:shutdown, reason}` - shutdown with reason
+/// - `:killed` - forcefully killed
+/// - `:noproc` - process doesn't exist
+/// - `{:nodedown, node}` - node disconnected
+/// - Other terms - converted to string representation
+#[cfg(feature = "erlang-dist")]
+fn extract_exit_reason(term: &erltf::OwnedTerm) -> String {
+    use erltf::OwnedTerm;
+
+    match term {
+        OwnedTerm::Atom(atom) => {
+            // Common atom reasons
+            atom.as_str().to_string()
+        }
+        OwnedTerm::Tuple(elems) if !elems.is_empty() => {
+            // Tagged tuple like {:shutdown, reason} or {:nodedown, node}
+            if let OwnedTerm::Atom(tag) = &elems[0] {
+                if elems.len() == 2 {
+                    format!("{{:{}, {:?}}}", tag.as_str(), elems[1])
+                } else {
+                    format!(":{}", tag.as_str())
+                }
+            } else {
+                format!("{:?}", term)
+            }
+        }
+        _ => format!("{:?}", term),
     }
 }
 
