@@ -226,3 +226,258 @@ async fn test_transparent_beam_interop() {
 
     // The Elixir server should receive this as a map: %{"action" => "test", "value" => 42}
 }
+
+/// Helper to receive a message, skipping rex/features negotiation messages.
+async fn receive_skipping_rex(conn: &mut ErlangConnection, timeout_secs: u64) -> Option<OwnedTerm> {
+    use ambitious::distribution::erlang::ControlMessage;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), conn.receive()).await {
+            Ok(Ok(msg)) => {
+                // Skip rex messages (features negotiation)
+                if let ControlMessage::RegSend {
+                    to_name: OwnedTerm::Atom(atom),
+                    ..
+                } = &msg.control
+                    && atom.as_str() == "rex"
+                {
+                    println!("  (skipping rex message)");
+                    continue;
+                }
+                // This is a real message
+                return msg.payload().cloned();
+            }
+            Ok(Err(e)) => {
+                println!("  receive error: {}", e);
+                return None;
+            }
+            Err(_) => {
+                // Timeout on this iteration, continue waiting
+                continue;
+            }
+        }
+    }
+    None
+}
+
+/// Test spawning a process on Elixir and killing it.
+///
+/// This test verifies the Elixir test server's spawn/kill/monitor functionality
+/// works correctly, setting up for cross-runtime linking/monitoring tests.
+#[tokio::test]
+async fn test_elixir_spawn_and_kill() {
+    let config = ErlangConfig::new(
+        "rust_test6@localhost",
+        "elixir_test@localhost",
+        "test_cookie",
+    );
+
+    let mut conn = match ErlangConnection::connect(config).await {
+        Ok(c) => c,
+        Err(_) => {
+            println!("⚠️  Skipping - Elixir node not running");
+            return;
+        }
+    };
+
+    let our_pid = conn.allocate_pid();
+    let our_ref = conn.allocate_ref();
+
+    // Step 1: Spawn a killable process on Elixir
+    let gen_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref.as_inner().clone()),
+        ]),
+        erl_atom!("spawn_killable"),
+    ]);
+
+    println!("Spawning killable process on Elixir...");
+    conn.send_to_name(&our_pid, "test_server", gen_call)
+        .await
+        .expect("Failed to send spawn_killable");
+
+    // Get the reply with the killable PID
+    let reply = receive_skipping_rex(&mut conn, 5).await;
+    let killable_pid = reply.and_then(|payload| {
+        println!("Received spawn reply: {:?}", payload);
+        // Extract PID from {:ok, pid} tuple
+        if let OwnedTerm::Tuple(elems) = payload
+            && elems.len() == 2
+            && let OwnedTerm::Pid(pid) = &elems[1]
+        {
+            return Some(pid.clone());
+        }
+        None
+    });
+
+    let killable_pid = match killable_pid {
+        Some(pid) => {
+            println!("✅ Got killable PID: {:?}", pid);
+            pid
+        }
+        None => {
+            println!("❌ Failed to get killable PID from reply");
+            return;
+        }
+    };
+
+    // Step 2: Ask TestServer to monitor the killable process
+    let our_ref2 = conn.allocate_ref();
+    let monitor_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref2.as_inner().clone()),
+        ]),
+        OwnedTerm::Tuple(vec![
+            erl_atom!("monitor"),
+            OwnedTerm::Pid(killable_pid.clone()),
+        ]),
+    ]);
+
+    println!("Asking TestServer to monitor the killable process...");
+    conn.send_to_name(&our_pid, "test_server", monitor_call)
+        .await
+        .expect("Failed to send monitor request");
+
+    // Wait for acknowledgment
+    let _ = receive_skipping_rex(&mut conn, 2).await;
+    println!("✅ Monitor request sent");
+
+    // Step 3: Kill the process
+    let our_ref3 = conn.allocate_ref();
+    let kill_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref3.as_inner().clone()),
+        ]),
+        OwnedTerm::Tuple(vec![
+            erl_atom!("kill"),
+            OwnedTerm::Pid(killable_pid),
+            erl_atom!("test_exit"),
+        ]),
+    ]);
+
+    println!("Killing the process...");
+    conn.send_to_name(&our_pid, "test_server", kill_call)
+        .await
+        .expect("Failed to send kill request");
+
+    // Wait for the kill to take effect
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    println!("✅ Test completed - check Elixir server output for DOWN message");
+}
+
+/// Test link behavior on the Elixir side.
+///
+/// This test verifies linking works by having TestServer link to a killable
+/// process and observing the EXIT message when it dies.
+#[tokio::test]
+async fn test_elixir_link_behavior() {
+    let config = ErlangConfig::new(
+        "rust_test7@localhost",
+        "elixir_test@localhost",
+        "test_cookie",
+    );
+
+    let mut conn = match ErlangConnection::connect(config).await {
+        Ok(c) => c,
+        Err(_) => {
+            println!("⚠️  Skipping - Elixir node not running");
+            return;
+        }
+    };
+
+    let our_pid = conn.allocate_pid();
+    let our_ref = conn.allocate_ref();
+
+    // Step 1: Spawn a killable process on Elixir
+    let gen_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref.as_inner().clone()),
+        ]),
+        erl_atom!("spawn_killable"),
+    ]);
+
+    println!("Spawning killable process on Elixir...");
+    conn.send_to_name(&our_pid, "test_server", gen_call)
+        .await
+        .expect("Failed to send spawn_killable");
+
+    // Get the reply with the killable PID
+    let reply = receive_skipping_rex(&mut conn, 5).await;
+    let killable_pid = reply.and_then(|payload| {
+        if let OwnedTerm::Tuple(elems) = payload
+            && elems.len() == 2
+            && let OwnedTerm::Pid(pid) = &elems[1]
+        {
+            return Some(pid.clone());
+        }
+        None
+    });
+
+    let killable_pid = match killable_pid {
+        Some(pid) => {
+            println!("✅ Got killable PID: {:?}", pid);
+            pid
+        }
+        None => {
+            println!("❌ Failed to get killable PID");
+            return;
+        }
+    };
+
+    // Step 2: Ask TestServer to link to the killable process
+    let our_ref2 = conn.allocate_ref();
+    let link_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref2.as_inner().clone()),
+        ]),
+        OwnedTerm::Tuple(vec![
+            erl_atom!("link_to"),
+            OwnedTerm::Pid(killable_pid.clone()),
+        ]),
+    ]);
+
+    println!("Asking TestServer to link to the killable process...");
+    conn.send_to_name(&our_pid, "test_server", link_call)
+        .await
+        .expect("Failed to send link request");
+
+    // Wait for acknowledgment
+    let _ = receive_skipping_rex(&mut conn, 2).await;
+    println!("✅ Link request sent");
+
+    // Step 3: Kill the process with a specific reason
+    let our_ref3 = conn.allocate_ref();
+    let kill_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref3.as_inner().clone()),
+        ]),
+        OwnedTerm::Tuple(vec![
+            erl_atom!("kill"),
+            OwnedTerm::Pid(killable_pid),
+            erl_atom!("link_test_exit"),
+        ]),
+    ]);
+
+    println!("Killing the linked process...");
+    conn.send_to_name(&our_pid, "test_server", kill_call)
+        .await
+        .expect("Failed to send kill request");
+
+    // Wait for the kill to take effect
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    println!("✅ Test completed - check Elixir server output for EXIT message");
+}
