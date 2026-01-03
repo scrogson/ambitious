@@ -1260,18 +1260,79 @@ async fn handle_erlang_incoming(from_node: Atom, msg: super::erlang::ErlangMessa
                 );
             }
         }
-        ControlMessage::MonitorP { .. } => {
-            tracing::debug!(
-                node = %from_node,
-                "Received MONITOR_P from BEAM (not yet implemented)"
-            );
-            // TODO: Implement cross-runtime monitoring
+        ControlMessage::MonitorP {
+            from_pid,
+            to_proc,
+            reference,
+        } => {
+            // A BEAM process wants to monitor a local Ambitious process.
+            // from_pid is the BEAM monitoring process, to_proc is the local process.
+            if let (Some(remote_pid), Some(local_pid), Some(monitor_ref)) = (
+                extract_remote_pid(&from_pid),
+                extract_local_pid(&to_proc),
+                extract_reference(&reference),
+            ) {
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    ?monitor_ref,
+                    "Received MONITOR_P from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager.process_monitors.add_incoming_monitor(
+                        local_pid,
+                        remote_pid,
+                        monitor_ref,
+                        from_node,
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?from_pid,
+                    ?to_proc,
+                    ?reference,
+                    "Could not extract PIDs/reference from BEAM MONITOR_P message"
+                );
+            }
         }
-        ControlMessage::DemonitorP { .. } => {
-            tracing::debug!(
-                node = %from_node,
-                "Received DEMONITOR_P from BEAM (not yet implemented)"
-            );
+        ControlMessage::DemonitorP {
+            from_pid,
+            to_proc,
+            reference,
+        } => {
+            // A BEAM process wants to cancel its monitor on a local Ambitious process.
+            if let (Some(remote_pid), Some(local_pid), Some(monitor_ref)) = (
+                extract_remote_pid(&from_pid),
+                extract_local_pid(&to_proc),
+                extract_reference(&reference),
+            ) {
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    ?monitor_ref,
+                    "Received DEMONITOR_P from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager.process_monitors.remove_incoming_monitor(
+                        local_pid,
+                        remote_pid,
+                        monitor_ref,
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?from_pid,
+                    ?to_proc,
+                    ?reference,
+                    "Could not extract PIDs/reference from BEAM DEMONITOR_P message"
+                );
+            }
         }
         ControlMessage::Unlink { from_pid, to_pid } => {
             // A BEAM process wants to unlink from a local Ambitious process (deprecated protocol).
@@ -1324,6 +1385,48 @@ async fn handle_erlang_incoming(from_node: Atom, msg: super::erlang::ErlangMessa
                 "Received UNLINK_ID_ACK from BEAM"
             );
         }
+        ControlMessage::MonitorPExit {
+            from_proc,
+            to_pid,
+            reference,
+            reason,
+        } => {
+            // A monitored BEAM process has exited - deliver DOWN to local monitoring process.
+            // from_proc is the exiting BEAM process, to_pid is the local monitoring process.
+            if let (Some(remote_pid), Some(local_pid), Some(monitor_ref)) = (
+                extract_remote_pid(&from_proc),
+                extract_local_pid(&to_pid),
+                extract_reference(&reference),
+            ) {
+                let reason_str = extract_exit_reason(&reason);
+
+                tracing::debug!(
+                    node = %from_node,
+                    %remote_pid,
+                    %local_pid,
+                    ?monitor_ref,
+                    reason = %reason_str,
+                    "Received MONITOR_P_EXIT from BEAM"
+                );
+
+                if let Some(manager) = DIST_MANAGER.get() {
+                    manager.process_monitors.handle_process_down(
+                        monitor_ref,
+                        remote_pid,
+                        &reason_str,
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    node = %from_node,
+                    ?from_proc,
+                    ?to_pid,
+                    ?reference,
+                    ?reason,
+                    "Could not extract PIDs/reference from BEAM MONITOR_P_EXIT message"
+                );
+            }
+        }
         other => {
             tracing::debug!(
                 node = %from_node,
@@ -1374,6 +1477,27 @@ fn extract_atom_name(term: &erltf::OwnedTerm) -> Option<String> {
 
     match term {
         OwnedTerm::Atom(atom) => Some(atom.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Extract a monitor reference from an OwnedTerm.
+#[cfg(feature = "erlang-dist")]
+fn extract_reference(term: &erltf::OwnedTerm) -> Option<Ref> {
+    use erltf::OwnedTerm;
+
+    match term {
+        OwnedTerm::Reference(r) => {
+            // The ids field is a Vec<u32> containing the reference identifiers.
+            // Combine the first two IDs into a u64 for our Ref.
+            // Erlang references typically have up to 3 ID words.
+            let id = match r.ids.as_slice() {
+                [id0] => *id0 as u64,
+                [id0, id1, ..] => ((*id1 as u64) << 32) | (*id0 as u64),
+                [] => return None,
+            };
+            Some(Ref::from_raw(id))
+        }
         _ => None,
     }
 }
