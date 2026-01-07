@@ -215,6 +215,8 @@ pub struct ChildInfo {
     pub pid: Option<Pid>,
     /// The child type.
     pub child_type: ChildType,
+    /// The restart type.
+    pub restart: RestartType,
 }
 
 /// Statistics about supervisor children.

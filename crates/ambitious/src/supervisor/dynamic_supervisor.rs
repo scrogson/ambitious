@@ -238,6 +238,7 @@ impl SupervisorState {
                 id: format!("child_{}", i),
                 pid: Some(*entry.key()),
                 child_type: entry.value().spec.child_type,
+                restart: entry.value().spec.restart,
             })
             .collect()
     }

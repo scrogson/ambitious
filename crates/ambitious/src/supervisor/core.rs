@@ -9,8 +9,71 @@ use super::types::{
 };
 use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use crate::process::RuntimeHandle;
+use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Global registry of supervisor states for querying.
+/// This allows `which_children` and `count_children` to access supervisor state.
+static SUPERVISOR_STATES: OnceLock<DashMap<Pid, SupervisorQueryState>> = OnceLock::new();
+
+fn get_supervisor_registry() -> &'static DashMap<Pid, SupervisorQueryState> {
+    SUPERVISOR_STATES.get_or_init(DashMap::new)
+}
+
+/// Queryable state for a supervisor (subset of SupervisorState that can be shared).
+struct SupervisorQueryState {
+    /// Children indexed by ID.
+    children: HashMap<String, QueryableChildState>,
+}
+
+/// Queryable state for a child.
+struct QueryableChildState {
+    /// The child's ID.
+    id: String,
+    /// The child's PID if running.
+    pid: Option<Pid>,
+    /// The child type (Worker or Supervisor).
+    child_type: ChildType,
+    /// The restart type.
+    restart: RestartType,
+}
+
+impl SupervisorQueryState {
+    fn get_child_counts(&self) -> ChildCounts {
+        let mut counts = ChildCounts {
+            specs: self.children.len(),
+            active: 0,
+            supervisors: 0,
+            workers: 0,
+        };
+
+        for child in self.children.values() {
+            if child.pid.is_some() {
+                counts.active += 1;
+            }
+            match child.child_type {
+                ChildType::Worker => counts.workers += 1,
+                ChildType::Supervisor => counts.supervisors += 1,
+            }
+        }
+
+        counts
+    }
+
+    fn get_which_children(&self) -> Vec<ChildInfo> {
+        self.children
+            .values()
+            .map(|c| ChildInfo {
+                id: c.id.clone(),
+                pid: c.pid,
+                child_type: c.child_type,
+                restart: c.restart,
+            })
+            .collect()
+    }
+}
 
 /// The Supervisor trait for implementing supervision trees.
 ///
@@ -288,8 +351,36 @@ impl SupervisorState {
                 id: c.spec.id.clone(),
                 pid: c.pid,
                 child_type: c.spec.child_type,
+                restart: c.spec.restart,
             })
             .collect()
+    }
+
+    /// Syncs the supervisor state to the global registry for queries.
+    fn sync_to_registry(&self) {
+        let query_state = SupervisorQueryState {
+            children: self
+                .children
+                .iter()
+                .map(|(id, child)| {
+                    (
+                        id.clone(),
+                        QueryableChildState {
+                            id: child.spec.id.clone(),
+                            pid: child.pid,
+                            child_type: child.spec.child_type,
+                            restart: child.spec.restart,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        get_supervisor_registry().insert(self.self_pid, query_state);
+    }
+
+    /// Removes this supervisor from the global registry.
+    fn unregister_from_registry(&self) {
+        get_supervisor_registry().remove(&self.self_pid);
     }
 }
 
@@ -298,8 +389,12 @@ async fn supervisor_loop(mut state: SupervisorState) {
     // Start all initial children
     if let Err(_reason) = state.start_all_children().await {
         // Failed to start children - supervisor terminates
+        state.unregister_from_registry();
         return;
     }
+
+    // Register initial state in the global registry
+    state.sync_to_registry();
 
     // Main message loop
     loop {
@@ -308,6 +403,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
             None => {
                 // Mailbox closed - terminate children and exit
                 state.terminate_all_children().await;
+                state.unregister_from_registry();
                 return;
             }
         };
@@ -318,11 +414,15 @@ async fn supervisor_loop(mut state: SupervisorState) {
             pid,
             reason,
         }) = <SystemMessage as Term>::decode(&msg)
-            && let Err(_exit_reason) = state.handle_child_exit(pid, reason).await
         {
-            // Supervisor needs to stop due to restart intensity
-            state.terminate_all_children().await;
-            return;
+            if let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
+                // Supervisor needs to stop due to restart intensity
+                state.terminate_all_children().await;
+                state.unregister_from_registry();
+                return;
+            }
+            // Sync state after child exit/restart
+            state.sync_to_registry();
         }
 
         // Check for exit signals
@@ -331,6 +431,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
         {
             // If we receive an exit signal, terminate
             state.terminate_all_children().await;
+            state.unregister_from_registry();
             return;
         }
     }
@@ -451,20 +552,25 @@ pub async fn start<S: Supervisor>(
 
 /// Gets information about all children of a supervisor.
 ///
-/// Note: This is a simplified implementation. A full implementation would
-/// use a call/response protocol to query the supervisor.
-pub async fn which_children(_handle: &RuntimeHandle, _sup: Pid) -> Result<Vec<ChildInfo>, String> {
-    // This would need a proper call mechanism
-    // For now, return an error indicating this needs more work
-    Err("which_children not yet implemented".to_string())
+/// Returns a list of `ChildInfo` structs describing each child specification.
+pub async fn which_children(_handle: &RuntimeHandle, sup: Pid) -> Result<Vec<ChildInfo>, String> {
+    let registry = get_supervisor_registry();
+    let state = registry
+        .get(&sup)
+        .ok_or_else(|| format!("supervisor {} not found", sup))?;
+    Ok(state.get_which_children())
 }
 
 /// Gets counts of supervisor children.
 ///
-/// Note: This is a simplified implementation.
-pub async fn count_children(_handle: &RuntimeHandle, _sup: Pid) -> Result<ChildCounts, String> {
-    // This would need a proper call mechanism
-    Err("count_children not yet implemented".to_string())
+/// Returns a `ChildCounts` struct with the number of specs, active children,
+/// supervisors, and workers.
+pub async fn count_children(_handle: &RuntimeHandle, sup: Pid) -> Result<ChildCounts, String> {
+    let registry = get_supervisor_registry();
+    let state = registry
+        .get(&sup)
+        .ok_or_else(|| format!("supervisor {} not found", sup))?;
+    Ok(state.get_child_counts())
 }
 
 /// Terminates a child process.
