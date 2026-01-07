@@ -79,6 +79,45 @@ defmodule TestServer do
     {:reply, :ok, state}
   end
 
+  # Spawn a process on a remote node (for testing SpawnRequest)
+  @impl true
+  def handle_call({:spawn_on_node, node, module, function, args}, _from, state) do
+    IO.puts("Spawning #{module}.#{function}/#{length(args)} on node #{node}")
+    try do
+      pid = Node.spawn(node, module, function, args)
+      IO.puts("Spawned remote process: #{inspect(pid)}")
+      {:reply, {:ok, pid}, state}
+    rescue
+      e ->
+        IO.puts("Failed to spawn: #{inspect(e)}")
+        {:reply, {:error, inspect(e)}, state}
+    catch
+      kind, reason ->
+        IO.puts("Failed to spawn (#{kind}): #{inspect(reason)}")
+        {:reply, {:error, {kind, reason}}, state}
+    end
+  end
+
+  # Spawn and link to a process on a remote node
+  @impl true
+  def handle_call({:spawn_link_on_node, node, module, function, args}, _from, state) do
+    IO.puts("Spawning linked #{module}.#{function}/#{length(args)} on node #{node}")
+    try do
+      pid = Node.spawn_link(node, module, function, args)
+      IO.puts("Spawned linked remote process: #{inspect(pid)}")
+      new_state = %{state | linked_pids: [pid | state.linked_pids]}
+      {:reply, {:ok, pid}, new_state}
+    rescue
+      e ->
+        IO.puts("Failed to spawn_link: #{inspect(e)}")
+        {:reply, {:error, inspect(e)}, state}
+    catch
+      kind, reason ->
+        IO.puts("Failed to spawn_link (#{kind}): #{inspect(reason)}")
+        {:reply, {:error, {kind, reason}}, state}
+    end
+  end
+
   @impl true
   def handle_cast({:print, msg}, state) do
     IO.puts("Cast received: #{inspect(msg)}")

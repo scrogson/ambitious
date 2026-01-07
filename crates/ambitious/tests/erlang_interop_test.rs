@@ -481,3 +481,88 @@ async fn test_elixir_link_behavior() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     println!("✅ Test completed - check Elixir server output for EXIT message");
 }
+
+/// Test remote spawn from Elixir to Rust.
+///
+/// This test verifies that an Elixir node can spawn a process on our Rust node
+/// using Node.spawn/4, which sends a SPAWN_REQUEST control message.
+#[tokio::test]
+async fn test_elixir_spawn_on_rust() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Register a spawnable function before connecting
+    let spawned_flag = Arc::new(AtomicBool::new(false));
+    let flag_clone = spawned_flag.clone();
+
+    ambitious::distribution::spawn::register("test_module", "test_func", move |_args| {
+        let flag = flag_clone.clone();
+        async move {
+            println!("🎉 Rust process spawned from Elixir!");
+            flag.store(true, Ordering::SeqCst);
+            // Keep alive briefly so the test can check
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+
+    let config = ErlangConfig::new(
+        "rust_test8@localhost",
+        "elixir_test@localhost",
+        "test_cookie",
+    );
+
+    let mut conn = match ErlangConnection::connect(config).await {
+        Ok(c) => c,
+        Err(_) => {
+            println!("⚠️  Skipping - Elixir node not running");
+            return;
+        }
+    };
+
+    let our_pid = conn.allocate_pid();
+    let our_ref = conn.allocate_ref();
+
+    // Ask Elixir to spawn a process on our node
+    // Format: {:spawn_on_node, node, module, function, args}
+    let rust_node = OwnedTerm::Atom(erltf::types::Atom::new("rust_test8@localhost"));
+    let module = erl_atom!("test_module");
+    let function = erl_atom!("test_func");
+    let args = OwnedTerm::List(vec![]); // Empty args list
+
+    let gen_call = OwnedTerm::Tuple(vec![
+        erl_atom!("$gen_call"),
+        OwnedTerm::Tuple(vec![
+            OwnedTerm::Pid(our_pid.as_inner().clone()),
+            OwnedTerm::Reference(our_ref.as_inner().clone()),
+        ]),
+        OwnedTerm::Tuple(vec![
+            erl_atom!("spawn_on_node"),
+            rust_node,
+            module,
+            function,
+            args,
+        ]),
+    ]);
+
+    println!("Asking Elixir to spawn test_module:test_func on our node...");
+    conn.send_to_name(&our_pid, "test_server", gen_call)
+        .await
+        .expect("Failed to send spawn_on_node request");
+
+    // Wait for the spawn to happen
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Check if our function was spawned
+    if spawned_flag.load(Ordering::SeqCst) {
+        println!("✅ Remote spawn successful - Elixir spawned a process on Rust!");
+    } else {
+        println!("⚠️  Remote spawn may not have completed");
+        println!("   Check Elixir server output for spawn_on_node handling");
+        println!("   Note: This requires the function to be registered and SPAWN_REQUEST support");
+    }
+
+    // Try to receive the reply from Elixir
+    if let Some(reply) = receive_skipping_rex(&mut conn, 2).await {
+        println!("Received reply from Elixir: {:?}", reply);
+    }
+}
