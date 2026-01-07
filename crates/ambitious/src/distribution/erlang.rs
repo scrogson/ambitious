@@ -225,6 +225,31 @@ mod inner {
                 .map_err(|e| DistError::Io(format!("demonitor failed: {}", e)))
         }
 
+        /// Send a control message (no payload).
+        ///
+        /// This is used for control messages like SpawnReply that don't have
+        /// a separate payload term.
+        pub async fn send_control(&mut self, control: ControlMessage) -> Result<(), DistError> {
+            // PASS_THROUGH marker byte
+            const PASS_THROUGH: u8 = 112;
+
+            // Convert control message to term and encode
+            let control_term = control.to_term();
+            let control_encoded = erltf::encode(&control_term)
+                .map_err(|e| DistError::Encode(format!("ETF encode error: {}", e)))?;
+
+            // Build the message: PASS_THROUGH byte + encoded control
+            let mut data = Vec::with_capacity(1 + control_encoded.len());
+            data.push(PASS_THROUGH);
+            data.extend_from_slice(&control_encoded);
+
+            // send_raw adds the 4-byte length prefix via the framer
+            self.inner
+                .send_raw(&data)
+                .await
+                .map_err(|e| DistError::Io(format!("send_control failed: {}", e)))
+        }
+
         /// Check if the connection is still active.
         pub fn is_connected(&self) -> bool {
             self.inner.is_connected()

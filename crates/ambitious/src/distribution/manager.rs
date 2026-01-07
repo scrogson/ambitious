@@ -639,20 +639,35 @@ impl DistributionManager {
 
         tokio::spawn(async move {
             loop {
-                let msg = {
-                    let mut guard = conn_receiver.lock().await;
-                    match guard.receive().await {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            tracing::warn!(node = %receiver_node, error = %e, "Erlang receive error");
-                            break;
-                        }
+                // Receive the next message
+                let mut guard = conn_receiver.lock().await;
+                let msg = match guard.receive().await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        tracing::warn!(node = %receiver_node, error = %e, "Erlang receive error");
+                        break;
                     }
                 };
 
                 tracing::debug!(node = %receiver_node, ?msg, "Received message from BEAM");
 
-                // Handle the incoming message based on control message type
+                // Handle SpawnRequest specially - we need to send SpawnReply while holding the connection
+                if let super::erlang::ControlMessage::SpawnRequest {
+                    ref req_id,
+                    ref from,
+                    ref mfa,
+                    ref opt_list,
+                    ..
+                } = msg.control
+                {
+                    handle_spawn_request(&mut guard, receiver_node, req_id, from, mfa, opt_list)
+                        .await;
+                    drop(guard);
+                    continue;
+                }
+
+                // For all other messages, drop the guard and handle asynchronously
+                drop(guard);
                 handle_erlang_incoming(receiver_node, msg).await;
             }
 
@@ -1144,6 +1159,197 @@ async fn handle_incoming_message(from_node: Atom, msg: DistMessage) {
         _ => {
             tracing::warn!(?msg, "Unexpected message type");
         }
+    }
+}
+
+/// Handle a BEAM SpawnRequest control message.
+///
+/// This is called when a BEAM node requests to spawn a process on our node.
+/// We look up the function in the spawn registry, execute it, and send
+/// a SpawnReply back with the result.
+#[cfg(feature = "erlang-dist")]
+async fn handle_spawn_request(
+    conn: &mut super::erlang::ErlangConnection,
+    from_node: Atom,
+    req_id: &erltf::OwnedTerm,
+    from: &erltf::OwnedTerm,
+    mfa: &erltf::OwnedTerm,
+    opt_list: &erltf::OwnedTerm,
+) {
+    use super::erlang::ControlMessage;
+    use erltf::OwnedTerm;
+    use erltf::types::Atom as ErlAtom;
+
+    tracing::debug!(
+        node = %from_node,
+        ?req_id,
+        ?from,
+        ?mfa,
+        ?opt_list,
+        "Handling BEAM SpawnRequest"
+    );
+
+    // Parse MFA tuple: {Module, Function, Arity}
+    let (module, function, _arity) = match mfa {
+        OwnedTerm::Tuple(elems) if elems.len() == 3 => {
+            let module = match &elems[0] {
+                OwnedTerm::Atom(a) => a.as_str().to_string(),
+                _ => {
+                    tracing::warn!("SpawnRequest: invalid module in MFA");
+                    send_spawn_error(conn, req_id, from, "badarg").await;
+                    return;
+                }
+            };
+            let function = match &elems[1] {
+                OwnedTerm::Atom(a) => a.as_str().to_string(),
+                _ => {
+                    tracing::warn!("SpawnRequest: invalid function in MFA");
+                    send_spawn_error(conn, req_id, from, "badarg").await;
+                    return;
+                }
+            };
+            let arity = match &elems[2] {
+                OwnedTerm::Integer(i) => *i as u32,
+                _ => {
+                    tracing::warn!("SpawnRequest: invalid arity in MFA");
+                    send_spawn_error(conn, req_id, from, "badarg").await;
+                    return;
+                }
+            };
+            (module, function, arity)
+        }
+        _ => {
+            tracing::warn!("SpawnRequest: MFA is not a 3-tuple");
+            send_spawn_error(conn, req_id, from, "badarg").await;
+            return;
+        }
+    };
+
+    // Parse options to check for link and monitor
+    let mut link_to: Option<Pid> = None;
+    let mut monitor_from: Option<Pid> = None;
+
+    if let OwnedTerm::List(opts) = opt_list {
+        for opt in opts {
+            match opt {
+                OwnedTerm::Atom(a) if a.as_str() == "link" => {
+                    // Link to the requesting process
+                    link_to = extract_remote_pid(from);
+                }
+                OwnedTerm::Atom(a) if a.as_str() == "monitor" => {
+                    // Monitor from the requesting process
+                    monitor_from = extract_remote_pid(from);
+                }
+                OwnedTerm::Tuple(elems) if elems.len() == 2 => {
+                    // Could be {monitor, MonitorOpts} or {link, LinkOpts}
+                    if let OwnedTerm::Atom(a) = &elems[0] {
+                        match a.as_str() {
+                            "monitor" => monitor_from = extract_remote_pid(from),
+                            "link" => link_to = extract_remote_pid(from),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    tracing::debug!(
+        module = %module,
+        function = %function,
+        link = ?link_to,
+        monitor = ?monitor_from,
+        "Executing spawn request"
+    );
+
+    // Execute the spawn
+    // Note: For BEAM spawns, we don't have serialized args in the usual sense.
+    // The arg_list from BEAM contains the actual arguments to pass to the function.
+    // For now, we pass empty args since our spawn registry uses serialized bytes.
+    let result = super::spawn::execute_spawn(&module, &function, vec![], link_to, monitor_from);
+
+    match result {
+        Ok((pid, monitor_ref)) => {
+            tracing::info!(
+                node = %from_node,
+                pid = %pid,
+                module = %module,
+                function = %function,
+                "Successfully spawned process for BEAM node"
+            );
+
+            // Build flags based on what was created
+            let mut flags = 0u64;
+            if link_to.is_some() {
+                flags |= 1; // SPAWN_REPLY_OPT_LINK_CREATED
+            }
+            if monitor_ref.is_some() {
+                flags |= 2; // SPAWN_REPLY_OPT_MONITOR_CREATED
+            }
+
+            // Build the result term - the spawned PID
+            let local_node_name = conn.local_node().to_string();
+            let result_pid = OwnedTerm::Pid(erltf::types::ExternalPid::new(
+                ErlAtom::new(&local_node_name),
+                pid.id() as u32,
+                0,
+                crate::core::current_creation(),
+            ));
+
+            // Build SpawnReply: {31, ReqId, To, Flags, Result}
+            let spawn_reply = ControlMessage::SpawnReply {
+                req_id: req_id.clone(),
+                to: from.clone(),
+                flags: OwnedTerm::Integer(flags as i64),
+                result: result_pid,
+            };
+
+            if let Err(e) = conn.send_control(spawn_reply).await {
+                tracing::error!(
+                    node = %from_node,
+                    error = %e,
+                    "Failed to send SpawnReply"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                node = %from_node,
+                module = %module,
+                function = %function,
+                error = %e,
+                "Spawn request failed"
+            );
+            send_spawn_error(conn, req_id, from, &e).await;
+        }
+    }
+}
+
+/// Send a SpawnReply with an error result.
+#[cfg(feature = "erlang-dist")]
+async fn send_spawn_error(
+    conn: &mut super::erlang::ErlangConnection,
+    req_id: &erltf::OwnedTerm,
+    to: &erltf::OwnedTerm,
+    reason: &str,
+) {
+    use super::erlang::ControlMessage;
+    use erltf::OwnedTerm;
+    use erltf::types::Atom as ErlAtom;
+
+    let spawn_reply = ControlMessage::SpawnReply {
+        req_id: req_id.clone(),
+        to: to.clone(),
+        flags: OwnedTerm::Integer(0),
+        result: OwnedTerm::Tuple(vec![
+            OwnedTerm::Atom(ErlAtom::new("error")),
+            OwnedTerm::Atom(ErlAtom::new(reason)),
+        ]),
+    };
+
+    if let Err(e) = conn.send_control(spawn_reply).await {
+        tracing::error!(error = %e, "Failed to send SpawnReply error");
     }
 }
 
