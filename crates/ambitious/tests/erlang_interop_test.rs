@@ -1,14 +1,14 @@
 //! Test Erlang/Elixir interoperability.
 //!
 //! To run this test:
-//! 1. Start the Elixir test server:
+//! 1. Start the Elixir test server with @localhost:
 //!    ```
 //!    cd crates/ambitious/tests/elixir_interop
-//!    elixir --sname elixir_test --cookie test_cookie test_server.exs
+//!    elixir --sname elixir_test@localhost --cookie test_cookie test_server.exs
 //!    ```
 //! 2. Run this test:
 //!    ```
-//!    cargo test -p ambitious --features erlang-dist erlang_interop -- --nocapture
+//!    cargo test -p ambitious --features erlang-dist --test erlang_interop_test -- --nocapture
 //!    ```
 
 #![cfg(feature = "erlang-dist")]
@@ -16,15 +16,25 @@
 use ambitious::distribution::erlang::{ErlangConfig, ErlangConnection};
 use erltf::{OwnedTerm, erl_atom, erl_tuple};
 
+/// Create a node name with localhost (for local testing).
+fn node_name(name: &str) -> String {
+    format!("{}@localhost", name)
+}
+
+/// Create a config for connecting to the local Elixir test server.
+fn test_config(local_name: &str) -> ErlangConfig {
+    ErlangConfig::new(
+        &node_name(local_name),
+        &node_name("elixir_test"),
+        "test_cookie",
+    )
+}
+
 /// Test connecting to an Elixir node and sending a ping.
 #[tokio::test]
 async fn test_connect_to_elixir() {
     // Skip if EPMD isn't running or Elixir node isn't up
-    let config = ErlangConfig::new(
-        "rust_test@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test");
 
     let conn_result = ErlangConnection::connect(config).await;
 
@@ -39,9 +49,11 @@ async fn test_connect_to_elixir() {
             println!();
             println!("   To run this test:");
             println!("   1. cd crates/ambitious/tests/elixir_interop");
-            println!("   2. elixir --sname elixir_test --cookie test_cookie test_server.exs");
             println!(
-                "   3. cargo test -p ambitious --features erlang-dist erlang_interop -- --nocapture"
+                "   2. elixir --sname elixir_test@localhost --cookie test_cookie test_server.exs"
+            );
+            println!(
+                "   3. cargo test -p ambitious --features erlang-dist --test erlang_interop_test -- --nocapture"
             );
             // Don't fail - just skip if Elixir isn't running
             return;
@@ -52,11 +64,7 @@ async fn test_connect_to_elixir() {
 /// Test sending a message to a registered process.
 #[tokio::test]
 async fn test_send_to_named_process() {
-    let config = ErlangConfig::new(
-        "rust_test2@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test2");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -83,11 +91,7 @@ async fn test_send_to_named_process() {
 /// Test making a gen_server call.
 #[tokio::test]
 async fn test_gen_server_call() {
-    let config = ErlangConfig::new(
-        "rust_test3@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test3");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -140,11 +144,7 @@ async fn test_gen_server_call() {
 /// Test receiving messages.
 #[tokio::test]
 async fn test_receive_cast() {
-    let config = ErlangConfig::new(
-        "rust_test4@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test4");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -178,11 +178,7 @@ async fn test_receive_cast() {
 /// automatically encoded to ETF and sent to BEAM nodes.
 #[tokio::test]
 async fn test_transparent_beam_interop() {
-    let config = ErlangConfig::new(
-        "rust_test5@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test5");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -268,11 +264,7 @@ async fn receive_skipping_rex(conn: &mut ErlangConnection, timeout_secs: u64) ->
 /// works correctly, setting up for cross-runtime linking/monitoring tests.
 #[tokio::test]
 async fn test_elixir_spawn_and_kill() {
-    let config = ErlangConfig::new(
-        "rust_test6@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test6");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -379,11 +371,7 @@ async fn test_elixir_spawn_and_kill() {
 /// process and observing the EXIT message when it dies.
 #[tokio::test]
 async fn test_elixir_link_behavior() {
-    let config = ErlangConfig::new(
-        "rust_test7@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let config = test_config("rust_test7");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -505,11 +493,8 @@ async fn test_elixir_spawn_on_rust() {
         }
     });
 
-    let config = ErlangConfig::new(
-        "rust_test8@localhost",
-        "elixir_test@localhost",
-        "test_cookie",
-    );
+    let rust_node_name = node_name("rust_test8");
+    let config = test_config("rust_test8");
 
     let mut conn = match ErlangConnection::connect(config).await {
         Ok(c) => c,
@@ -524,7 +509,7 @@ async fn test_elixir_spawn_on_rust() {
 
     // Ask Elixir to spawn a process on our node
     // Format: {:spawn_on_node, node, module, function, args}
-    let rust_node = OwnedTerm::Atom(erltf::types::Atom::new("rust_test8@localhost"));
+    let rust_node = OwnedTerm::Atom(erltf::types::Atom::new(&rust_node_name));
     let module = erl_atom!("test_module");
     let function = erl_atom!("test_func");
     let args = OwnedTerm::List(vec![]); // Empty args list
