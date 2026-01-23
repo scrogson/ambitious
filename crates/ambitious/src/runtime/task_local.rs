@@ -5,6 +5,7 @@
 //! explicit parameter passing.
 
 use super::{Context, Pid, SendError};
+use crate::core::ExitReason;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +17,8 @@ struct ProcessContext {
     pid: Pid,
     /// The process context (requires async lock for mutable access).
     ctx: Arc<Mutex<Context>>,
+    /// Custom exit reason set by the process (if any).
+    exit_reason: Arc<Mutex<Option<ExitReason>>>,
 }
 
 tokio::task_local! {
@@ -41,21 +44,29 @@ impl ProcessScope {
     ///
     /// Task-local functions like `current_pid()`, `recv()`, `send()`, etc.
     /// will work during execution.
-    pub async fn run<F, Fut>(self, f: F)
+    ///
+    /// Returns the exit reason if set by the process via `set_exit_reason`,
+    /// otherwise returns `None` (meaning the process exited normally).
+    pub async fn run<F, Fut>(self, f: F) -> Option<ExitReason>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = ()>,
     {
         let pid = self.ctx.pid();
+        let exit_reason = Arc::new(Mutex::new(None));
+        let exit_reason_clone = exit_reason.clone();
         let process_ctx = ProcessContext {
             pid,
             ctx: Arc::new(Mutex::new(self.ctx)),
+            exit_reason,
         };
         CONTEXT
             .scope(process_ctx, async {
                 f().await;
             })
             .await;
+        // Return the exit reason if one was set
+        exit_reason_clone.lock().await.take()
     }
 }
 
@@ -205,4 +216,34 @@ pub fn exit(target: Pid, reason: crate::core::ExitReason) {
             // Lock is held - can't send exit right now
         }
     }
+}
+
+/// Sets the exit reason for the current process.
+///
+/// When the process function returns, this reason will be used instead of
+/// `ExitReason::Normal`. This is used for failure escalation in supervisors.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn set_exit_reason(reason: ExitReason) {
+    let exit_reason = CONTEXT.with(|c| c.exit_reason.clone());
+    // Use try_lock since we're in a sync context
+    if let Ok(mut guard) = exit_reason.try_lock() {
+        *guard = Some(reason);
+    }
+}
+
+/// Sets the exit reason for the current process (async version).
+///
+/// When the process function returns, this reason will be used instead of
+/// `ExitReason::Normal`. This is used for failure escalation in supervisors.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub async fn set_exit_reason_async(reason: ExitReason) {
+    let exit_reason = CONTEXT.with(|c| c.exit_reason.clone());
+    let mut guard = exit_reason.lock().await;
+    *guard = Some(reason);
 }
