@@ -350,13 +350,22 @@ fn schedule_continue(arg: &[u8]) {
 ///
 /// ```ignore
 /// let count: i64 = call::<Counter, _>(pid, CounterCall::Get, Duration::from_secs(5)).await?;
+///
+/// // Also accepts registered names:
+/// let count: i64 = call::<Counter, _>("my_counter", CounterCall::Get, Duration::from_secs(5)).await?;
 /// ```
-pub async fn call<G, R>(pid: Pid, msg: G::Call, timeout: Duration) -> Result<R, Error>
+pub async fn call<G, R>(
+    server: impl Into<super::ServerRef>,
+    msg: G::Call,
+    timeout: Duration,
+) -> Result<R, Error>
 where
     G: GenServer,
     R: Message,
 {
     use tokio::time::timeout as tokio_timeout;
+
+    let pid = server.into().resolve().ok_or(Error::NotFound)?;
 
     let reference = Ref::new();
     let caller_pid = crate::current_pid();
@@ -417,12 +426,60 @@ async fn wait_for_reply<R: Message>(reference: Ref) -> Result<R, Error> {
 ///
 /// ```ignore
 /// cast::<Counter>(pid, CounterCast::Increment);
+///
+/// // Also accepts registered names:
+/// cast::<Counter>("my_counter", CounterCast::Increment);
 /// ```
-pub fn cast<G>(pid: Pid, msg: G::Cast)
+pub fn cast<G>(server: impl Into<super::ServerRef>, msg: G::Cast)
 where
     G: GenServer,
 {
+    let Some(pid) = server.into().resolve() else {
+        return;
+    };
     // Wrap in $gen_cast envelope
     let envelope = encode_gen_cast_envelope(msg.encode_local());
     let _ = crate::send_raw(pid, envelope);
+}
+
+/// Sends a reply to a caller outside of the normal handle_call return flow.
+///
+/// This is useful when `handle_call` returns `Reply::NoReply` and the
+/// reply needs to be sent later (deferred reply pattern).
+///
+/// # Example
+///
+/// ```ignore
+/// async fn handle_call(&mut self, msg: MyCall, from: From) -> Reply<MyReply> {
+///     // Store `from` and reply later
+///     self.pending = Some(from);
+///     Reply::NoReply
+/// }
+///
+/// // Later, in handle_cast or handle_info:
+/// gen_server::reply(&self.pending.take().unwrap(), MyReply::Done);
+/// ```
+pub fn reply<T: Message>(from: &From, value: T) {
+    send_reply(from, value.encode_local());
+}
+
+/// Gracefully stops a GenServer.
+///
+/// Sends a stop protocol message to the server process.
+/// The server's `terminate` callback will be called with the given reason.
+///
+/// # Example
+///
+/// ```ignore
+/// gen_server::stop(pid, ExitReason::Normal).await?;
+/// gen_server::stop("my_server", ExitReason::Shutdown).await?;
+/// ```
+pub async fn stop(server: impl Into<super::ServerRef>, reason: ExitReason) -> Result<(), Error> {
+    let pid = server.into().resolve().ok_or(Error::NotFound)?;
+
+    // Send a Stop protocol message
+    let stop_msg = super::protocol::encode_stop(reason, None);
+    crate::send_raw(pid, stop_msg).map_err(|_| Error::NotFound)?;
+
+    Ok(())
 }

@@ -215,7 +215,8 @@ pub mod prelude {
 
     // GenServer essentials (enum-based pattern)
     pub use crate::gen_server::{
-        Error, From, GenServer, Init, Reply, Status, call, cast, start, start_link,
+        Error, From, GenServer, Init, Reply, ServerRef, Status, call, cast, reply, start,
+        start_link, stop,
     };
 
     // Supervisor essentials
