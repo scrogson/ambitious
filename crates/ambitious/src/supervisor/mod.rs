@@ -328,4 +328,375 @@ mod tests {
 
         assert!(!handle.alive(sup_pid), "Supervisor should have terminated");
     }
+
+    #[tokio::test]
+    async fn test_supervisor_exits_with_error_on_max_restarts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        // Track restart count
+        let restart_count = Arc::new(AtomicUsize::new(0));
+        let restart_count_clone = restart_count.clone();
+
+        struct CrashySupervisor;
+
+        impl Supervisor for CrashySupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>);
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(2) // Allow only 2 restarts
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("crashy", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Small delay so supervisor can start
+                                    sleep(Duration::from_millis(20)).await;
+                                    // Crash with an error
+                                    crate::runtime::set_exit_reason(ExitReason::error(
+                                        "intentional crash",
+                                    ));
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Permanent),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid = start::<CrashySupervisor>(&handle, (handle.clone(), restart_count_clone))
+            .await
+            .unwrap();
+
+        // Give it time to hit max restarts
+        sleep(Duration::from_millis(500)).await;
+
+        // Supervisor should be dead (exited due to max restart intensity)
+        assert!(
+            !handle.alive(sup_pid),
+            "Supervisor should have terminated after max restarts"
+        );
+
+        // Should have attempted restarts (initial + 2 restarts = 3 starts)
+        let count = restart_count.load(Ordering::SeqCst);
+        assert!(
+            count >= 3,
+            "Child should have been started at least 3 times, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failure_escalation_to_parent_supervisor() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        // Track child supervisor crash and parent exit
+        let child_sup_crashed = Arc::new(AtomicBool::new(false));
+        let parent_received_exit = Arc::new(AtomicBool::new(false));
+        let child_restart_count = Arc::new(AtomicUsize::new(0));
+
+        let child_sup_crashed_clone = child_sup_crashed.clone();
+        let _parent_received_exit_clone = parent_received_exit.clone();
+        let child_restart_count_clone = child_restart_count.clone();
+
+        // Child supervisor that will hit max restarts
+        struct ChildSupervisor;
+
+        impl Supervisor for ChildSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>);
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(1) // Only 1 restart allowed
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("crashy_worker", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Crash immediately
+                                    crate::runtime::set_exit_reason(ExitReason::error(
+                                        "worker crash",
+                                    ));
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Permanent),
+                    ],
+                )
+            }
+        }
+
+        // Parent supervisor that supervises the child supervisor
+        struct ParentSupervisor;
+
+        impl Supervisor for ParentSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>, Arc<AtomicBool>);
+
+            fn init((handle, count, crashed_flag): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(0) // Don't restart child supervisors
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("child_supervisor", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            let cf = crashed_flag.clone();
+                            async move {
+                                let parent_pid = crate::runtime::current_pid();
+                                let pid =
+                                    start_link::<ChildSupervisor>(&h, parent_pid, (h.clone(), c))
+                                        .await
+                                        .map_err(|e| StartChildError::Failed(format!("{:?}", e)))?;
+                                // Mark that we started
+                                cf.store(false, Ordering::SeqCst);
+                                Ok(pid)
+                            }
+                        })
+                        .supervisor()
+                        .restart(RestartType::Permanent),
+                    ],
+                )
+            }
+        }
+
+        let parent_pid = start::<ParentSupervisor>(
+            &handle,
+            (
+                handle.clone(),
+                child_restart_count_clone,
+                child_sup_crashed_clone,
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Give it time for the child supervisor to crash and propagate
+        sleep(Duration::from_millis(500)).await;
+
+        // The parent should also be dead because it couldn't restart the child
+        // (max_restarts = 0)
+        assert!(
+            !handle.alive(parent_pid),
+            "Parent supervisor should have terminated after child supervisor failed"
+        );
+
+        // Child should have crashed at least twice (initial + 1 restart)
+        let count = child_restart_count.load(Ordering::SeqCst);
+        assert!(
+            count >= 2,
+            "Child worker should have been started at least 2 times, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transient_child_normal_exit_no_restart() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let start_count_clone = start_count.clone();
+
+        struct TransientSupervisor;
+
+        impl Supervisor for TransientSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>);
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(10)
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("transient_worker", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Exit normally - transient should NOT restart
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Transient),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid = start::<TransientSupervisor>(&handle, (handle.clone(), start_count_clone))
+            .await
+            .unwrap();
+
+        // Give it time to process
+        sleep(Duration::from_millis(200)).await;
+
+        // Supervisor should still be alive
+        assert!(handle.alive(sup_pid), "Supervisor should still be running");
+
+        // Child should only have started once (no restart on normal exit)
+        let count = start_count.load(Ordering::SeqCst);
+        assert_eq!(
+            count, 1,
+            "Transient child should start only once on normal exit, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transient_child_abnormal_exit_restarts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let start_count_clone = start_count.clone();
+
+        struct TransientCrashSupervisor;
+
+        impl Supervisor for TransientCrashSupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>);
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(2)
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("transient_crashy", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Small delay so supervisor can start
+                                    sleep(Duration::from_millis(20)).await;
+                                    // Exit abnormally - transient SHOULD restart
+                                    crate::runtime::set_exit_reason(ExitReason::error("crash"));
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Transient),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid =
+            start::<TransientCrashSupervisor>(&handle, (handle.clone(), start_count_clone))
+                .await
+                .unwrap();
+
+        // Give it time to hit max restarts
+        sleep(Duration::from_millis(500)).await;
+
+        // Supervisor should be dead (max restart intensity reached)
+        assert!(
+            !handle.alive(sup_pid),
+            "Supervisor should have terminated after max restarts"
+        );
+
+        // Child should have started multiple times (initial + restarts)
+        let count = start_count.load(Ordering::SeqCst);
+        assert!(
+            count >= 3,
+            "Transient child should restart on abnormal exit, got {} starts",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_temporary_child_never_restarts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let start_count_clone = start_count.clone();
+
+        struct TemporarySupervisor;
+
+        impl Supervisor for TemporarySupervisor {
+            type InitArg = (RuntimeHandle, Arc<AtomicUsize>);
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(10)
+                        .max_seconds(10),
+                    vec![
+                        ChildSpec::new("temporary_crashy", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Exit abnormally - but temporary should NOT restart
+                                    crate::runtime::set_exit_reason(ExitReason::error("crash"));
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Temporary),
+                    ],
+                )
+            }
+        }
+
+        let sup_pid = start::<TemporarySupervisor>(&handle, (handle.clone(), start_count_clone))
+            .await
+            .unwrap();
+
+        // Give it time to process
+        sleep(Duration::from_millis(200)).await;
+
+        // Supervisor should still be alive
+        assert!(
+            handle.alive(sup_pid),
+            "Supervisor should still be running with temporary child"
+        );
+
+        // Child should only have started once (no restart for temporary)
+        let count = start_count.load(Ordering::SeqCst);
+        assert_eq!(
+            count, 1,
+            "Temporary child should never restart, got {} starts",
+            count
+        );
+    }
 }

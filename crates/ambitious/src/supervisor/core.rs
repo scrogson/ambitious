@@ -387,8 +387,10 @@ impl SupervisorState {
 /// The main supervisor process loop.
 async fn supervisor_loop(mut state: SupervisorState) {
     // Start all initial children
-    if let Err(_reason) = state.start_all_children().await {
-        // Failed to start children - supervisor terminates
+    if let Err(reason) = state.start_all_children().await {
+        // Failed to start children - supervisor terminates with error
+        // Set exit reason for failure escalation
+        crate::runtime::set_exit_reason_async(reason).await;
         state.unregister_from_registry();
         return;
     }
@@ -415,8 +417,10 @@ async fn supervisor_loop(mut state: SupervisorState) {
             reason,
         }) = <SystemMessage as Term>::decode(&msg)
         {
-            if let Err(_exit_reason) = state.handle_child_exit(pid, reason).await {
+            if let Err(exit_reason) = state.handle_child_exit(pid, reason).await {
                 // Supervisor needs to stop due to restart intensity
+                // Set exit reason for failure escalation to parent supervisor
+                crate::runtime::set_exit_reason_async(exit_reason).await;
                 state.terminate_all_children().await;
                 state.unregister_from_registry();
                 return;
@@ -426,10 +430,9 @@ async fn supervisor_loop(mut state: SupervisorState) {
         }
 
         // Check for exit signals
-        if let Ok(SystemMessage::Exit { from: _, reason: _ }) =
-            <SystemMessage as Term>::decode(&msg)
-        {
-            // If we receive an exit signal, terminate
+        if let Ok(SystemMessage::Exit { from: _, reason }) = <SystemMessage as Term>::decode(&msg) {
+            // If we receive an exit signal, terminate with that reason
+            crate::runtime::set_exit_reason_async(reason).await;
             state.terminate_all_children().await;
             state.unregister_from_registry();
             return;

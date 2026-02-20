@@ -154,10 +154,11 @@ impl RuntimeHandle {
         tokio::spawn(async move {
             // ProcessScope sets up task-local storage so functions like
             // current_pid(), recv(), send(), etc. work
-            crate::runtime::ProcessScope::new(ctx).run(f).await;
+            let custom_exit_reason = crate::runtime::ProcessScope::new(ctx).run(f).await;
 
-            // Process completed normally
-            Self::handle_process_exit(pid, ExitReason::Normal, &registry, &state_for_task);
+            // Use custom exit reason if set, otherwise Normal
+            let exit_reason = custom_exit_reason.unwrap_or(ExitReason::Normal);
+            Self::handle_process_exit(pid, exit_reason, &registry, &state_for_task);
         });
 
         // Spawn a task to wait for termination signal
