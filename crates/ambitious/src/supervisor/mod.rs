@@ -64,8 +64,8 @@ mod types;
 pub mod dynamic_supervisor;
 
 pub use core::{
-    Supervisor, SupervisorInit, count_children, delete_child, start, start_link, terminate_child,
-    which_children,
+    Supervisor, SupervisorInit, count_children, delete_child, restart_child, start, start_link,
+    terminate_child, which_children,
 };
 pub use error::{DeleteError, RestartError, StartError, TerminateError};
 pub use types::{
@@ -697,6 +697,273 @@ mod tests {
             count, 1,
             "Temporary child should never restart, got {} starts",
             count
+        );
+    }
+
+    // =========================================================================
+    // Child management command tests
+    // =========================================================================
+
+    /// Helper: creates a supervisor with a single long-lived worker child.
+    /// Returns the supervisor PID. Uses the provided handle for spawning.
+    async fn setup_supervisor_with_worker(
+        handle: &RuntimeHandle,
+        start_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Pid {
+        use std::sync::atomic::Ordering;
+        struct WorkerSup;
+
+        impl Supervisor for WorkerSup {
+            type InitArg = (
+                RuntimeHandle,
+                std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            );
+
+            fn init((handle, count): Self::InitArg) -> SupervisorInit {
+                let handle_clone = handle.clone();
+                SupervisorInit::new(
+                    SupervisorFlags::new(Strategy::OneForOne)
+                        .max_restarts(10)
+                        .max_seconds(60),
+                    vec![
+                        ChildSpec::new("worker", move || {
+                            let h = handle_clone.clone();
+                            let c = count.clone();
+                            async move {
+                                let pid = h.spawn(move || async move {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                    // Long-lived worker that waits for messages
+                                    while let Ok(Some(_)) =
+                                        crate::runtime::recv_timeout(Duration::from_secs(60)).await
+                                    {
+                                    }
+                                });
+                                Ok(pid)
+                            }
+                        })
+                        .restart(RestartType::Permanent)
+                        .shutdown(ShutdownType::BrutalKill),
+                    ],
+                )
+            }
+        }
+
+        start::<WorkerSup>(handle, (handle.clone(), start_count))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_terminate_child() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let test_passed = Arc::new(AtomicBool::new(false));
+        let test_passed_clone = test_passed.clone();
+        let start_count_clone = start_count.clone();
+        let handle_clone = handle.clone();
+
+        handle.spawn(move || async move {
+            let h = handle_clone;
+            let sup_pid = setup_supervisor_with_worker(&h, start_count_clone).await;
+
+            // Give child time to start
+            sleep(Duration::from_millis(50)).await;
+
+            // 1. Terminate running child - should succeed
+            let result = terminate_child(&h, sup_pid, "worker").await;
+            assert!(
+                result.is_ok(),
+                "terminate_child should succeed: {:?}",
+                result
+            );
+
+            // Give time for state to sync
+            sleep(Duration::from_millis(50)).await;
+
+            // Verify child is stopped via count_children
+            let counts = count_children(&h, sup_pid).await.unwrap();
+            assert_eq!(counts.active, 0, "child should be stopped after terminate");
+            assert_eq!(counts.specs, 1, "spec should still exist");
+
+            // 2. Terminate already stopped child - should be idempotent (succeed)
+            let result2 = terminate_child(&h, sup_pid, "worker").await;
+            assert!(
+                result2.is_ok(),
+                "terminate_child on stopped child should succeed: {:?}",
+                result2
+            );
+
+            // 3. Terminate nonexistent child - should error
+            let result3 = terminate_child(&h, sup_pid, "nonexistent").await;
+            assert!(
+                result3.is_err(),
+                "terminate_child on nonexistent should error"
+            );
+
+            test_passed_clone.store(true, Ordering::SeqCst);
+        });
+
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            test_passed.load(Ordering::SeqCst),
+            "test_terminate_child did not complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_child() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let test_passed = Arc::new(AtomicBool::new(false));
+        let test_passed_clone = test_passed.clone();
+        let start_count_clone = start_count.clone();
+        let handle_clone = handle.clone();
+
+        handle.spawn(move || async move {
+            let h = handle_clone;
+            let sup_pid = setup_supervisor_with_worker(&h, start_count_clone).await;
+
+            // Give child time to start
+            sleep(Duration::from_millis(50)).await;
+
+            // 1. Delete running child - should error with Running
+            let result = delete_child(&h, sup_pid, "worker").await;
+            assert!(
+                result.is_err(),
+                "delete_child on running child should error"
+            );
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, DeleteError::Running(_)),
+                    "expected Running error, got: {:?}",
+                    e
+                );
+            }
+
+            // 2. Terminate first, then delete - should succeed
+            let _ = terminate_child(&h, sup_pid, "worker").await;
+            sleep(Duration::from_millis(50)).await;
+
+            let result2 = delete_child(&h, sup_pid, "worker").await;
+            assert!(
+                result2.is_ok(),
+                "delete_child after terminate should succeed: {:?}",
+                result2
+            );
+
+            // Verify spec is gone
+            sleep(Duration::from_millis(50)).await;
+            let counts = count_children(&h, sup_pid).await.unwrap();
+            assert_eq!(counts.specs, 0, "spec should be removed after delete");
+
+            // 3. Delete again - should error with NotFound
+            let result3 = delete_child(&h, sup_pid, "worker").await;
+            assert!(
+                result3.is_err(),
+                "delete_child on deleted child should error"
+            );
+            if let Err(ref e) = result3 {
+                assert!(
+                    matches!(e, DeleteError::NotFound(_)),
+                    "expected NotFound error, got: {:?}",
+                    e
+                );
+            }
+
+            test_passed_clone.store(true, Ordering::SeqCst);
+        });
+
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            test_passed.load(Ordering::SeqCst),
+            "test_delete_child did not complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restart_child() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let test_passed = Arc::new(AtomicBool::new(false));
+        let test_passed_clone = test_passed.clone();
+        let start_count_clone = start_count.clone();
+        let handle_clone = handle.clone();
+
+        handle.spawn(move || async move {
+            let h = handle_clone;
+            let sup_pid = setup_supervisor_with_worker(&h, start_count_clone.clone()).await;
+
+            // Give child time to start
+            sleep(Duration::from_millis(50)).await;
+
+            // Initial start count should be 1
+            let initial_count = start_count_clone.load(Ordering::SeqCst);
+            assert_eq!(initial_count, 1, "child should have started once initially");
+
+            // 1. Restart running child - should error with AlreadyRunning
+            let result = restart_child(&h, sup_pid, "worker").await;
+            assert!(
+                result.is_err(),
+                "restart_child on running child should error"
+            );
+            if let Err(ref e) = result {
+                assert!(
+                    matches!(e, RestartError::AlreadyRunning(_)),
+                    "expected AlreadyRunning error, got: {:?}",
+                    e
+                );
+            }
+
+            // 2. Terminate, then restart - should succeed
+            let _ = terminate_child(&h, sup_pid, "worker").await;
+            sleep(Duration::from_millis(50)).await;
+
+            let result2 = restart_child(&h, sup_pid, "worker").await;
+            assert!(
+                result2.is_ok(),
+                "restart_child after terminate should succeed: {:?}",
+                result2
+            );
+            let new_pid = result2.unwrap();
+            assert!(h.alive(new_pid), "restarted child should be alive");
+
+            // Give child time to increment counter
+            sleep(Duration::from_millis(50)).await;
+
+            // 3. Verify start count incremented
+            let final_count = start_count_clone.load(Ordering::SeqCst);
+            assert_eq!(
+                final_count, 2,
+                "start count should be 2 after restart, got {}",
+                final_count
+            );
+
+            // Verify child is active via count_children
+            let counts = count_children(&h, sup_pid).await.unwrap();
+            assert_eq!(counts.active, 1, "child should be active after restart");
+
+            test_passed_clone.store(true, Ordering::SeqCst);
+        });
+
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            test_passed.load(Ordering::SeqCst),
+            "test_restart_child did not complete"
         );
     }
 }

@@ -44,15 +44,19 @@ Ambitious aims to provide Erlang-style concurrency primitives in Rust:
 ## Crate Structure
 
 ```
-dream/
-├── dream/              # Main crate re-exporting all functionality
-├── ambitious-core/         # Core types: Pid, Ref, ExitReason, Message trait
-├── ambitious-runtime/      # Async runtime, scheduler, process registry
-├── ambitious-process/      # Process spawning, mailboxes, links, monitors
-├── ambitious-gen-server/   # GenServer trait and implementation
-├── ambitious-supervisor/   # Supervisor trait and restart strategies
-├── ambitious-application/  # Application lifecycle management
-└── ambitious-macros/       # Procedural macros for ergonomic APIs
+ambitious/
+├── crates/
+│   ├── ambitious/              # Main crate containing all functionality
+│   │   └── src/
+│   │       ├── core/           # Core types: Pid, Ref, ExitReason, Atom, Term trait
+│   │       ├── runtime/        # Async runtime, scheduler, process registry, task-locals
+│   │       ├── process/        # Process spawning, mailboxes, links, monitors
+│   │       ├── gen_server/     # GenServer trait and server loop
+│   │       ├── supervisor/     # Supervisor trait and restart strategies
+│   │       ├── application/    # Application lifecycle management
+│   │       ├── timer/          # Timer management (send_after, cancel)
+│   │       └── ...             # Registry, channels, distribution, etc.
+│   └── ambitious-macros/       # Procedural macros (#[derive(Message)], #[ambitious::main])
 ```
 
 ## Core Types
@@ -90,16 +94,16 @@ fn spawn_link<F, T>(f: F) -> Pid;
 fn spawn_monitor<F, T>(f: F) -> (Pid, Ref);
 
 // Links (bidirectional)
-fn link(pid: Pid) -> Result<(), ProcessError>;
+fn link(pid: Pid) -> Result<(), SendError>;
 fn unlink(pid: Pid);
 
 // Monitors (unidirectional)
-fn monitor(pid: Pid) -> Ref;
+fn monitor(pid: Pid) -> Result<Ref, SendError>;
 fn demonitor(reference: Ref);
 
 // Messaging
-fn send<M: Message>(pid: Pid, msg: M);
-fn send_after<M: Message>(pid: Pid, msg: M, delay: Duration) -> TimerRef;
+fn send<M: Term>(pid: Pid, msg: &M) -> Result<(), SendError>;
+fn send_after<M: Term>(pid: Pid, msg: &M, delay: Duration) -> TimerResult;
 
 // Process flags
 fn flag(flag: ProcessFlag, value: bool) -> bool;  // trap_exit, etc.
@@ -109,10 +113,10 @@ fn exit(pid: Pid, reason: ExitReason);
 
 // Info
 fn alive(pid: Pid) -> bool;
-fn self_pid() -> Pid;
+fn current_pid() -> Pid;
 
 // Registration
-fn register(name: &str, pid: Pid) -> Result<(), RegistrationError>;
+fn register(name: String, pid: Pid);
 fn whereis(name: &str) -> Option<Pid>;
 fn unregister(name: &str);
 ```
@@ -121,85 +125,73 @@ fn unregister(name: &str);
 
 ### Trait Definition
 ```rust
+#[async_trait]
 pub trait GenServer: Sized + Send + 'static {
-    type State: Send;
-    type InitArg: Send;
-    type Call: Message;      // Request type
-    type Cast: Message;      // Async message type
-    type Reply: Message;     // Response type
-    type Info: Message;      // Other messages (optional, default to bytes)
+    type Args: Send + 'static;
+    type Call: Message + Send + 'static;
+    type Cast: Message + Send + 'static;
+    type Info: Message + Send + 'static;
+    type Reply: Message + Send + 'static;
 
-    // Callbacks
-    fn init(arg: Self::InitArg) -> InitResult<Self::State>;
-
-    fn handle_call(
-        request: Self::Call,
-        from: From,
-        state: &mut Self::State,
-    ) -> CallResult<Self::State, Self::Reply>;
-
-    fn handle_cast(
-        msg: Self::Cast,
-        state: &mut Self::State,
-    ) -> CastResult<Self::State>;
-
-    fn handle_info(
-        msg: Self::Info,  // or raw bytes
-        state: &mut Self::State,
-    ) -> InfoResult<Self::State>;
-
-    fn terminate(reason: ExitReason, state: &mut Self::State) {}
+    async fn init(args: Self::Args) -> Init<Self>;
+    async fn handle_call(&mut self, msg: Self::Call, from: From) -> Reply<Self::Reply>;
+    async fn handle_cast(&mut self, msg: Self::Cast) -> Status;
+    async fn handle_info(&mut self, msg: Self::Info) -> Status;
+    async fn terminate(&mut self, _reason: ExitReason) {}
+    async fn handle_timeout(&mut self) -> Status { Status::Ok }
+    async fn handle_continue(&mut self, _arg: Vec<u8>) -> Status { Status::Ok }
 }
 ```
 
-### Return Types (matching Elixir)
+Key design points:
+- The struct IS the state (no separate `State` type)
+- Handlers take `&mut self`
+- `init` returns `Init<Self>`
+- `handle_call` returns `Reply<Self::Reply>`
+- `handle_cast`/`handle_info` return `Status`
+
+### Return Types
 ```rust
-pub enum InitResult<S> {
+pub enum Init<S> {
     Ok(S),
-    OkTimeout(S, Duration),
-    OkHibernate(S),
-    OkContinue(S, ContinueArg),
+    Continue(S, Vec<u8>),
+    Timeout(S, Duration),
     Ignore,
     Stop(ExitReason),
 }
 
-pub enum CallResult<S, R> {
-    Reply(R, S),
-    ReplyTimeout(R, S, Duration),
-    ReplyContinue(R, S, ContinueArg),
-    NoReply(S),
-    NoReplyTimeout(S, Duration),
-    NoReplyContinue(S, ContinueArg),
-    Stop(ExitReason, R, S),
-    StopNoReply(ExitReason, S),
+pub enum Reply<T> {
+    Ok(T),
+    Continue(T, Vec<u8>),
+    Timeout(T, Duration),
+    NoReply,
+    Stop(ExitReason, T),
+    StopNoReply(ExitReason),
 }
 
-pub enum CastResult<S> {
-    NoReply(S),
-    NoReplyTimeout(S, Duration),
-    NoReplyContinue(S, ContinueArg),
-    Stop(ExitReason, S),
+pub enum Status {
+    Ok,
+    Continue(Vec<u8>),
+    Timeout(Duration),
+    Stop(ExitReason),
 }
 ```
 
 ### Client Functions
 ```rust
 // Starting
-async fn start<G: GenServer>(arg: G::InitArg) -> Result<Pid, StartError>;
-async fn start_link<G: GenServer>(arg: G::InitArg) -> Result<Pid, StartError>;
+async fn start<G: GenServer>(args: G::Args) -> Result<Pid, Error>;
+async fn start_link<G: GenServer>(args: G::Args) -> Result<Pid, Error>;
 
 // Messaging
-async fn call<G: GenServer>(
-    server: impl Into<ServerRef>,
-    request: G::Call,
-    timeout: Duration,
-) -> Result<G::Reply, CallError>;
+async fn call<G, R>(server: impl Into<ServerRef>, msg: G::Call, timeout: Duration) -> Result<R, Error>;
+fn cast<G>(server: impl Into<ServerRef>, msg: G::Cast);
 
-fn cast<G: GenServer>(server: impl Into<ServerRef>, msg: G::Cast);
+// Deferred reply (for NoReply pattern)
+fn reply<T: Message>(from: &From, value: T);
 
-fn reply(from: From, reply: impl Message);
-
-async fn stop(server: impl Into<ServerRef>, reason: ExitReason) -> Result<(), StopError>;
+// Graceful shutdown
+async fn stop(server: impl Into<ServerRef>, reason: ExitReason) -> Result<(), Error>;
 ```
 
 ## Supervisor API (mirrors Elixir's Supervisor)
@@ -239,44 +231,58 @@ pub enum ShutdownType {
 ### Supervisor Trait
 ```rust
 pub trait Supervisor: Sized + Send + 'static {
-    type InitArg: Send;
+    type InitArg: Send + 'static;
 
     fn init(arg: Self::InitArg) -> SupervisorInit;
 }
 
 pub struct SupervisorInit {
-    pub strategy: Strategy,
-    pub max_restarts: u32,      // Default: 3
-    pub max_seconds: u32,       // Default: 5
+    pub flags: SupervisorFlags,
     pub children: Vec<ChildSpec>,
 }
 ```
 
 ### Client Functions
 ```rust
-async fn start_link<S: Supervisor>(arg: S::InitArg) -> Result<Pid, StartError>;
-async fn start_child(sup: Pid, spec: ChildSpec) -> Result<Pid, StartChildError>;
-async fn terminate_child(sup: Pid, id: &str) -> Result<(), TerminateError>;
-async fn restart_child(sup: Pid, id: &str) -> Result<Pid, RestartError>;
-async fn delete_child(sup: Pid, id: &str) -> Result<(), DeleteError>;
-async fn which_children(sup: Pid) -> Vec<ChildInfo>;
-async fn count_children(sup: Pid) -> ChildCounts;
+async fn start_link<S: Supervisor>(handle: &RuntimeHandle, parent: Pid, arg: S::InitArg) -> Result<Pid, StartError>;
+async fn start<S: Supervisor>(handle: &RuntimeHandle, arg: S::InitArg) -> Result<Pid, StartError>;
+async fn terminate_child(handle: &RuntimeHandle, sup: Pid, id: &str) -> Result<(), TerminateError>;
+async fn delete_child(handle: &RuntimeHandle, sup: Pid, id: &str) -> Result<(), DeleteError>;
+async fn restart_child(handle: &RuntimeHandle, sup: Pid, id: &str) -> Result<Pid, RestartError>;
+async fn which_children(handle: &RuntimeHandle, sup: Pid) -> Result<Vec<ChildInfo>, String>;
+async fn count_children(handle: &RuntimeHandle, sup: Pid) -> Result<ChildCounts, String>;
+```
+
+## Term Trait
+
+The `Term` trait provides serialization for any type sent between processes:
+
+```rust
+pub trait Term: Sized + Send + 'static {
+    fn encode(&self) -> Vec<u8>;
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError>;
+    fn try_encode(&self) -> Option<Vec<u8>>;
+}
+
+// Blanket implementation for all Serialize + DeserializeOwned types
+impl<T: Serialize + DeserializeOwned + Send + 'static> Term for T { ... }
 ```
 
 ## Message Trait
 
-```rust
-pub trait Message: Serialize + DeserializeOwned + Send + 'static {
-    fn encode(&self) -> Vec<u8>;
-    fn decode(bytes: &[u8]) -> Result<Self, DecodeError>;
-}
+The `Message` trait provides typed, self-describing messages with tag-based dispatch:
 
-// Blanket implementation for all Serialize + DeserializeOwned types
-impl<T> Message for T
-where
-    T: Serialize + DeserializeOwned + Send + 'static
-{ ... }
+```rust
+pub trait Message: Sized + Send + 'static {
+    const TAG: &'static str;
+    fn encode_local(&self) -> Vec<u8>;
+    fn decode_local(bytes: &[u8]) -> Result<Self, DecodeError>;
+    fn encode_remote(&self) -> Vec<u8>;
+    fn decode_remote(bytes: &[u8]) -> Result<Self, DecodeError>;
+}
 ```
+
+Use `#[derive(Message)]` from `ambitious-macros` for automatic implementation.
 
 ## Macros
 
@@ -294,12 +300,15 @@ spawn_link!(my_function);
 spawn_link!(MyModule::start, args);
 ```
 
-### GenServer Derive (future)
+### Derive Macros
 ```rust
-#[derive(GenServer)]
-#[gen_server(call = MyCall, cast = MyCast, reply = MyReply)]
-struct MyServer {
-    // state fields
+#[derive(Message)]
+struct Get;
+
+#[derive(Message)]
+enum CounterCall {
+    Get,
+    Increment,
 }
 ```
 
@@ -314,7 +323,7 @@ struct MyServer {
 
 ## Testing
 
-Each crate should have:
+Each module should have:
 - Unit tests for core functionality
 - Integration tests for cross-process behavior
 - Doc tests for public APIs
@@ -325,7 +334,7 @@ Each crate should have:
 ```bash
 cargo build                    # Build all crates
 cargo test                     # Run all tests
-cargo test -p ambitious-process    # Test specific crate
+cargo test -p ambitious        # Test the main crate
 cargo doc --open               # Generate and view docs
 ```
 

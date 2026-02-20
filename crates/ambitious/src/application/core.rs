@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Type alias for the application start function.
-type StartFn = Box<dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync>;
+type StartFn = Arc<dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync>;
 
 /// Type alias for the application stop function.
-type StopFn = Box<dyn Fn(Option<Pid>) + Send + Sync>;
+type StopFn = Arc<dyn Fn(Option<Pid>) + Send + Sync>;
 
 /// The Application trait for implementing OTP-style applications.
 ///
@@ -109,8 +109,8 @@ impl AppController {
 
         let app = RegisteredApp {
             spec,
-            start_fn: Box::new(|handle, config| A::start(handle, config)),
-            stop_fn: Box::new(|pid| A::stop(pid)),
+            start_fn: Arc::new(|handle, config| A::start(handle, config)),
+            stop_fn: Arc::new(|pid| A::stop(pid)),
         };
 
         let mut registered = self.registered.write().unwrap();
@@ -145,15 +145,12 @@ impl AppController {
                 }
             }
 
-            // Get the app
-            let (start_fn, _spec) = {
+            let start_fn = {
                 let registered = self.registered.read().unwrap();
                 let app = registered
                     .get(&app_name)
                     .ok_or_else(|| StartError::NotFound(app_name.clone()))?;
-
-                // Clone what we need
-                (app.start_fn.as_ref() as *const _, app.spec.clone())
+                app.start_fn.clone()
             };
 
             // Start it
@@ -163,13 +160,7 @@ impl AppController {
                 AppConfig::new()
             };
 
-            // Safety: We're calling within the same function scope
-            let result = unsafe {
-                let start_fn: &(
-                     dyn Fn(&RuntimeHandle, &AppConfig) -> Result<StartResult, String> + Send + Sync
-                 ) = &*start_fn;
-                start_fn(&self.handle, &app_config)
-            };
+            let result = start_fn(&self.handle, &app_config);
 
             let start_result = result.map_err(StartError::StartFailed)?;
 
@@ -215,15 +206,42 @@ impl AppController {
     }
 
     /// Stops all running applications in reverse dependency order.
+    ///
+    /// Applications that depend on others are stopped first, then their
+    /// dependencies are stopped.
     pub async fn stop_all(&self) {
-        // Get all running app names
-        let names: Vec<String> = {
+        // Collect all running app names and build dependency-aware stop order
+        let stop_order = {
             let running = self.running.read().unwrap();
-            running.keys().cloned().collect()
+            let running_names: Vec<String> = running.keys().cloned().collect();
+
+            if running_names.is_empty() {
+                return;
+            }
+
+            // Build the full startup order for all running apps, then reverse it
+            let mut startup_order = Vec::new();
+            let mut visited = std::collections::HashSet::new();
+            let registered = self.registered.read().unwrap();
+
+            for name in &running_names {
+                let mut path = Vec::new();
+                // Ignore errors - just best-effort ordering
+                let _ = Self::visit_deps(
+                    name,
+                    &registered,
+                    &mut startup_order,
+                    &mut visited,
+                    &mut path,
+                );
+            }
+
+            // Reverse the startup order for shutdown
+            startup_order.into_iter().rev().collect::<Vec<String>>()
         };
 
-        // Stop each (in reverse order would be better, but this is simpler)
-        for name in names.iter().rev() {
+        // Stop each in reverse dependency order
+        for name in &stop_order {
             let _ = self.stop(name).await;
         }
     }

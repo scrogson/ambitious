@@ -238,7 +238,6 @@ pub fn encode_reply(reference: Ref, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Encode a stop request.
-#[allow(dead_code)]
 pub fn encode_stop(reason: ExitReason, from: Option<From>) -> Vec<u8> {
     Message::Stop { reason, from }.encode()
 }

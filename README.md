@@ -50,10 +50,12 @@ async fn main() {
 
 ```rust
 use ambitious::prelude::*;
-use ambitious::gen_server::{async_trait, GenServer, InitResult, CallResult, CastResult};
+use ambitious::gen_server::{self, async_trait, GenServer};
 use serde::{Serialize, Deserialize};
 
-struct Counter;
+struct Counter {
+    count: i64,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 enum CounterCall {
@@ -66,39 +68,46 @@ enum CounterCast {
     Reset,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct CounterReply(i64);
+
+// Message trait implementations omitted for brevity.
+// Use #[derive(Message)] from ambitious-macros for automatic implementation.
+
 #[async_trait]
 impl GenServer for Counter {
-    type State = i64;
-    type InitArg = i64;
+    type Args = i64;
     type Call = CounterCall;
     type Cast = CounterCast;
-    type Reply = i64;
+    type Info = ();
+    type Reply = CounterReply;
 
-    async fn init(initial: i64) -> InitResult<i64> {
-        InitResult::ok(initial)
+    async fn init(initial: i64) -> Init<Self> {
+        Init::Ok(Counter { count: initial })
     }
 
-    async fn handle_call(
-        request: CounterCall,
-        _from: From,
-        state: &mut i64,
-    ) -> CallResult<i64, i64> {
-        match request {
-            CounterCall::Get => CallResult::reply(*state, *state),
+    async fn handle_call(&mut self, msg: CounterCall, _from: From) -> Reply<CounterReply> {
+        match msg {
+            CounterCall::Get => Reply::Ok(CounterReply(self.count)),
             CounterCall::Increment => {
-                *state += 1;
-                CallResult::reply(*state, *state)
+                self.count += 1;
+                Reply::Ok(CounterReply(self.count))
             }
         }
     }
 
-    async fn handle_cast(msg: CounterCast, _state: &mut i64) -> CastResult<i64> {
+    async fn handle_cast(&mut self, msg: CounterCast) -> Status {
         match msg {
-            CounterCast::Reset => CastResult::noreply(0),
+            CounterCast::Reset => {
+                self.count = 0;
+                Status::Ok
+            }
         }
     }
 
-    // ... handle_info and handle_continue implementations
+    async fn handle_info(&mut self, _msg: ()) -> Status {
+        Status::Ok
+    }
 }
 ```
 
@@ -181,16 +190,18 @@ dynamic_supervisor::terminate_child(sup_pid, child_pid)?;
 
 ```
 ambitious/
-├── ambitious/              # Main crate re-exporting all functionality
-├── ambitious-core/         # Core types: Pid, Ref, ExitReason, Term trait
-├── ambitious-runtime/      # Async runtime, scheduler, process registry
-├── ambitious-process/      # Process spawning, mailboxes, links, monitors
-├── ambitious-gen-server/   # GenServer trait and implementation
-├── ambitious-supervisor/   # Supervisor trait and restart strategies
-├── ambitious-application/  # Application lifecycle management
-├── ambitious-macros/       # Procedural macros for ergonomic APIs
-└── examples/
-    └── chat/           # Distributed chat server example
+├── crates/
+│   ├── ambitious/              # Main crate containing all functionality
+│   │   └── src/
+│   │       ├── core/           # Core types: Pid, Ref, ExitReason, Atom, Term trait
+│   │       ├── runtime/        # Async runtime, scheduler, process registry, task-locals
+│   │       ├── process/        # Process spawning, mailboxes, links, monitors
+│   │       ├── gen_server/     # GenServer trait and server loop
+│   │       ├── supervisor/     # Supervisor trait and restart strategies
+│   │       ├── application/    # Application lifecycle management
+│   │       ├── timer/          # Timer management (send_after, cancel)
+│   │       └── ...             # Registry, channels, distribution, etc.
+│   └── ambitious-macros/       # Procedural macros (#[derive(Message)], #[ambitious::main])
 ```
 
 ## Core Concepts
@@ -270,8 +281,8 @@ cargo build
 # Run all tests
 cargo test
 
-# Run a specific crate's tests
-cargo test -p ambitious-gen-server
+# Run the main crate's tests
+cargo test -p ambitious
 
 # Run the chat example
 cargo run --example chat-server

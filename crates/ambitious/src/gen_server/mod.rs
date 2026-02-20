@@ -84,11 +84,13 @@
 
 pub(crate) mod protocol;
 mod server;
+mod server_ref;
 mod traits;
 mod types;
 
 // Primary exports
-pub use server::{Error, call, cast, start, start_link};
+pub use server::{Error, call, cast, reply, start, start_link, stop};
+pub use server_ref::ServerRef;
 pub use traits::GenServer;
 
 pub use async_trait::async_trait;
@@ -106,8 +108,8 @@ pub use crate::core::{ExitReason, Pid, Ref, Term};
 /// ```
 pub mod prelude {
     pub use super::{
-        Error, ExitReason, From, GenServer, Init, Pid, Reply, Status, async_trait, call, cast,
-        start, start_link,
+        Error, ExitReason, From, GenServer, Init, Pid, Reply, ServerRef, Status, async_trait, call,
+        cast, reply, start, start_link, stop,
     };
 }
 
@@ -315,5 +317,94 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(result.load(Ordering::SeqCst), 10);
+    }
+
+    // =========================================================================
+    // Phase 2: ServerRef, reply, stop tests
+    // =========================================================================
+
+    #[test]
+    fn test_server_ref_from_pid() {
+        let pid = crate::core::Pid::new();
+        let sr: ServerRef = pid.into();
+        match sr {
+            ServerRef::Pid(p) => assert_eq!(p, pid),
+            _ => panic!("expected Pid variant"),
+        }
+    }
+
+    #[test]
+    fn test_server_ref_from_str() {
+        let sr: ServerRef = "my_server".into();
+        match sr {
+            ServerRef::Name(n) => assert_eq!(n, "my_server"),
+            _ => panic!("expected Name variant"),
+        }
+    }
+
+    #[test]
+    fn test_server_ref_from_string() {
+        let sr: ServerRef = String::from("my_server").into();
+        match sr {
+            ServerRef::Name(n) => assert_eq!(n, "my_server"),
+            _ => panic!("expected Name variant"),
+        }
+    }
+
+    #[test]
+    fn test_server_ref_resolve_unregistered() {
+        crate::init();
+        let sr = ServerRef::Name("nonexistent_server".to_string());
+        assert!(sr.resolve().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_call_with_server_ref_pid() {
+        crate::init();
+        let handle = crate::handle();
+
+        let result = Arc::new(AtomicI64::new(-1));
+        let result_clone = result.clone();
+
+        handle.spawn(move || async move {
+            let pid = start::<Counter>(42).await.expect("failed to start counter");
+
+            // Call using Pid directly (backwards compatible)
+            let reply: CounterReply =
+                call::<Counter, _>(pid, CounterCall::Get, Duration::from_secs(5))
+                    .await
+                    .expect("call failed");
+
+            result_clone.store(reply.0, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(result.load(Ordering::SeqCst), 42);
+    }
+
+    #[tokio::test]
+    async fn test_stop_gen_server() {
+        use crate::gen_server::stop;
+
+        crate::init();
+        let handle = crate::handle();
+
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped_clone = stopped.clone();
+
+        handle.spawn(move || async move {
+            let pid = start::<Counter>(0).await.expect("failed to start counter");
+            assert!(crate::alive(pid));
+
+            stop(pid, crate::core::ExitReason::Normal).await.unwrap();
+
+            // Give it time to process
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            stopped_clone.store(!crate::alive(pid), Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(stopped.load(Ordering::SeqCst), "Server should have stopped");
     }
 }

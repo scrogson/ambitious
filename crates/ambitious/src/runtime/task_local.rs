@@ -4,8 +4,8 @@
 //! allowing functions to access the current process's context without
 //! explicit parameter passing.
 
-use super::{Context, Pid, SendError};
-use crate::core::ExitReason;
+use super::{Context, Pid, Ref, SendError};
+use crate::core::{ExitReason, ProcessFlag};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -216,6 +216,85 @@ pub fn exit(target: Pid, reason: crate::core::ExitReason) {
             // Lock is held - can't send exit right now
         }
     }
+}
+
+/// Creates a bidirectional link with another process.
+///
+/// If either process terminates abnormally, the other will receive
+/// an exit signal.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn link(pid: Pid) -> Result<(), SendError> {
+    with_ctx(|ctx| ctx.link(pid))
+}
+
+/// Removes a link with another process.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn unlink(pid: Pid) {
+    with_ctx(|ctx| ctx.unlink(pid))
+}
+
+/// Creates a monitor on another process.
+///
+/// Returns a reference that will be included in the `DOWN` message
+/// when the monitored process terminates.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn monitor(pid: Pid) -> Result<Ref, SendError> {
+    with_ctx(|ctx| ctx.monitor(pid))
+}
+
+/// Removes a monitor.
+///
+/// The reference will no longer be valid and no `DOWN` message
+/// will be sent for this monitor.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn demonitor(reference: Ref) {
+    with_ctx(|ctx| ctx.demonitor(reference))
+}
+
+/// Sets a process flag and returns the previous value.
+///
+/// # Flags
+///
+/// - `ProcessFlag::TrapExit` - When `true`, exit signals from linked
+///   processes are delivered as messages instead of terminating the process.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn flag(flag: ProcessFlag, value: bool) -> bool {
+    match flag {
+        ProcessFlag::TrapExit => with_ctx(|ctx| ctx.set_trap_exit(value)),
+    }
+}
+
+/// Sends a message to a process after a delay.
+///
+/// Returns a [`TimerRef`] that can be used to cancel the timer.
+///
+/// This is a convenience wrapper around `timer::send_after` that takes
+/// arguments in OTP order: `(pid, msg, delay)`.
+///
+/// # Panics
+///
+/// Panics if called outside of a Ambitious process context.
+pub fn send_after<M: crate::core::Term>(
+    pid: Pid,
+    msg: &M,
+    delay: std::time::Duration,
+) -> crate::timer::TimerResult {
+    crate::timer::send_after(delay, pid, msg)
 }
 
 /// Sets the exit reason for the current process.
