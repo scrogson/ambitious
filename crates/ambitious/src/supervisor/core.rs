@@ -2,7 +2,7 @@
 //!
 //! The supervisor manages child processes according to a supervision strategy.
 
-use super::error::{DeleteError, StartError, TerminateError};
+use super::error::{DeleteError, RestartError, StartError, TerminateError};
 use super::types::{
     ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, ShutdownType, Strategy,
     SupervisorFlags,
@@ -10,9 +10,109 @@ use super::types::{
 use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
 use crate::process::RuntimeHandle;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+// =============================================================================
+// Supervisor Command Protocol
+// =============================================================================
+
+/// Tag used for supervisor command envelopes.
+const SUPERVISOR_COMMAND_TAG: &str = "$supervisor_cmd";
+
+/// Internal command messages sent to a supervisor process.
+///
+/// These commands are used by the public API functions (`terminate_child`,
+/// `delete_child`, `restart_child`) to communicate with the supervisor loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum SupervisorCommand {
+    /// Request to terminate a child process.
+    Terminate {
+        /// The child ID to terminate.
+        id: String,
+        /// PID to send the reply to.
+        reply_to: Pid,
+        /// Reference for matching the reply.
+        reply_ref: Ref,
+    },
+    /// Request to delete a child specification (child must be stopped).
+    Delete {
+        /// The child ID to delete.
+        id: String,
+        /// PID to send the reply to.
+        reply_to: Pid,
+        /// Reference for matching the reply.
+        reply_ref: Ref,
+    },
+    /// Request to restart a stopped child.
+    Restart {
+        /// The child ID to restart.
+        id: String,
+        /// PID to send the reply to.
+        reply_to: Pid,
+        /// Reference for matching the reply.
+        reply_ref: Ref,
+    },
+}
+
+/// Encodes a supervisor command into bytes using a tagged envelope.
+fn encode_supervisor_command(cmd: &SupervisorCommand) -> Vec<u8> {
+    let payload = Term::encode(cmd);
+    let tagged = crate::gen_server::protocol::TaggedEnvelope::new(SUPERVISOR_COMMAND_TAG, payload);
+    tagged.encode()
+}
+
+/// Tries to decode a supervisor command from bytes.
+///
+/// Returns `None` if the bytes are not a valid supervisor command envelope.
+fn decode_supervisor_command(data: &[u8]) -> Option<SupervisorCommand> {
+    let tagged = crate::gen_server::protocol::TaggedEnvelope::decode(data).ok()?;
+    if tagged.tag != SUPERVISOR_COMMAND_TAG {
+        return None;
+    }
+    Term::decode(&tagged.payload).ok()
+}
+
+/// Waits for a reply to a supervisor command.
+///
+/// Listens for a `Reply` protocol message with the matching reference.
+/// Returns the raw payload bytes on success, or `Err(())` on timeout.
+async fn wait_for_supervisor_reply(reference: Ref) -> Result<Vec<u8>, ()> {
+    use crate::gen_server::protocol::Message as ProtocolMessage;
+
+    let timeout = std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline - tokio::time::Instant::now();
+        if remaining.is_zero() {
+            return Err(());
+        }
+
+        let raw_msg = match crate::runtime::recv_timeout(remaining).await {
+            Ok(Some(m)) => m,
+            Ok(None) => return Err(()),
+            Err(()) => return Err(()),
+        };
+
+        if let Ok(ProtocolMessage::Reply {
+            reference: ref r,
+            payload,
+        }) = ProtocolMessage::decode(&raw_msg)
+            && *r == reference
+        {
+            return Ok(payload);
+        }
+
+        tracing::trace!("supervisor: ignoring non-reply message while waiting for command reply");
+    }
+}
+
+// =============================================================================
+// Supervisor State Registry
+// =============================================================================
 
 /// Global registry of supervisor states for querying.
 /// This allows `which_children` and `count_children` to access supervisor state.
@@ -382,6 +482,48 @@ impl SupervisorState {
     fn unregister_from_registry(&self) {
         get_supervisor_registry().remove(&self.self_pid);
     }
+
+    /// Handles a `TerminateChild` command.
+    ///
+    /// Terminates the child if it exists (running or not). Returns an error
+    /// if the child ID is not found.
+    async fn handle_terminate_child_command(&mut self, id: &str) -> Result<(), String> {
+        if !self.children.contains_key(id) {
+            return Err(format!("child '{}' not found", id));
+        }
+        self.terminate_child_by_id(id).await;
+        Ok(())
+    }
+
+    /// Handles a `DeleteChild` command.
+    ///
+    /// Removes the child specification. The child must not be running.
+    fn handle_delete_child_command(&mut self, id: &str) -> Result<(), String> {
+        let child = self
+            .children
+            .get(id)
+            .ok_or_else(|| format!("not_found:{}", id))?;
+        if child.pid.is_some() {
+            return Err(format!("running:{}", id));
+        }
+        self.children.remove(id);
+        self.child_order.retain(|i| i != id);
+        Ok(())
+    }
+
+    /// Handles a `RestartChild` command.
+    ///
+    /// Restarts a stopped child. The child must exist and not be running.
+    async fn handle_restart_child_command(&mut self, id: &str) -> Result<Pid, String> {
+        let child = self
+            .children
+            .get(id)
+            .ok_or_else(|| format!("not_found:{}", id))?;
+        if child.pid.is_some() {
+            return Err(format!("already_running:{}", id));
+        }
+        self.start_child(id).await
+    }
 }
 
 /// The main supervisor process loop.
@@ -436,6 +578,48 @@ async fn supervisor_loop(mut state: SupervisorState) {
             state.terminate_all_children().await;
             state.unregister_from_registry();
             return;
+        }
+
+        // Check for supervisor commands
+        if let Some(cmd) = decode_supervisor_command(&msg) {
+            match cmd {
+                SupervisorCommand::Terminate {
+                    id,
+                    reply_to,
+                    reply_ref,
+                } => {
+                    let result = state.handle_terminate_child_command(&id).await;
+                    state.sync_to_registry();
+                    let reply_bytes = Term::encode(&result);
+                    let reply_msg =
+                        crate::gen_server::protocol::encode_reply(reply_ref, &reply_bytes);
+                    let _ = crate::send_raw(reply_to, reply_msg);
+                }
+                SupervisorCommand::Delete {
+                    id,
+                    reply_to,
+                    reply_ref,
+                } => {
+                    let result = state.handle_delete_child_command(&id);
+                    state.sync_to_registry();
+                    let reply_bytes = Term::encode(&result);
+                    let reply_msg =
+                        crate::gen_server::protocol::encode_reply(reply_ref, &reply_bytes);
+                    let _ = crate::send_raw(reply_to, reply_msg);
+                }
+                SupervisorCommand::Restart {
+                    id,
+                    reply_to,
+                    reply_ref,
+                } => {
+                    let result = state.handle_restart_child_command(&id).await;
+                    state.sync_to_registry();
+                    let reply_bytes = Term::encode(&result);
+                    let reply_msg =
+                        crate::gen_server::protocol::encode_reply(reply_ref, &reply_bytes);
+                    let _ = crate::send_raw(reply_to, reply_msg);
+                }
+            }
         }
     }
 }
@@ -576,42 +760,146 @@ pub async fn count_children(_handle: &RuntimeHandle, sup: Pid) -> Result<ChildCo
     Ok(state.get_child_counts())
 }
 
-/// Terminates a child process.
+/// Terminates a child process managed by the given supervisor.
 ///
-/// Note: This is a simplified implementation.
+/// Sends a `TerminateChild` command to the supervisor and waits for the reply.
+/// The child's process is stopped but its specification remains, allowing it
+/// to be restarted later with [`restart_child`].
+///
+/// # Errors
+///
+/// Returns [`TerminateError::NotFound`] if the child ID does not exist, or
+/// [`TerminateError::Timeout`] if the supervisor does not respond in time.
 pub async fn terminate_child(
     _handle: &RuntimeHandle,
-    _sup: Pid,
-    _id: &str,
+    sup: Pid,
+    id: &str,
 ) -> Result<(), TerminateError> {
-    // This would need a proper call mechanism
-    Err(TerminateError::NotFound("not implemented".to_string()))
+    let reply_ref = Ref::new();
+    let caller_pid = crate::runtime::current_pid();
+
+    let cmd = SupervisorCommand::Terminate {
+        id: id.to_string(),
+        reply_to: caller_pid,
+        reply_ref,
+    };
+
+    crate::send_raw(sup, encode_supervisor_command(&cmd))
+        .map_err(|_| TerminateError::NotFound(id.to_string()))?;
+
+    let reply = wait_for_supervisor_reply(reply_ref)
+        .await
+        .map_err(|_| TerminateError::Timeout)?;
+
+    let result: Result<(), String> =
+        Term::decode(&reply).map_err(|_| TerminateError::NotFound(id.to_string()))?;
+
+    result.map_err(TerminateError::NotFound)
 }
 
-/// Deletes a child specification.
+/// Deletes a child specification from the supervisor.
 ///
-/// Note: This is a simplified implementation.
-pub async fn delete_child(
+/// Sends a `DeleteChild` command to the supervisor and waits for the reply.
+/// The child must already be stopped (via [`terminate_child`]) before it can
+/// be deleted.
+///
+/// # Errors
+///
+/// Returns [`DeleteError::Running`] if the child is still running, or
+/// [`DeleteError::NotFound`] if the child ID does not exist.
+pub async fn delete_child(_handle: &RuntimeHandle, sup: Pid, id: &str) -> Result<(), DeleteError> {
+    let reply_ref = Ref::new();
+    let caller_pid = crate::runtime::current_pid();
+
+    let cmd = SupervisorCommand::Delete {
+        id: id.to_string(),
+        reply_to: caller_pid,
+        reply_ref,
+    };
+
+    crate::send_raw(sup, encode_supervisor_command(&cmd))
+        .map_err(|_| DeleteError::NotFound(id.to_string()))?;
+
+    let reply = wait_for_supervisor_reply(reply_ref)
+        .await
+        .map_err(|_| DeleteError::NotFound(id.to_string()))?;
+
+    let result: Result<(), String> =
+        Term::decode(&reply).map_err(|_| DeleteError::NotFound(id.to_string()))?;
+
+    result.map_err(|e| {
+        if e.starts_with("running:") {
+            DeleteError::Running(e.strip_prefix("running:").unwrap_or(&e).to_string())
+        } else {
+            DeleteError::NotFound(e.strip_prefix("not_found:").unwrap_or(&e).to_string())
+        }
+    })
+}
+
+/// Restarts a stopped child process.
+///
+/// Sends a `RestartChild` command to the supervisor and waits for the reply.
+/// The child must be stopped (via [`terminate_child`] or having exited) before
+/// it can be restarted.
+///
+/// # Errors
+///
+/// Returns [`RestartError::AlreadyRunning`] if the child is still running,
+/// [`RestartError::NotFound`] if the child ID does not exist, or
+/// [`RestartError::StartFailed`] if the child's start function fails.
+pub async fn restart_child(
     _handle: &RuntimeHandle,
-    _sup: Pid,
-    _id: &str,
-) -> Result<(), DeleteError> {
-    // This would need a proper call mechanism
-    Err(DeleteError::NotFound("not implemented".to_string()))
+    sup: Pid,
+    id: &str,
+) -> Result<Pid, RestartError> {
+    let reply_ref = Ref::new();
+    let caller_pid = crate::runtime::current_pid();
+
+    let cmd = SupervisorCommand::Restart {
+        id: id.to_string(),
+        reply_to: caller_pid,
+        reply_ref,
+    };
+
+    crate::send_raw(sup, encode_supervisor_command(&cmd))
+        .map_err(|_| RestartError::NotFound(id.to_string()))?;
+
+    let reply = wait_for_supervisor_reply(reply_ref)
+        .await
+        .map_err(|_| RestartError::StartFailed("timeout waiting for reply".to_string()))?;
+
+    let result: Result<Pid, String> =
+        Term::decode(&reply).map_err(|_| RestartError::StartFailed("decode error".to_string()))?;
+
+    result.map_err(|e| {
+        if e.starts_with("already_running:") {
+            RestartError::AlreadyRunning(
+                e.strip_prefix("already_running:").unwrap_or(&e).to_string(),
+            )
+        } else if e.starts_with("not_found:") {
+            RestartError::NotFound(e.strip_prefix("not_found:").unwrap_or(&e).to_string())
+        } else {
+            RestartError::StartFailed(e)
+        }
+    })
 }
 
 /// Waits for a process to terminate.
 ///
 /// Returns `true` if the process terminated, `false` if the timeout expired.
 /// If `timeout` is `None`, waits indefinitely.
+///
+/// Uses the task-local context's registry to check process liveness, so this
+/// must be called from within a process context.
 async fn wait_for_termination(pid: Pid, timeout: Option<Duration>) -> bool {
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
     let deadline = timeout.map(|t| Instant::now() + t);
 
     loop {
-        // Check if process is dead
-        if !crate::alive(pid) {
+        // Check if process is dead using the task-local context's registry
+        let is_alive = crate::runtime::with_ctx(|ctx| ctx.is_alive(pid));
+        if !is_alive {
             return true;
         }
 
