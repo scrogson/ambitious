@@ -511,8 +511,11 @@ impl GenServer for Presence {
             return self.handle_info(info).await;
         }
 
-        // Also check for raw messages that might be system messages
-        self.handle_raw_message(arg).await
+        Status::Ok
+    }
+
+    async fn handle_raw_info(&mut self, msg: Vec<u8>) -> Status {
+        self.handle_raw_message(msg).await
     }
 
     async fn terminate(&mut self, _reason: ExitReason) {
@@ -1032,14 +1035,13 @@ async fn broadcast_delta(pubsub: &str, presence_name: &str, topic: &str, diff: P
 
     // Broadcast to all subscribers of the presence topic (channels)
     let presence_topic = format!("presence:{}", topic);
-    tracing::info!(
-        topic = %topic,
-        presence_topic = %presence_topic,
-        joins = diff.joins.len(),
-        leaves = diff.leaves.len(),
-        "Broadcasting presence delta to subscribers"
-    );
-    let _ = PubSub::broadcast(pubsub, &presence_topic, &msg).await;
+    if let Err(e) = PubSub::broadcast(pubsub, &presence_topic, &msg).await {
+        tracing::error!(
+            presence_topic = %presence_topic,
+            error = %e,
+            "PubSub broadcast FAILED"
+        );
+    }
 
     // Note: We also send CRDT delta separately via broadcast_crdt_delta
     // The legacy format is for channel subscribers, CRDT format is for Presence servers

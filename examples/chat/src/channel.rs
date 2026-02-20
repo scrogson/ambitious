@@ -455,17 +455,16 @@ impl Channel for RoomChannel {
                     // Process joins - notify client of new users
                     for state in diff.joins.values() {
                         for meta in &state.metas {
-                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
-                                // Don't notify about ourselves
-                                if meta.pid != socket.pid {
-                                    push_json(
-                                        socket,
-                                        "user_joined",
-                                        &RoomOutEvent::UserJoined {
-                                            nick: user_meta.nick,
-                                        },
-                                    );
-                                }
+                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>()
+                                && meta.pid != socket.pid
+                            {
+                                push_json(
+                                    socket,
+                                    "user_joined",
+                                    &RoomOutEvent::UserJoined {
+                                        nick: user_meta.nick,
+                                    },
+                                );
                             }
                         }
                     }
@@ -473,17 +472,16 @@ impl Channel for RoomChannel {
                     // Process leaves - notify client of users leaving
                     for state in diff.leaves.values() {
                         for meta in &state.metas {
-                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>() {
-                                // Don't notify about ourselves
-                                if meta.pid != socket.pid {
-                                    push_json(
-                                        socket,
-                                        "user_left",
-                                        &RoomOutEvent::UserLeft {
-                                            nick: user_meta.nick,
-                                        },
-                                    );
-                                }
+                            if let Some(user_meta) = meta.decode::<UserPresenceMeta>()
+                                && meta.pid != socket.pid
+                            {
+                                push_json(
+                                    socket,
+                                    "user_left",
+                                    &RoomOutEvent::UserLeft {
+                                        nick: user_meta.nick.clone(),
+                                    },
+                                );
                             }
                         }
                     }

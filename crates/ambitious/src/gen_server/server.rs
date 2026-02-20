@@ -248,7 +248,13 @@ async fn gen_server_loop<G: GenServer>(mut server: G) {
                 }
             }
             Err(_) => {
-                tracing::trace!("Ignoring unknown message");
+                // Info type couldn't decode this message. Give the GenServer
+                // a chance to handle raw bytes (e.g., NodeDown from distribution).
+                let status = server.handle_raw_info(raw_msg).await;
+                if let Some(reason) = handle_status(status) {
+                    server.terminate(reason).await;
+                    return;
+                }
             }
         }
     }

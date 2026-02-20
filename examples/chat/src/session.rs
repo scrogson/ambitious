@@ -15,6 +15,7 @@ use ambitious::channel::{ChannelReply, ChannelServer, ChannelServerBuilder};
 use ambitious::gen_server::cast;
 use ambitious::{Pid, Term};
 use async_trait::async_trait;
+use serde::Deserialize;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -271,66 +272,67 @@ impl Session {
         // These are forwarded directly to the client WITHOUT going through handle_info
         if let Some(ChannelReply::Push {
             topic,
-            event: _,
+            event,
             payload,
         }) = raw.decode::<ChannelReply>()
         {
-            // Decode the room event and forward to client
-            // Try JSON first (from WebSocket clients), then fallback to postcard (from TUI)
-            let room_event: Option<RoomOutEvent> = serde_json::from_slice(&payload)
-                .ok()
-                .or_else(|| RawTerm::from(payload).decode::<RoomOutEvent>());
-            if let Some(room_event) = room_event {
-                let room_name = topic.strip_prefix("room:").unwrap_or(&topic);
-                let event = match room_event {
-                    RoomOutEvent::UserJoined { nick } => {
+            let room_name = topic.strip_prefix("room:").unwrap_or(&topic);
+
+            // Dispatch based on event name (Phoenix style) rather than trying to
+            // infer the variant from payload shape. RoomOutEvent uses #[serde(untagged)]
+            // which makes UserJoined and UserLeft indistinguishable since both have
+            // the same {nick} shape - serde always picks the first matching variant.
+            let server_event: Option<ServerEvent> = match event.as_str() {
+                "user_joined" | "presence_sync_response" => {
+                    Self::decode_nick_event(&payload).map(|nick| {
                         tracing::debug!(
                             room = %room_name,
                             joined_nick = %nick,
                             my_nick = ?self.nick,
                             "Received UserJoined broadcast, sending to client"
                         );
-                        Some(ServerEvent::UserJoined {
+                        ServerEvent::UserJoined {
                             room: room_name.to_string(),
                             nick,
-                        })
-                    }
-                    RoomOutEvent::UserLeft { nick } => Some(ServerEvent::UserLeft {
+                        }
+                    })
+                }
+                "user_left" => Self::decode_nick_event(&payload).map(|nick| {
+                    tracing::debug!(
+                        room = %room_name,
+                        leaving_nick = %nick,
+                        my_nick = ?self.nick,
+                        "Session forwarding UserLeft to client"
+                    );
+                    ServerEvent::UserLeft {
                         room: room_name.to_string(),
                         nick,
-                    }),
+                    }
+                }),
+                "new_msg" => Self::decode_room_event(&payload).and_then(|re| match re {
                     RoomOutEvent::Message { from, text } => Some(ServerEvent::Message {
                         room: room_name.to_string(),
                         from,
                         text,
                     }),
+                    _ => None,
+                }),
+                "presence_state" => Self::decode_room_event(&payload).and_then(|re| match re {
                     RoomOutEvent::PresenceState { users } => {
                         tracing::debug!(
                             room = %room_name,
                             users = ?users,
                             nick = ?self.nick,
-                            "Received PresenceState broadcast, sending UserList to client"
+                            "Received PresenceState, sending UserList to client"
                         );
                         Some(ServerEvent::UserList {
                             room: room_name.to_string(),
                             users,
                         })
                     }
-                    RoomOutEvent::PresenceSyncRequest { .. } => {
-                        // These should go through handle_info, not be broadcast
-                        None
-                    }
-                    RoomOutEvent::PresenceSyncResponse { nick } => {
-                        tracing::debug!(
-                            room = %room_name,
-                            nick = %nick,
-                            "Received presence sync response, sending UserJoined to client"
-                        );
-                        Some(ServerEvent::UserJoined {
-                            room: room_name.to_string(),
-                            nick,
-                        })
-                    }
+                    _ => None,
+                }),
+                "history" => Self::decode_room_event(&payload).and_then(|re| match re {
                     RoomOutEvent::History { messages } => {
                         tracing::debug!(
                             nick = ?self.nick,
@@ -343,16 +345,26 @@ impl Session {
                             messages,
                         })
                     }
-                };
-
-                if let Some(event) = event {
-                    let _ = self.transport.send_event(&event).await;
+                    _ => None,
+                }),
+                _ => {
+                    tracing::debug!(event = %event, room = %room_name, "Unknown channel event");
+                    None
                 }
+            };
+
+            if let Some(evt) = server_event {
+                let _ = self.transport.send_event(&evt).await;
             }
             return; // Message handled as broadcast, don't dispatch to handle_info
         }
 
         // Not a ChannelReply::Push - dispatch to channel handle_info for internal messages
+        tracing::debug!(
+            nick = ?self.nick,
+            data_len = data.len(),
+            "Session dispatching non-ChannelReply message to handle_info_any"
+        );
         let info_results = self.channels.handle_info_any(data.to_vec().into()).await;
         for (topic, result) in info_results {
             match result {
@@ -628,6 +640,27 @@ impl Session {
                 users,
             })
             .await;
+    }
+
+    /// Decode a nick from a channel event payload (JSON or postcard).
+    /// Used for events like user_joined and user_left that carry `{nick}`.
+    fn decode_nick_event(payload: &[u8]) -> Option<String> {
+        #[derive(Deserialize)]
+        struct NickPayload {
+            nick: String,
+        }
+        serde_json::from_slice::<NickPayload>(payload)
+            .ok()
+            .or_else(|| postcard::from_bytes::<NickPayload>(payload).ok())
+            .map(|p| p.nick)
+    }
+
+    /// Decode a RoomOutEvent from payload bytes (JSON or postcard).
+    fn decode_room_event(payload: &[u8]) -> Option<RoomOutEvent> {
+        use ambitious::RawTerm;
+        serde_json::from_slice::<RoomOutEvent>(payload)
+            .ok()
+            .or_else(|| RawTerm::from(payload.to_vec()).decode::<RoomOutEvent>())
     }
 
     /// Cleanup when disconnecting.

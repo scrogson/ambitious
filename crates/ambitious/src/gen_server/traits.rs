@@ -156,4 +156,17 @@ pub trait GenServer: Sized + Send + 'static {
     async fn handle_continue(&mut self, _arg: Vec<u8>) -> Status {
         Status::Ok
     }
+
+    /// Handle a raw message that couldn't be decoded as the `Info` type.
+    ///
+    /// In Erlang/OTP, `handle_info/2` receives any message. In Rust, the
+    /// typed `handle_info` requires messages to decode as `Self::Info`.
+    /// This method is the fallback for messages that don't match — such as
+    /// `NodeDown` from the distribution monitor or other system messages
+    /// sent as raw bytes.
+    ///
+    /// The default implementation ignores the message.
+    async fn handle_raw_info(&mut self, _msg: Vec<u8>) -> Status {
+        Status::Ok
+    }
 }

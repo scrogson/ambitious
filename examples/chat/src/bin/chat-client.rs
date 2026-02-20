@@ -731,7 +731,9 @@ async fn handle_server_event(
             app.set_status(format!("Nick error: {}", reason));
         }
         ServerEvent::Joined { room } => {
-            app.room_states.entry(room.clone()).or_default();
+            // Clear existing room state on (re)join so history and user list
+            // are rebuilt fresh from the server, avoiding duplicates.
+            app.room_states.insert(room.clone(), RoomState::default());
             app.select_room(&room);
             // Request user list
             let frame = frame_message(&ClientCommand::ListUsers(room));
