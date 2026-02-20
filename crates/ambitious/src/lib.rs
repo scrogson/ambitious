@@ -183,12 +183,12 @@ pub use process::global::{
 
 // Re-export task-local functions for process operations without ctx
 pub use runtime::{
-    current_pid, recv, recv_timeout, send, send_raw, try_current_pid, try_recv, with_ctx,
-    with_ctx_async,
+    current_pid, demonitor, exit, flag, link, monitor, recv, recv_timeout, send, send_after,
+    send_raw, try_current_pid, try_recv, unlink, with_ctx, with_ctx_async,
 };
 
 // Re-export core types
-pub use core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, RawTerm, Ref, Term};
+pub use core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, ProcessFlag, RawTerm, Ref, Term};
 
 // Re-export runtime and process types
 pub use process::{Runtime, RuntimeHandle};
@@ -205,7 +205,9 @@ pub use ambitious_macros::{ChannelEvent, Message, main, self_pid, test};
 /// ```
 pub mod prelude {
     // Core types
-    pub use crate::core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, RawTerm, Ref, Term};
+    pub use crate::core::{
+        ExitReason, NodeId, NodeInfo, NodeName, Pid, ProcessFlag, RawTerm, Ref, Term,
+    };
 
     // Runtime and process
     pub use crate::process::{Runtime, RuntimeHandle};
@@ -229,8 +231,8 @@ pub mod prelude {
 
     // Task-local functions for process operations without ctx
     pub use crate::runtime::{
-        current_pid, recv, recv_timeout, send, send_raw, try_current_pid, try_recv, with_ctx,
-        with_ctx_async,
+        current_pid, demonitor, exit, flag, link, monitor, recv, recv_timeout, send, send_after,
+        send_raw, try_current_pid, try_recv, unlink, with_ctx, with_ctx_async,
     };
 
     // Node API essentials
@@ -416,5 +418,65 @@ mod tests {
 
         controller.stop("test_app").await.unwrap();
         assert!(!controller.is_running("test_app"));
+    }
+
+    #[tokio::test]
+    async fn test_process_api_convenience_functions() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let runtime = Runtime::new();
+        let handle = runtime.handle();
+
+        let link_ok = Arc::new(AtomicBool::new(false));
+        let monitor_ok = Arc::new(AtomicBool::new(false));
+        let flag_ok = Arc::new(AtomicBool::new(false));
+
+        let link_ok_c = link_ok.clone();
+        let monitor_ok_c = monitor_ok.clone();
+        let flag_ok_c = flag_ok.clone();
+
+        // Spawn a target process that stays alive
+        let target_pid = handle.spawn(|| async {
+            loop {
+                if crate::recv_timeout(std::time::Duration::from_secs(10))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Give target time to start
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        handle.spawn(move || async move {
+            // Test link/unlink
+            assert!(crate::link(target_pid).is_ok());
+            crate::unlink(target_pid);
+            link_ok_c.store(true, Ordering::SeqCst);
+
+            // Test monitor/demonitor
+            let mon_ref = crate::monitor(target_pid).unwrap();
+            crate::demonitor(mon_ref);
+            monitor_ok_c.store(true, Ordering::SeqCst);
+
+            // Test flag
+            let prev = crate::flag(ProcessFlag::TrapExit, true);
+            assert!(!prev); // Was false before
+            let prev2 = crate::flag(ProcessFlag::TrapExit, false);
+            assert!(prev2); // Was true
+            flag_ok_c.store(true, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(link_ok.load(Ordering::SeqCst), "link/unlink should work");
+        assert!(
+            monitor_ok.load(Ordering::SeqCst),
+            "monitor/demonitor should work"
+        );
+        assert!(flag_ok.load(Ordering::SeqCst), "flag should work");
     }
 }

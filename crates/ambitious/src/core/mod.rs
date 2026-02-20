@@ -20,6 +20,7 @@ mod exit_reason;
 mod message;
 pub mod node;
 mod pid;
+mod process_flag;
 mod reference;
 mod system_message;
 
@@ -32,5 +33,6 @@ pub use exit_reason::ExitReason;
 pub use message::{DecodeError, Message, RawTerm, Term};
 pub use node::{NodeId, NodeInfo, NodeName};
 pub use pid::{Pid, current_creation, increment_creation};
+pub use process_flag::ProcessFlag;
 pub use reference::Ref;
 pub use system_message::SystemMessage;
