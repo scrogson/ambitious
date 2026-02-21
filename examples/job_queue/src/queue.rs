@@ -144,14 +144,24 @@ impl GenServer for JobQueue {
         if let Ok(ambitious::core::SystemMessage::Down { pid, reason, .. }) =
             postcard::from_bytes::<ambitious::core::SystemMessage>(&msg)
         {
+            // Check if this worker is still tracked. If it was intentionally
+            // removed (via RemoveWorker), it's already gone from all_workers
+            // and we should NOT spawn a replacement.
+            let was_tracked = self.all_workers.contains(&pid);
+            if !was_tracked {
+                return Status::Ok;
+            }
+
             tracing::warn!(worker = ?pid, reason = ?reason, "Worker process died");
-            // Recover the in-flight job
+            self.all_workers.retain(|w| *w != pid);
+            self.idle_workers.retain(|w| *w != pid);
+
+            // Recover the in-flight job if the worker was processing one
             if let Some(job) = self.in_flight.remove(&pid) {
-                self.all_workers.retain(|w| *w != pid);
-                // Treat crash as a failure - send to retry
                 self.send_to_retry(job);
             }
-            // Spawn a replacement worker
+
+            // Spawn a replacement worker for the crashed one
             self.spawn_worker().await;
         }
         Status::Ok
