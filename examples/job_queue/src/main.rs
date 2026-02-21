@@ -16,7 +16,11 @@ mod dead_letter;
 #[allow(dead_code)]
 mod job;
 #[allow(dead_code)]
+mod queue;
+#[allow(dead_code)]
 mod stats;
+#[allow(dead_code)]
+mod worker;
 
 #[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
