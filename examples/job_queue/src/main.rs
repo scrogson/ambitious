@@ -13,6 +13,8 @@
 
 #[allow(dead_code)]
 mod job;
+#[allow(dead_code)]
+mod stats;
 
 #[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
