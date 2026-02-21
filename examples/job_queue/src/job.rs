@@ -26,6 +26,7 @@ impl JobType {
         }
     }
 
+    #[allow(dead_code)] // Used by TUI in later task
     pub fn label(&self) -> &'static str {
         match self {
             JobType::Resize => "resize",

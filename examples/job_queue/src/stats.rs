@@ -62,6 +62,7 @@ pub struct StatsSnapshot {
 
 /// Recent activity entry for the TUI log.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used by TUI in later task
 pub struct ActivityEntry {
     pub timestamp: Instant,
     pub message: String,

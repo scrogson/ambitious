@@ -11,16 +11,26 @@
 
 #![deny(warnings)]
 
-#[allow(dead_code)]
 mod dead_letter;
-#[allow(dead_code)]
 mod job;
-#[allow(dead_code)]
 mod queue;
-#[allow(dead_code)]
 mod stats;
-#[allow(dead_code)]
 mod worker;
+
+use clap::Parser;
+use job::{Job, random_filename, random_job_type};
+use queue::{QueueArgs, QueueCast};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Parser)]
+#[command(name = "job-queue", about = "Ambitious Job Queue Example")]
+struct Cli {
+    /// Number of initial workers
+    #[arg(long, default_value = "4")]
+    workers: u32,
+}
 
 #[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,9 +40,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    tracing::info!("Job Queue starting");
+    let cli = Cli::parse();
+    tracing::info!(workers = cli.workers, "Starting Job Queue");
 
-    // Placeholder - will be replaced with full app in later tasks
+    // Start StatsCollector
+    let _stats_pid = ambitious::gen_server::start::<stats::StatsCollector>(())
+        .await
+        .expect("failed to start StatsCollector");
+
+    // Start DeadLetterStore
+    let _dl_pid = ambitious::gen_server::start::<dead_letter::DeadLetterStore>(())
+        .await
+        .expect("failed to start DeadLetterStore");
+
+    // Start worker DynamicSupervisor
+    let worker_sup = ambitious::supervisor::dynamic_supervisor::start_link(
+        ambitious::supervisor::dynamic_supervisor::DynamicSupervisorOpts::new()
+            .max_restarts(10)
+            .max_seconds(5),
+    )
+    .await
+    .expect("failed to start worker supervisor");
+
+    // Start JobQueue
+    let queue_pid = ambitious::gen_server::start::<queue::JobQueue>(QueueArgs {
+        worker_sup,
+        initial_workers: cli.workers,
+    })
+    .await
+    .expect("failed to start JobQueue");
+
+    tracing::info!("Job Queue ready. Enqueuing sample jobs...");
+
+    // Auto-enqueue jobs periodically for demo
+    let _producer = ambitious::spawn(move || async move {
+        loop {
+            let batch: Vec<Job> = (0..5)
+                .map(|_| {
+                    let id = JOB_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    Job::new(id, random_job_type(), random_filename())
+                })
+                .collect();
+            ambitious::gen_server::cast::<queue::JobQueue>(
+                queue_pid,
+                QueueCast::EnqueueBatch(batch),
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+
+    // Wait for Ctrl-C (TUI will replace this in Task 7)
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down");
     Ok(())
