@@ -36,6 +36,10 @@ struct Cli {
 
 #[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Suppress default panic output to prevent stderr from corrupting the TUI.
+    // Worker panics (simulated crashes) are already handled by process monitors.
+    std::panic::set_hook(Box::new(|_| {}));
+
     let cli = Cli::parse();
 
     // Start StatsCollector
