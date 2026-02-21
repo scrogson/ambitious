@@ -8,6 +8,7 @@
 //! - Process monitors for crash recovery
 //! - Graceful shutdown
 //! - Timer-based stats collection
+//! - Live TUI dashboard
 
 #![deny(warnings)]
 
@@ -15,6 +16,7 @@ mod dead_letter;
 mod job;
 mod queue;
 mod stats;
+mod ui;
 mod worker;
 
 use clap::Parser;
@@ -22,7 +24,7 @@ use job::{Job, random_filename, random_job_type};
 use queue::{QueueArgs, QueueCast};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub static JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Parser)]
 #[command(name = "job-queue", about = "Ambitious Job Queue Example")]
@@ -89,8 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Wait for Ctrl-C (TUI will replace this in Task 7)
-    tokio::signal::ctrl_c().await?;
+    // Run the TUI dashboard in a process context (gen_server::call needs current_pid)
+    let (tui_done_tx, tui_done_rx) = tokio::sync::oneshot::channel::<()>();
+    ambitious::spawn(move || async move {
+        if let Err(e) = ui::run_tui(&JOB_ID_COUNTER).await {
+            tracing::error!(error = %e, "TUI error");
+        }
+        let _ = tui_done_tx.send(());
+    });
+
+    // Wait for the TUI process to exit
+    let _ = tui_done_rx.await;
     tracing::info!("Shutting down");
     Ok(())
 }

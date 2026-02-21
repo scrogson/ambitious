@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 pub enum StatsCall {
     /// Get current stats snapshot.
     GetSnapshot,
+    /// Get recent activity entries (last N).
+    GetActivity(usize),
 }
 
 /// Cast messages for StatsCollector.
@@ -44,6 +46,7 @@ pub enum StatsInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub enum StatsReply {
     Snapshot(StatsSnapshot),
+    Activity(Vec<String>),
 }
 
 /// A point-in-time stats snapshot for the TUI.
@@ -62,8 +65,8 @@ pub struct StatsSnapshot {
 
 /// Recent activity entry for the TUI log.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used by TUI in later task
 pub struct ActivityEntry {
+    #[allow(dead_code)]
     pub timestamp: Instant,
     pub message: String,
 }
@@ -115,6 +118,16 @@ impl GenServer for StatsCollector {
     async fn handle_call(&mut self, msg: StatsCall, _from: From) -> Reply<StatsReply> {
         match msg {
             StatsCall::GetSnapshot => Reply::Ok(StatsReply::Snapshot(self.snapshot.clone())),
+            StatsCall::GetActivity(n) => {
+                let entries: Vec<String> = self
+                    .activity
+                    .iter()
+                    .rev()
+                    .take(n)
+                    .map(|e| e.message.clone())
+                    .collect();
+                Reply::Ok(StatsReply::Activity(entries))
+            }
         }
     }
 
