@@ -12,6 +12,8 @@
 #![deny(warnings)]
 
 #[allow(dead_code)]
+mod dead_letter;
+#[allow(dead_code)]
 mod job;
 #[allow(dead_code)]
 mod stats;
