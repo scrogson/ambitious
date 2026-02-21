@@ -56,7 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("failed to start DeadLetterStore");
 
     // Start worker DynamicSupervisor
-    let worker_sup = ambitious::supervisor::dynamic_supervisor::start_link(
+    // Use start (not start_link) because main is not a process context
+    let worker_sup = ambitious::supervisor::dynamic_supervisor::start(
         ambitious::supervisor::dynamic_supervisor::DynamicSupervisorOpts::new()
             .max_restarts(10)
             .max_seconds(5),
