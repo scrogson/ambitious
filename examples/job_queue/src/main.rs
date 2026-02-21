@@ -36,14 +36,7 @@ struct Cli {
 
 #[ambitious::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
-    tracing::info!(workers = cli.workers, "Starting Job Queue");
 
     // Start StatsCollector
     let _stats_pid = ambitious::gen_server::start::<stats::StatsCollector>(())
@@ -73,8 +66,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .expect("failed to start JobQueue");
 
-    tracing::info!("Job Queue ready. Enqueuing sample jobs...");
-
     // Auto-enqueue jobs periodically for demo
     let _producer = ambitious::spawn(move || async move {
         loop {
@@ -103,6 +94,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for the TUI process to exit
     let _ = tui_done_rx.await;
-    tracing::info!("Shutting down");
     Ok(())
 }
