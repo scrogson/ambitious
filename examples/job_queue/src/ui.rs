@@ -8,7 +8,7 @@ use crate::job::{Job, random_filename, random_job_type};
 use crate::queue::{JobQueue, QueueCall, QueueCast, QueueReply, QueueStatus};
 use crate::stats::{StatsCall, StatsCollector, StatsReply, StatsSnapshot};
 use crossterm::{
-    event::{Event, KeyCode},
+    event::{Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -81,12 +81,13 @@ async fn run_event_loop(
             event = event_stream.next() => {
                 match event {
                     Some(Ok(Event::Key(key))) => {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('+') => enqueue_batch(job_id_counter),
-                            KeyCode::Char('=') => add_worker(),
-                            KeyCode::Char('-') => remove_worker(),
-                            _ => {}
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                            (KeyCode::Char('+'), _) => enqueue_batch(job_id_counter),
+                            (KeyCode::Char('='), _) => add_worker(),
+                            (KeyCode::Char('-'), _) => remove_worker(),
+                            (_, _) => {}
                         }
                     }
                     Some(Err(_)) => break,

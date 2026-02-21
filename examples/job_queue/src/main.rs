@@ -92,7 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tui_done_tx.send(());
     });
 
-    // Wait for the TUI process to exit
+    // Wait for the TUI process to exit, then force process termination.
+    // The ambitious runtime keeps spawned processes alive, so we exit explicitly.
     let _ = tui_done_rx.await;
-    Ok(())
+    std::process::exit(0);
 }
