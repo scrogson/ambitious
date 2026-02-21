@@ -66,8 +66,6 @@ pub struct StatsSnapshot {
 /// Recent activity entry for the TUI log.
 #[derive(Debug, Clone)]
 pub struct ActivityEntry {
-    #[allow(dead_code)]
-    pub timestamp: Instant,
     pub message: String,
 }
 
@@ -178,10 +176,7 @@ impl GenServer for StatsCollector {
 
 impl StatsCollector {
     fn push_activity(&mut self, message: String) {
-        self.activity.push_back(ActivityEntry {
-            timestamp: Instant::now(),
-            message,
-        });
+        self.activity.push_back(ActivityEntry { message });
         // Keep last 100 entries
         while self.activity.len() > 100 {
             self.activity.pop_front();

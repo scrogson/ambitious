@@ -249,8 +249,11 @@ impl JobQueue {
                 attempt: job.retry_count,
             });
             let delay = Duration::from_secs(1 << (job.retry_count - 1));
-            if let Some(queue_pid) = ambitious::whereis("job_queue") {
-                let _ = ambitious::timer::send_after(delay, queue_pid, &QueueCast::Enqueue(job));
+            if let Some(queue_pid) = ambitious::whereis("job_queue")
+                && let Err(e) =
+                    ambitious::timer::send_after(delay, queue_pid, &QueueCast::Enqueue(job))
+            {
+                tracing::error!(error = %e, "Failed to schedule retry timer");
             }
         }
     }

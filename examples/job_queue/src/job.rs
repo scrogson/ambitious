@@ -25,16 +25,6 @@ impl JobType {
             JobType::Compress => Duration::from_millis(600),
         }
     }
-
-    #[allow(dead_code)]
-    pub fn label(&self) -> &'static str {
-        match self {
-            JobType::Resize => "resize",
-            JobType::Thumbnail => "thumbnail",
-            JobType::Watermark => "watermark",
-            JobType::Compress => "compress",
-        }
-    }
 }
 
 /// A job to be processed.
