@@ -190,6 +190,9 @@ pub use runtime::{
 // Re-export core types
 pub use core::{ExitReason, NodeId, NodeInfo, NodeName, Pid, ProcessFlag, RawTerm, Ref, Term};
 
+// Re-export naming/registry types for convenience
+pub use gen_server::via::{Name, ViaRegistry};
+
 // Re-export runtime and process types
 pub use process::{Runtime, RuntimeHandle};
 pub use runtime::Context;
@@ -215,8 +218,8 @@ pub mod prelude {
 
     // GenServer essentials (enum-based pattern)
     pub use crate::gen_server::{
-        Error, From, GenServer, Init, Reply, ServerRef, Status, call, cast, reply, start,
-        start_link, stop,
+        Error, From, GenServer, Init, Name, Reply, ServerRef, StartOpts, Status, ViaRegistry, call,
+        cast, reply, start, start_link, stop,
     };
 
     // Supervisor essentials

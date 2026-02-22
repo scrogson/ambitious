@@ -307,6 +307,61 @@ where
             })
         })
     }
+
+    /// Create a bound `ViaRegistry` reference for the given key and value.
+    ///
+    /// This returns an `Arc<dyn ViaRegistry>` that captures both this registry
+    /// and the specific key/value, suitable for use with `Name::via()`.
+    ///
+    /// Only works with unique registries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let registry = Registry::new_unique("services");
+    /// let name = Name::via(registry.via("my_service", ()));
+    /// ```
+    pub fn via(self: &Arc<Self>, key: K, value: V) -> Arc<dyn crate::gen_server::via::ViaRegistry> {
+        Arc::new(RegistryVia {
+            registry: Arc::clone(self),
+            key,
+            value,
+        })
+    }
+}
+
+/// A bound ViaRegistry implementation backed by a `Registry<K, V>`.
+struct RegistryVia<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    registry: Arc<Registry<K, V>>,
+    key: K,
+    value: V,
+}
+
+impl<K, V> crate::gen_server::via::ViaRegistry for RegistryVia<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn register_name(&self, pid: Pid) -> Result<(), crate::gen_server::via::AlreadyRegistered> {
+        self.registry
+            .register(self.key.clone(), pid, self.value.clone())
+            .map_err(|_| crate::gen_server::via::AlreadyRegistered)
+    }
+
+    fn unregister_name(&self) {
+        // Look up the pid and unregister it
+        if let Some((pid, _)) = self.registry.lookup_one(&self.key) {
+            self.registry.unregister(&self.key, pid);
+        }
+    }
+
+    fn whereis_name(&self) -> Option<Pid> {
+        self.registry.lookup_one(&self.key).map(|(pid, _)| pid)
+    }
 }
 
 /// Errors that can occur during registry operations.

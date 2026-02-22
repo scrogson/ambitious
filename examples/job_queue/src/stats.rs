@@ -95,7 +95,6 @@ impl GenServer for StatsCollector {
 
     async fn init(_args: ()) -> Init<Self> {
         let me = ambitious::current_pid();
-        let _ = ambitious::register("stats".to_string(), me);
 
         // Tick every 500ms to update rolling stats
         let _ = ambitious::timer::send_interval(Duration::from_millis(500), me, &StatsInfo::Tick);

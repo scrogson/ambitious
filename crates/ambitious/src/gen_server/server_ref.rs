@@ -1,11 +1,15 @@
 //! ServerRef - unified way to address a GenServer.
 
 use crate::core::Pid;
+use std::sync::Arc;
 
-/// A reference to a GenServer, either by PID or registered name.
+use super::via::ViaRegistry;
+
+/// A reference to a GenServer, either by PID, registered name, or via a
+/// pluggable registry.
 ///
 /// This allows GenServer client functions (`call`, `cast`, `stop`) to
-/// accept either a `Pid` or a name string.
+/// accept either a `Pid`, a name string, or a `Via` registry reference.
 ///
 /// # Examples
 ///
@@ -18,12 +22,13 @@ use crate::core::Pid;
 /// // By registered name
 /// let reply = call::<MyServer, _>("my_server", msg, timeout).await?;
 /// ```
-#[derive(Debug, Clone)]
 pub enum ServerRef {
     /// Reference by process ID.
     Pid(Pid),
     /// Reference by registered name.
     Name(String),
+    /// Reference via a pluggable registry.
+    Via(Arc<dyn ViaRegistry>),
 }
 
 impl ServerRef {
@@ -34,6 +39,27 @@ impl ServerRef {
         match self {
             ServerRef::Pid(pid) => Some(*pid),
             ServerRef::Name(name) => crate::whereis(name),
+            ServerRef::Via(via) => via.whereis_name(),
+        }
+    }
+}
+
+impl Clone for ServerRef {
+    fn clone(&self) -> Self {
+        match self {
+            ServerRef::Pid(pid) => ServerRef::Pid(*pid),
+            ServerRef::Name(name) => ServerRef::Name(name.clone()),
+            ServerRef::Via(via) => ServerRef::Via(Arc::clone(via)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ServerRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerRef::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
+            ServerRef::Name(name) => f.debug_tuple("Name").field(name).finish(),
+            ServerRef::Via(_) => f.debug_tuple("Via").field(&"...").finish(),
         }
     }
 }
@@ -56,11 +82,18 @@ impl From<String> for ServerRef {
     }
 }
 
+impl From<Arc<dyn ViaRegistry>> for ServerRef {
+    fn from(via: Arc<dyn ViaRegistry>) -> Self {
+        ServerRef::Via(via)
+    }
+}
+
 impl std::fmt::Display for ServerRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerRef::Pid(pid) => write!(f, "{:?}", pid),
             ServerRef::Name(name) => write!(f, "{}", name),
+            ServerRef::Via(_) => write!(f, "<via>"),
         }
     }
 }

@@ -20,11 +20,12 @@ mod stats;
 mod ui;
 mod worker;
 
+use ambitious::gen_server::StartOpts;
 use ambitious::supervisor::dynamic_supervisor::{self, DynamicSupervisorOpts};
 use ambitious::supervisor::{
     ChildSpec, RestartType, StartChildError, Strategy, Supervisor, SupervisorFlags, SupervisorInit,
 };
-use ambitious::{gen_server, spawn};
+use ambitious::{Name, gen_server, spawn};
 use clap::Parser;
 use job::{Job, random_filename, random_job_type};
 use queue::{QueueArgs, QueueCast};
@@ -60,14 +61,20 @@ impl Supervisor for AppSupervisor {
             vec![
                 // 1. StatsCollector
                 ChildSpec::new("stats_collector", || async {
-                    gen_server::start_link::<stats::StatsCollector>(())
+                    StartOpts::new(())
+                        .name(Name::local("stats"))
+                        .link()
+                        .start::<stats::StatsCollector>()
                         .await
                         .map_err(|e| StartChildError::Failed(e.to_string()))
                 })
                 .restart(RestartType::Permanent),
                 // 2. DeadLetterStore
                 ChildSpec::new("dead_letter", || async {
-                    gen_server::start_link::<dead_letter::DeadLetterStore>(())
+                    StartOpts::new(())
+                        .name(Name::local("dead_letter"))
+                        .link()
+                        .start::<dead_letter::DeadLetterStore>()
                         .await
                         .map_err(|e| StartChildError::Failed(e.to_string()))
                 })
@@ -75,11 +82,13 @@ impl Supervisor for AppSupervisor {
                 // 3. Worker DynamicSupervisor (registered as "worker_sup")
                 ChildSpec::new("worker_sup", || async {
                     let pid = dynamic_supervisor::start_link(
-                        DynamicSupervisorOpts::new().max_restarts(10).max_seconds(5),
+                        DynamicSupervisorOpts::new()
+                            .max_restarts(10)
+                            .max_seconds(5)
+                            .name(ambitious::Name::local("worker_sup")),
                     )
                     .await
                     .map_err(|e| StartChildError::Failed(e.to_string()))?;
-                    ambitious::register("worker_sup".to_string(), pid);
                     Ok(pid)
                 })
                 .restart(RestartType::Permanent)
@@ -88,9 +97,12 @@ impl Supervisor for AppSupervisor {
                 {
                     let workers = initial_workers;
                     ChildSpec::new("job_queue", move || async move {
-                        gen_server::start_link::<queue::JobQueue>(QueueArgs {
+                        StartOpts::new(QueueArgs {
                             initial_workers: workers,
                         })
+                        .name(Name::local("job_queue"))
+                        .link()
+                        .start::<queue::JobQueue>()
                         .await
                         .map_err(|e| StartChildError::Failed(e.to_string()))
                     })

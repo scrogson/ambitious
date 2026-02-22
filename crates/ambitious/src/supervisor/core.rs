@@ -8,6 +8,7 @@ use super::types::{
     SupervisorFlags,
 };
 use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
+use crate::gen_server::via::{Name, register_name, unregister_name};
 use crate::process::RuntimeHandle;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -249,6 +250,8 @@ struct SupervisorState {
     pid_to_id: HashMap<Pid, String>,
     /// Restart history for rate limiting.
     restart_times: Vec<Instant>,
+    /// Optional registered name for this supervisor.
+    name: Option<Name>,
 }
 
 impl SupervisorState {
@@ -483,6 +486,13 @@ impl SupervisorState {
         get_supervisor_registry().remove(&self.self_pid);
     }
 
+    /// Unregisters the supervisor's name if one was set.
+    fn unregister_name(&self) {
+        if let Some(ref name) = self.name {
+            unregister_name(name);
+        }
+    }
+
     /// Handles a `TerminateChild` command.
     ///
     /// Terminates the child if it exists (running or not). Returns an error
@@ -533,6 +543,17 @@ async fn supervisor_loop(mut state: SupervisorState) {
         // Failed to start children - supervisor terminates with error
         // Set exit reason for failure escalation
         crate::runtime::set_exit_reason_async(reason).await;
+        state.unregister_name();
+        state.unregister_from_registry();
+        return;
+    }
+
+    // Register name after children started successfully
+    if let Some(ref name) = state.name
+        && register_name(name, state.self_pid).is_err()
+    {
+        // Name already taken — tear down children and exit
+        state.terminate_all_children().await;
         state.unregister_from_registry();
         return;
     }
@@ -547,6 +568,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
             None => {
                 // Mailbox closed - terminate children and exit
                 state.terminate_all_children().await;
+                state.unregister_name();
                 state.unregister_from_registry();
                 return;
             }
@@ -564,6 +586,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
                 // Set exit reason for failure escalation to parent supervisor
                 crate::runtime::set_exit_reason_async(exit_reason).await;
                 state.terminate_all_children().await;
+                state.unregister_name();
                 state.unregister_from_registry();
                 return;
             }
@@ -576,6 +599,7 @@ async fn supervisor_loop(mut state: SupervisorState) {
             // If we receive an exit signal, terminate with that reason
             crate::runtime::set_exit_reason_async(reason).await;
             state.terminate_all_children().await;
+            state.unregister_name();
             state.unregister_from_registry();
             return;
         }
@@ -624,7 +648,57 @@ async fn supervisor_loop(mut state: SupervisorState) {
     }
 }
 
-/// Starts a supervisor with the given implementation.
+/// Options for starting a Supervisor.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::gen_server::Name;
+/// use ambitious::supervisor::SupervisorStartOpts;
+///
+/// let pid = SupervisorStartOpts::new(&handle, ())
+///     .name(Name::local("my_sup"))
+///     .link(parent_pid)
+///     .start::<MySupervisor>()
+///     .await?;
+/// ```
+pub struct SupervisorStartOpts<'a, A> {
+    handle: &'a RuntimeHandle,
+    arg: A,
+    name: Option<Name>,
+    link: Option<Pid>,
+}
+
+impl<'a, A: Send + 'static> SupervisorStartOpts<'a, A> {
+    /// Create start options with the given handle and init arg.
+    pub fn new(handle: &'a RuntimeHandle, arg: A) -> Self {
+        Self {
+            handle,
+            arg,
+            name: None,
+            link: None,
+        }
+    }
+
+    /// Register the supervisor under the given name after children start.
+    pub fn name(mut self, name: Name) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Link the supervisor to the given parent process.
+    pub fn link(mut self, parent: Pid) -> Self {
+        self.link = Some(parent);
+        self
+    }
+
+    /// Start the supervisor with these options.
+    pub async fn start<S: Supervisor<InitArg = A>>(self) -> Result<Pid, StartError> {
+        start_impl::<S>(self.handle, self.arg, self.name, self.link).await
+    }
+}
+
+/// Starts a supervisor with the given implementation, linked to a parent.
 ///
 /// Returns the PID of the started supervisor.
 pub async fn start_link<S: Supervisor>(
@@ -632,54 +706,7 @@ pub async fn start_link<S: Supervisor>(
     parent: Pid,
     arg: S::InitArg,
 ) -> Result<Pid, StartError> {
-    let init_result = S::init(arg);
-
-    let handle_clone = handle.clone();
-    let pid = handle.spawn_link(parent, move || {
-        let self_pid = crate::runtime::current_pid();
-
-        // Set up trap_exit so we get exit signals as messages
-        crate::runtime::with_ctx(|ctx| ctx.set_trap_exit(true));
-
-        let mut children = HashMap::new();
-        let mut child_order = Vec::new();
-
-        for spec in init_result.children {
-            let id = spec.id.clone();
-            children.insert(
-                id.clone(),
-                ChildState {
-                    spec,
-                    pid: None,
-                    monitor_ref: None,
-                },
-            );
-            child_order.push(id);
-        }
-
-        let state = SupervisorState {
-            handle: handle_clone,
-            self_pid,
-            flags: init_result.flags,
-            children,
-            child_order,
-            pid_to_id: HashMap::new(),
-            restart_times: Vec::new(),
-        };
-
-        supervisor_loop(state)
-    });
-
-    // Give the supervisor time to start
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    if handle.alive(pid) {
-        Ok(pid)
-    } else {
-        Err(StartError::InitFailed(
-            "supervisor died during init".to_string(),
-        ))
-    }
+    start_impl::<S>(handle, arg, None, Some(parent)).await
 }
 
 /// Starts a supervisor without linking.
@@ -687,10 +714,20 @@ pub async fn start<S: Supervisor>(
     handle: &RuntimeHandle,
     arg: S::InitArg,
 ) -> Result<Pid, StartError> {
+    start_impl::<S>(handle, arg, None, None).await
+}
+
+async fn start_impl<S: Supervisor>(
+    handle: &RuntimeHandle,
+    arg: S::InitArg,
+    name: Option<Name>,
+    link: Option<Pid>,
+) -> Result<Pid, StartError> {
     let init_result = S::init(arg);
 
     let handle_clone = handle.clone();
-    let pid = handle.spawn(move || {
+
+    let spawn_fn = move || {
         let self_pid = crate::runtime::current_pid();
 
         // Set up trap_exit so we get exit signals as messages
@@ -720,10 +757,17 @@ pub async fn start<S: Supervisor>(
             child_order,
             pid_to_id: HashMap::new(),
             restart_times: Vec::new(),
+            name,
         };
 
         supervisor_loop(state)
-    });
+    };
+
+    let pid = if let Some(parent) = link {
+        handle.spawn_link(parent, spawn_fn)
+    } else {
+        handle.spawn(spawn_fn)
+    };
 
     // Give the supervisor time to start
     tokio::time::sleep(Duration::from_millis(10)).await;

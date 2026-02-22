@@ -80,9 +80,6 @@ impl GenServer for JobQueue {
     type Reply = QueueReply;
 
     async fn init(args: QueueArgs) -> Init<Self> {
-        let me = ambitious::current_pid();
-        let _ = ambitious::register("job_queue".to_string(), me);
-
         let worker_sup = ambitious::whereis("worker_sup")
             .expect("worker_sup must be registered before JobQueue starts");
 

@@ -88,10 +88,14 @@ mod server_ref;
 mod traits;
 mod types;
 
+/// Pluggable registry support and named process registration.
+pub mod via;
+
 // Primary exports
-pub use server::{Error, call, cast, reply, start, start_link, stop};
+pub use server::{Error, StartOpts, call, cast, reply, start, start_link, stop};
 pub use server_ref::ServerRef;
 pub use traits::GenServer;
+pub use via::{AlreadyRegistered, Name, ViaRegistry};
 
 pub use async_trait::async_trait;
 pub use protocol::From;
@@ -108,8 +112,8 @@ pub use crate::core::{ExitReason, Pid, Ref, Term};
 /// ```
 pub mod prelude {
     pub use super::{
-        Error, ExitReason, From, GenServer, Init, Pid, Reply, ServerRef, Status, async_trait, call,
-        cast, reply, start, start_link, stop,
+        Error, ExitReason, From, GenServer, Init, Name, Pid, Reply, ServerRef, StartOpts, Status,
+        ViaRegistry, async_trait, call, cast, reply, start, start_link, stop,
     };
 }
 

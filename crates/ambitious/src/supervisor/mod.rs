@@ -64,8 +64,8 @@ mod types;
 pub mod dynamic_supervisor;
 
 pub use core::{
-    Supervisor, SupervisorInit, count_children, delete_child, restart_child, start, start_link,
-    terminate_child, which_children,
+    Supervisor, SupervisorInit, SupervisorStartOpts, count_children, delete_child, restart_child,
+    start, start_link, terminate_child, which_children,
 };
 pub use error::{DeleteError, RestartError, StartError, TerminateError};
 pub use types::{

@@ -11,6 +11,7 @@ use super::protocol::{
 };
 use super::traits::GenServer;
 use super::types::{Init, Reply, Status};
+use super::via::{Name, register_name, unregister_name};
 use crate::core::{DecodeError, ExitReason, Pid, Ref, Term};
 use crate::message::Message;
 use crate::process::global;
@@ -37,6 +38,58 @@ pub enum Error {
     /// Decode error.
     #[error("decode error: {0}")]
     Decode(#[from] DecodeError),
+    /// The process name is already registered.
+    #[error("already started")]
+    AlreadyStarted,
+}
+
+/// Options for starting a GenServer.
+///
+/// # Example
+///
+/// ```ignore
+/// use ambitious::gen_server::{StartOpts, Name};
+///
+/// let pid = StartOpts::new(42)
+///     .name(Name::local("counter"))
+///     .link()
+///     .start::<Counter>()
+///     .await?;
+/// ```
+pub struct StartOpts<A> {
+    args: A,
+    name: Option<Name>,
+    link: bool,
+}
+
+impl<A: Send + 'static> StartOpts<A> {
+    /// Create start options with the given args.
+    pub fn new(args: A) -> Self {
+        Self {
+            args,
+            name: None,
+            link: false,
+        }
+    }
+
+    /// Register the process under the given name after init succeeds.
+    pub fn name(mut self, name: Name) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Link the spawned process to the caller.
+    pub fn link(mut self) -> Self {
+        self.link = true;
+        self
+    }
+
+    /// Start the GenServer with these options.
+    ///
+    /// Returns `Error::AlreadyStarted` if a `name` was set and is already taken.
+    pub async fn start<G: GenServer<Args = A>>(self) -> Result<Pid, Error> {
+        start_impl::<G>(self.args, self.name, self.link).await
+    }
 }
 
 /// Start a GenServer process (not linked to caller).
@@ -47,17 +100,21 @@ pub enum Error {
 /// let pid = start::<Counter>(42).await?;
 /// ```
 pub async fn start<G: GenServer>(args: G::Args) -> Result<Pid, Error> {
-    start_impl::<G>(args, false).await
+    start_impl::<G>(args, None, false).await
 }
 
 /// Start a GenServer process linked to the caller.
 ///
 /// If the GenServer crashes, the caller will also crash (unless trapping exits).
 pub async fn start_link<G: GenServer>(args: G::Args) -> Result<Pid, Error> {
-    start_impl::<G>(args, true).await
+    start_impl::<G>(args, None, true).await
 }
 
-async fn start_impl<G: GenServer>(args: G::Args, link: bool) -> Result<Pid, Error> {
+async fn start_impl<G: GenServer>(
+    args: G::Args,
+    name: Option<Name>,
+    link: bool,
+) -> Result<Pid, Error> {
     use tokio::sync::oneshot;
     let (init_tx, init_rx) = oneshot::channel();
 
@@ -71,11 +128,11 @@ async fn start_impl<G: GenServer>(args: G::Args, link: bool) -> Result<Pid, Erro
             ))
         })?;
         handle.spawn_link(parent, move || async move {
-            gen_server_main::<G>(args, Some(init_tx)).await;
+            gen_server_main::<G>(args, name, Some(init_tx)).await;
         })
     } else {
         handle.spawn(move || async move {
-            gen_server_main::<G>(args, Some(init_tx)).await;
+            gen_server_main::<G>(args, name, Some(init_tx)).await;
         })
     };
 
@@ -91,30 +148,64 @@ async fn start_impl<G: GenServer>(args: G::Args, link: bool) -> Result<Pid, Erro
 /// Main entry point for a GenServer process.
 async fn gen_server_main<G: GenServer>(
     args: G::Args,
+    name: Option<Name>,
     init_tx: Option<tokio::sync::oneshot::Sender<Result<(), Error>>>,
 ) {
     let init_result = G::init(args).await;
 
     match init_result {
         Init::Ok(server) => {
+            if let Some(ref name) = name
+                && register_name(name, crate::current_pid()).is_err()
+            {
+                if let Some(tx) = init_tx {
+                    let _ = tx.send(Err(Error::AlreadyStarted));
+                }
+                return;
+            }
             if let Some(tx) = init_tx {
                 let _ = tx.send(Ok(()));
             }
             gen_server_loop(server).await;
+            if let Some(ref name) = name {
+                unregister_name(name);
+            }
         }
         Init::Continue(server, continue_arg) => {
+            if let Some(ref name) = name
+                && register_name(name, crate::current_pid()).is_err()
+            {
+                if let Some(tx) = init_tx {
+                    let _ = tx.send(Err(Error::AlreadyStarted));
+                }
+                return;
+            }
             if let Some(tx) = init_tx {
                 let _ = tx.send(Ok(()));
             }
             schedule_continue(&continue_arg);
             gen_server_loop(server).await;
+            if let Some(ref name) = name {
+                unregister_name(name);
+            }
         }
         Init::Timeout(server, duration) => {
+            if let Some(ref name) = name
+                && register_name(name, crate::current_pid()).is_err()
+            {
+                if let Some(tx) = init_tx {
+                    let _ = tx.send(Err(Error::AlreadyStarted));
+                }
+                return;
+            }
             if let Some(tx) = init_tx {
                 let _ = tx.send(Ok(()));
             }
             schedule_timeout(duration);
             gen_server_loop(server).await;
+            if let Some(ref name) = name {
+                unregister_name(name);
+            }
         }
         Init::Ignore => {
             if let Some(tx) = init_tx {

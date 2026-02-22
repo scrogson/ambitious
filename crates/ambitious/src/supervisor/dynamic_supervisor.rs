@@ -34,6 +34,7 @@
 use super::error::StartError;
 use super::types::{ChildCounts, ChildInfo, ChildSpec, ChildType, RestartType, StartChildError};
 use crate::core::{ExitReason, Pid, Ref, SystemMessage, Term};
+use crate::gen_server::via::{Name, register_name, unregister_name};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -44,12 +45,14 @@ static SUPERVISORS: once_cell::sync::Lazy<DashMap<Pid, Arc<SupervisorState>>> =
     once_cell::sync::Lazy::new(DashMap::new);
 
 /// Options for configuring a DynamicSupervisor.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DynamicSupervisorOpts {
     /// Maximum number of restarts allowed in the time period.
     pub max_restarts: u32,
     /// Time period in seconds for restart counting.
     pub max_seconds: u32,
+    /// Optional registered name for this supervisor.
+    pub name: Option<Name>,
 }
 
 impl Default for DynamicSupervisorOpts {
@@ -57,7 +60,18 @@ impl Default for DynamicSupervisorOpts {
         Self {
             max_restarts: 3,
             max_seconds: 5,
+            name: None,
         }
+    }
+}
+
+impl std::fmt::Debug for DynamicSupervisorOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicSupervisorOpts")
+            .field("max_restarts", &self.max_restarts)
+            .field("max_seconds", &self.max_seconds)
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -76,6 +90,12 @@ impl DynamicSupervisorOpts {
     /// Sets the time period for restart counting.
     pub fn max_seconds(mut self, secs: u32) -> Self {
         self.max_seconds = secs;
+        self
+    }
+
+    /// Register the supervisor under the given name after start.
+    pub fn name(mut self, name: Name) -> Self {
+        self.name = Some(name);
         self
     }
 }
@@ -100,16 +120,20 @@ struct SupervisorState {
     restart_times: Mutex<Vec<Instant>>,
     /// Whether the supervisor has been shut down.
     shutdown: Mutex<bool>,
+    /// Optional registered name.
+    name: Option<Name>,
 }
 
 impl SupervisorState {
     fn new(opts: DynamicSupervisorOpts) -> Self {
+        let name = opts.name.clone();
         Self {
             opts,
             children: DashMap::new(),
             monitor_to_pid: DashMap::new(),
             restart_times: Mutex::new(Vec::new()),
             shutdown: Mutex::new(false),
+            name,
         }
     }
 
@@ -246,11 +270,23 @@ impl SupervisorState {
 
 /// The main dynamic supervisor process loop.
 async fn dynamic_supervisor_loop(state: Arc<SupervisorState>) {
+    // Register name if configured
+    if let Some(ref name) = state.name {
+        let pid = crate::runtime::current_pid();
+        if register_name(name, pid).is_err() {
+            // Name already taken — exit immediately
+            return;
+        }
+    }
+
     loop {
         let msg = match crate::runtime::recv().await {
             Some(m) => m,
             None => {
                 state.terminate_all_children();
+                if let Some(ref name) = state.name {
+                    unregister_name(name);
+                }
                 return;
             }
         };
@@ -266,6 +302,9 @@ async fn dynamic_supervisor_loop(state: Arc<SupervisorState>) {
                 && let Err(_exit_reason) = state.handle_child_exit(pid, reason).await
             {
                 state.terminate_all_children();
+                if let Some(ref name) = state.name {
+                    unregister_name(name);
+                }
                 return;
             }
             continue;
@@ -276,6 +315,9 @@ async fn dynamic_supervisor_loop(state: Arc<SupervisorState>) {
             <SystemMessage as Term>::decode(&msg)
         {
             state.terminate_all_children();
+            if let Some(ref name) = state.name {
+                unregister_name(name);
+            }
             return;
         }
     }

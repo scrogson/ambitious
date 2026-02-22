@@ -46,9 +46,6 @@ impl GenServer for DeadLetterStore {
     type Reply = DeadLetterReply;
 
     async fn init(_args: ()) -> Init<Self> {
-        let me = ambitious::current_pid();
-        let _ = ambitious::register("dead_letter".to_string(), me);
-
         Init::Ok(DeadLetterStore {
             store: Store::new(),
         })
