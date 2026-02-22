@@ -7,10 +7,9 @@ use crate::dead_letter::DeadLetterCast;
 use crate::job::{Job, JobResult, MAX_QUEUE_DEPTH, MAX_RETRIES};
 use crate::stats::StatsCast;
 use crate::worker::{self, WorkerArgs};
-use ambitious::Message;
-use ambitious::gen_server::async_trait;
-use ambitious::gen_server::{From, GenServer, Init, Reply, Status, cast};
-use ambitious::{ExitReason, Pid};
+use ambitious::gen_server::{From, GenServer, Init, Reply, Status, async_trait, cast};
+use ambitious::supervisor::dynamic_supervisor;
+use ambitious::{ExitReason, Message, Pid};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -69,7 +68,6 @@ pub struct JobQueue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueArgs {
-    pub worker_sup: Pid,
     pub initial_workers: u32,
 }
 
@@ -85,11 +83,14 @@ impl GenServer for JobQueue {
         let me = ambitious::current_pid();
         let _ = ambitious::register("job_queue".to_string(), me);
 
+        let worker_sup = ambitious::whereis("worker_sup")
+            .expect("worker_sup must be registered before JobQueue starts");
+
         let mut queue = JobQueue {
             pending: VecDeque::new(),
             in_flight: HashMap::new(),
             idle_workers: Vec::new(),
-            worker_sup: args.worker_sup,
+            worker_sup,
             all_workers: Vec::new(),
         };
 
@@ -300,8 +301,7 @@ impl JobQueue {
     fn remove_idle_worker(&mut self) {
         if let Some(pid) = self.idle_workers.pop() {
             self.all_workers.retain(|w| *w != pid);
-            let _ =
-                ambitious::supervisor::dynamic_supervisor::terminate_child(self.worker_sup, pid);
+            let _ = dynamic_supervisor::terminate_child(self.worker_sup, pid);
         }
     }
 }
